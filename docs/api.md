@@ -155,7 +155,8 @@ eso no puede salir de un error simétrico.
 ## El timeline no es solo video
 
 > **CORREGIDO (2026-08-17):** el cuarto argumento de `createOverwriteItemAction` es la PISTA DE
-> AUDIO. En `-1` cae en A1 y PISA lo que haya ahí, y una pista que no existe se crea.
+> AUDIO. En `-1` cae en A1 y PISA lo que haya ahí, y una pista que no existe se crea: UNA, al
+> final (pidiendo A9 con seis, el audio cae en A7).
 
 `premiere_clips` lista pistas de video **y de audio** (`V2`, `A1`), y los verbos
 que apuntan a un clip aceptan esa etiqueta. No es cosmético: la primera versión
@@ -474,7 +475,7 @@ el bridge: cada una es una medición contra Premiere, no una deducción del nomb
 **Pistas y clips**
 
 - `createOverwriteItemAction(item, tick, pistaV, pistaA)`: el cuarto es la pista de AUDIO, `-1`
-  cae en A1, PISA lo que haya, y una pista de audio que no existe se crea.
+  cae en A1, PISA lo que haya, y una pista de audio que no existe se crea: UNA, al final.
 - `createMoveAction` toma un delta y SOLAPA en vez de pisar.
 - `createSetEndAction` guarda el tick exacto y el overwrite pega al cuadro: un corte entre cuadros
   deja un hueco de uno.

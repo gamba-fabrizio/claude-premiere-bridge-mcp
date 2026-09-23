@@ -1304,6 +1304,31 @@ if (!cuerpoEjec) {
   }
 
   /*
+   * Y cuando la pista de audio pedida NO EXISTIA, `insertar` RELEE el conteo despues del
+   * overwrite: Premiere crea UNA al final, y el resumen decia "A9 fuera de rango (hay 6)" con el
+   * audio adentro de A7, atribuido a "el medio los trae". Medido el 2026-09-23 en el proyecto de
+   * prueba: pidiendo A6 con tres, cayo en A4. Por POSICION y sin comentarios: el conteo se lee
+   * otra vez DESPUES del overwrite, y el resultado dice donde quedo.
+   */
+  {
+    const limpio = cuerpo.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    const overwrite = limpio.search(/createOverwriteItemAction\s*\(/);
+    const relee = overwrite !== -1 && /getAudioTrackCount\s*\(\s*\)/.test(limpio.slice(overwrite));
+    if (!relee) {
+      mal("`insertar` no relee el conteo de pistas de audio DESPUES del overwrite",
+        "con la pista pedida inexistente, Premiere crea otra al final y el audio queda ahi: sin releer, el resumen dice \"fuera de rango\" y no dice donde quedo");
+    /* Como PROPIEDAD, al principio de la linea: `\bpistaAudioReal\s*:` a secas matchea tambien el
+       ternario `? pistaAudioReal : pistaAudio`, y la guarda pasaba sin el campo. Lo agarro la
+       mutacion. */
+    } else if (!/^\s*pistaAudioReal\s*:/m.test(limpio)) {
+      mal("`insertar` no devuelve `pistaAudioReal`",
+        "quien llama no tiene como saber que el audio cayo en otra pista que la pedida");
+    } else {
+      ok("`insertar` relee las pistas de audio después del overwrite y dice dónde cayó el audio");
+    }
+  }
+
+  /*
    * Y QUIEN LLAMA a `insertar` tiene que leer su VEREDICTO, no una palabra del resumen.
    *
    * El fantasma —un clip del mismo medio que ya estaba en ese segundo, con la insercion sin

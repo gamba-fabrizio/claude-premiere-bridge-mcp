@@ -47,8 +47,9 @@ en `CLAUDE.md`.
   MUEVE el clip**: la entrada en una llamada y `desde` en otra.
 - **`borrar` y `editar` arrastran el audio vinculado**, que se deduce por medio y rango iguales;
   `desactivar` también apaga el audio socio.
-- **`pistaAudio` es 1-based (A1 es 1)**: 0 rebota, y una pista que no existe se crea. El overwrite
-  PISA también en audio, así que dos cosas en la misma pista y posición se comen.
+- **`pistaAudio` es 1-based (A1 es 1)**: 0 rebota, y una que no existe se crea, pero UNA y al final:
+  pidiendo A9 con seis, el audio cae en A7 (`pistaAudioReal` dice dónde quedó). El overwrite PISA
+  también en audio, así que dos cosas en la misma pista y posición se comen.
 - **Un medio sin video no pone nada en V**: su clip se busca en la pista de audio.
 - **`borrar` rebota desde el 6º borrado en 60 s.** Vaciar una pista es seleccionarla y Delete en
   Premiere, o `borrarSecuencia` + `armarSecuencia`. Nunca barrerla, y menos con solapes: tiró

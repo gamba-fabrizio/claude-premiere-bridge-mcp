@@ -786,7 +786,7 @@ server.registerTool(
         ),
       medio: z.string().describe("Nombre del medio, de premiere_medios. Coincidencia parcial."),
       pista: z.number().int().min(1).optional().describe("Pista como en el timeline: 1 es V1. Por defecto V1."),
-      pistaAudio: z.number().int().min(1).optional().describe("Pista de audio. Por defecto espeja la de video: insertar en V3 manda el audio a A3. Con A1 fijo, el audio PISA lo que haya ahí."),
+      pistaAudio: z.number().int().min(1).optional().describe("Pista de audio. Por defecto espeja la de video: insertar en V3 manda el audio a A3. Con A1 fijo, el audio PISA lo que haya ahí. Si no existe, Premiere crea UNA al final y el audio cae ahí —pidiendo A9 con seis, en A7—: `pistaAudioReal` dice dónde quedó."),
       segundos: z.number().min(0).optional().describe("Dónde arranca, en segundos. Por defecto el playhead.")
     })
   },
@@ -796,7 +796,7 @@ server.registerTool(
       /* `entro` es el VEREDICTO y la pista de audio es la mitad del dato: con solo los campos de
        * video, un .wav que SI entro se mostraba como "1 → 1, puesto: []". */
       return texto(r.resumen, { entro: r.entro, clipsAntes: r.clipsAntes, clipsDespues: r.clipsDespues, puesto: r.puesto,
-                                pistaAudio: r.pistaAudio, clipsAudioAntes: r.clipsAudioAntes,
+                                pistaAudio: r.pistaAudio, pistaAudioReal: r.pistaAudioReal, clipsAudioAntes: r.clipsAudioAntes,
                                 clipsAudioDespues: r.clipsAudioDespues, puestoAudio: r.puestoAudio });
     } catch (e) {
       return fallo(e);

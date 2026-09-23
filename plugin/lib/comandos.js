@@ -3310,7 +3310,7 @@ async function insertar(params) {
   const cuantasA = await sequence.getAudioTrackCount();
   const trackA = (pistaAudio >= 0 && pistaAudio < cuantasA) ? await sequence.getAudioTrack(pistaAudio) : null;
   const itemsAntesA = trackA ? await trackA.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : null;
-  const antesA = itemsAntesA ? itemsAntesA.length : null;
+  let antesA = itemsAntesA ? itemsAntesA.length : null;
   /*
    * Y QUE HABIA EN ESE SEGUNDO EN LA PISTA DE AUDIO, por el mismo motivo que en la de video.
    *
@@ -3377,7 +3377,34 @@ async function insertar(params) {
       if (Math.abs(s2 - segundos) < 0.05) puestoA.push({ nombre: String(await itemsA[i].getName()), desde: Number(s2.toFixed(3)) });
     }
   }
-  const etqA = "A" + (pistaAudio + 1);
+  /*
+   * LA PISTA DE AUDIO PEDIDA NO EXISTIA. El overwrite no la rebota: Premiere agrega UNA al final
+   * y mete el audio ahi, asi que pidiendo A9 con seis el audio cae en A7 (medido el 2026-08-29).
+   * El resumen decia "A9 fuera de rango (hay 6)", que se lee como un rechazo, y al audio de A7 lo
+   * atribuia a "el medio los trae". Se relee el conteo y se busca el clip en las pistas NUEVAS,
+   * para decir donde cayo; y si no es la pedida, decirlo tambien.
+   */
+  let pistaAudioReal = trackA && puestoA.length ? pistaAudio : null;
+  let creadasA = 0;
+  if (!trackA) {
+    const cuantasADespues = await sequence.getAudioTrackCount();
+    creadasA = Math.max(0, cuantasADespues - cuantasA);
+    for (let t = cuantasA; t < cuantasADespues && pistaAudioReal === null; t++) {
+      const itemsN = await (await sequence.getAudioTrack(t)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
+      for (let i = 0; i < itemsN.length; i++) {
+        const s3 = aSegundos(await itemsN[i].getStartTime());
+        if (Math.abs(s3 - segundos) < 0.05) {
+          pistaAudioReal = t;
+          antesA = 0;   // la pista no existia: tenia cero clips
+          despuesA = itemsN.length;
+          puestoA.push({ nombre: String(await itemsN[i].getName()), desde: Number(s3.toFixed(3)) });
+          break;
+        }
+      }
+    }
+  }
+  const etqPedida = "A" + (pistaAudio + 1);
+  const etqA = "A" + ((pistaAudioReal !== null ? pistaAudioReal : pistaAudio) + 1);
   /* "No se puso nada" ahora exige que NO haya entrado ni en video ni en audio. */
   /*
    * `entro` SALE DEL CONTEO, no de "hay un clip en ese segundo".
@@ -3410,7 +3437,14 @@ async function insertar(params) {
   return {
     resumen:
       `"${String(item.name)}" a los ${segundos.toFixed(2)}s · V${pista + 1}: ${antes} → ${items.length}` +
-      (despuesA !== null ? ` · ${etqA}: ${antesA} → ${despuesA}` : ` · ${etqA} fuera de rango (hay ${cuantasA})`) +
+      (trackA
+        ? ` · ${etqA}: ${antesA} → ${despuesA}`
+        : pistaAudioReal !== null
+          ? ` · ${etqPedida} no existía (había ${cuantasA}): Premiere creó ${etqA} y el audio quedó ahí` +
+            (pistaAudioReal !== pistaAudio ? `, NO en ${etqPedida}` : "")
+          : creadasA > 0
+            ? ` · ${etqPedida} no existía (había ${cuantasA}): Premiere creó ${creadasA} pista(s) de audio y en ninguna hay un clip en ese segundo`
+            : ` · ${etqPedida} no existe (hay ${cuantasA}) y no se creó ninguna`) +
       (excepcion ? ` · excepción: ${excepcion}` : "") +
       (puesto.length ? ` · quedó en V${pista + 1} "${puesto[0].nombre}" arrancando en ${puesto[0].desde}s` : "") +
       (puestoA.length ? ` · y en ${etqA} arrancando en ${puestoA[0].desde}s` : "") +
@@ -3451,6 +3485,11 @@ async function insertar(params) {
     clipsAntes: antes,
     clipsDespues: items.length,
     pistaAudio: pistaAudio + 1,
+    /* Donde quedo el audio: distinta de `pistaAudio` cuando la pedida no existia y Premiere
+       creo otra al final. `null` si no hay un clip en ese segundo ni en la pedida ni en una
+       creada: un medio sin audio, o una insercion que no entro. */
+    pistaAudioReal: pistaAudioReal !== null ? pistaAudioReal + 1 : null,
+    pistasAudioCreadas: creadasA,
     clipsAudioAntes: antesA,
     clipsAudioDespues: despuesA,
     audioPuesto: audioPuesto,
