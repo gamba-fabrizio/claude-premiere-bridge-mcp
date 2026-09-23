@@ -74,10 +74,13 @@ nuevo hay que instalarlos:
 herramientas/hooks/instalar.sh
 ```
 
-Hay uno solo, `post-commit`, que empuja cada commit a los remotos que tengas
-configurados. Existe porque empujar a mano se olvida: un respaldo llegó a quedar seis
-días y 24 commits atrás sin que nada lo avisara. `test.js` compara el instalado contra
-el del repo y falla si difieren.
+Hay uno solo, `post-commit`, que respalda cada commit: un push a `origin` y, si configurás
+`git config respaldo.bundle <ruta>`, un *bundle* de git —todo el historial en un archivo— en
+esa ruta, que se relee después de escribirlo. Existe porque empujar a mano se olvida: un
+respaldo llegó a quedar seis días y 24 commits atrás sin que nada lo avisara. Y es un bundle
+y no un repo porque un push a un repo adentro de una carpeta sincronizada dijo "ok" y el
+commit nunca quedó. Para recuperar: `git clone <el bundle>`. `test.js` compara el instalado
+contra el del repo y falla si difieren.
 
 **3. El servidor.**
 

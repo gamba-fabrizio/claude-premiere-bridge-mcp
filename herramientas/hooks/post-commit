@@ -1,16 +1,26 @@
 #!/bin/sh
-# Empuja cada commit a los dos remotos: `backup` (Drive) y `origin` (GitHub).
+# Respalda cada commit en dos lados: `origin` (GitHub), con un push, y Drive, con UN archivo:
+# un bundle de git con todo el historial, en la ruta de `git config respaldo.bundle`.
 #
 # POR QUE EXISTE: el 2026-09-10 el respaldo de Drive estaba 24 commits y seis
 # dias atras, y NADA lo avisaba. El problema no era el destino sino que empujar
 # es manual y se olvida.
 #
+# POR QUE DRIVE ES UN BUNDLE Y NO UN REPO (2026-09-23): hasta ese dia era un repo bare que
+# recibia push. Un push escribe los objetos en una carpeta temporal y despues los mueve, y
+# Drive sincroniza a su ritmo: el 23/9 un push dijo "ok" y el commit nunca quedo -la rama
+# apuntaba a un objeto que no existia, y el push siguiente fallo-. Y 906 de sus archivos
+# vivian solo en la nube, asi que leerlos podia tardar tanto que git se cortaba. Un archivo
+# solo, reescrito entero, es lo que Drive sincroniza bien; y se RELEE despues de escribirlo,
+# porque aquel push tambien habia dicho que si. Para recuperar: `git clone <el bundle>`.
+#
 # SINCRONICO A PROPOSITO: en background el error no se ve, y un respaldo que
 # falla callado es peor que no tenerlo -- deja creyendo que estas cubierto.
 # Un commit tarda 2-3s mas; es el precio de que el fallo sea visible.
 #
-# post-commit corre DESPUES del commit, asi que no puede abortarlo: si un push
-# falla, el commit ya esta hecho y local sigue siendo la fuente de verdad.
+# post-commit corre DESPUES del commit, asi que no puede abortarlo: si algo falla, el
+# commit ya esta hecho y local sigue siendo la fuente de verdad. Sale con 1 igual, porque
+# `respaldar.sh` lo corre a mano y ahi el fallo tiene que cortar.
 
 GIT_TERMINAL_PROMPT=0; export GIT_TERMINAL_PROMPT   # nunca colgarse pidiendo credenciales
 
@@ -18,15 +28,39 @@ rama=$(git symbolic-ref --short HEAD 2>/dev/null) || exit 0
 [ -z "$rama" ] && exit 0                            # HEAD suelto (rebase, checkout de un commit)
 
 fallo=0
-for r in backup origin; do
-    git remote get-url "$r" >/dev/null 2>&1 || continue
-    if salida=$(git push "$r" "$rama" 2>&1); then
-        echo "  push ok -> $r"
+if git remote get-url origin >/dev/null 2>&1; then
+    if salida=$(git push origin "$rama" 2>&1); then
+        echo "  push ok -> origin"
     else
         fallo=1
-        echo "  PUSH FALLO -> $r"
+        echo "  PUSH FALLO -> origin"
         echo "$salida" | sed 's/^/      /'
     fi
-done
-[ "$fallo" = "1" ] && echo "  (el commit esta hecho; corregi y volve a empujar a mano)"
-exit 0
+fi
+
+destino=$(git config respaldo.bundle)
+if [ -n "$destino" ]; then
+    tmp=$(mktemp "${TMPDIR:-/tmp}/respaldo.XXXXXX") || exit 1
+    head=$(git rev-parse HEAD)
+    if [ ! -d "$(dirname "$destino")" ]; then
+        fallo=1
+        echo "  BUNDLE FALLO: no existe $(dirname "$destino") (Drive deslogueado?)"
+    elif ! git bundle create -q "$tmp" --branches --tags ||
+         ! git bundle verify -q "$tmp" >/dev/null 2>&1; then
+        fallo=1
+        echo "  BUNDLE FALLO: no se pudo armar o verificar el bundle"
+    elif ! cp "$tmp" "$destino"; then
+        fallo=1
+        echo "  BUNDLE FALLO: no se pudo escribir $destino"
+    # Se relee LO QUE QUEDO: que el cp no haya fallado no prueba que el archivo este entero.
+    elif ! cmp -s "$tmp" "$destino" ||
+         ! git bundle list-heads "$destino" | grep -q "^$head refs/heads/$rama\$"; then
+        fallo=1
+        echo "  BUNDLE FALLO: lo que quedo en $destino no es lo que se escribio"
+    else
+        echo "  bundle ok -> $(basename "$destino") ($(git rev-parse --short HEAD), $(( $(wc -c < "$destino") / 1024 )) KB)"
+    fi
+    rm -f "$tmp"
+fi
+[ "$fallo" = "1" ] && echo "  (el commit esta hecho; corregi y volve a correr herramientas/hooks/post-commit)"
+exit $fallo

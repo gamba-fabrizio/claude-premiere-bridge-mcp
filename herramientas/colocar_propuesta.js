@@ -280,11 +280,17 @@ async function clipsDe(pista) {
     " · " + tareas.length * 4 + " operaciones ≈ " +
     Math.round(tareas.length * 4 * PAUSA / 60000) + " min");
   /* Cada pista de video necesita SU pista de audio: con -1 el audio cae en A1 y el
-   * overwrite le borra el tramo al tema. */
+   * overwrite le borra el tramo al tema. Y se corta aunque falten SOLO de audio:
+   * `insertar` crea la que falta, pero de a una y al final —pidiendo A9 con seis, el
+   * audio cae en A7—, y aca los planos entran por tiempo y no por pista, asi que cada
+   * uno crearia la siguiente en otro orden. → docs/bitacora/insertar-y-armado.md,
+   * «Pedir una pista de audio que NO EXISTE» */
   const necA = maxV + 1;
   console.log("necesita V" + maxV + " y A" + necA + " · hay V" + hayV + " y A" + hayA);
   if (maxV > hayV || necA > hayA) {
-    console.error("\nFaltan pistas. La API NO puede crearlas: agregalas a mano");
+    console.error("\nFaltan pistas, y tienen que existir ANTES de colocar: `insertar` no crea las de video,");
+    console.error("y las de audio las crea de a una y al final —pidiendo A9 con seis, el audio cae en A7—,");
+    console.error("así que quedaría en otra pista que la del plan. Agregalas a mano");
     console.error("(click derecho en un encabezado de pista → Add Tracks).");
     process.exit(1);
   }
