@@ -1,0 +1,738 @@
+#!/usr/bin/env node
+/* Dispara el Reload del panel por Keyboard Maestro y COMPRUEBA que haya entrado.
+ *
+ * Cada cambio en `plugin/` necesita un Reload en UDT. Automatizarlo con un clic es comodo y
+ * peligroso a la vez: un clic que no encuentra el boton no avisa, y las pruebas siguientes corren
+ * contra el codigo VIEJO pareciendo decir otra cosa. Es el modo de fallar numero uno del CLAUDE.md.
+ *
+ * Por eso esto NO informa "recargado" porque el macro no tiro: el panel escribe en su latido el
+ * `cargadoEn` de cuando se cargo, y acá se espera a que ese sello sea POSTERIOR al archivo mas
+ * nuevo de `plugin/`. Si no llega, se dice que no entro.
+ *
+ *   node herramientas/recargar.js              dispara el macro y comprueba
+ *   node herramientas/recargar.js --mirar     SOLO mira si el panel esta al dia
+ *   node herramientas/recargar.js "Otro macro"
+ *
+ * El modo `--mirar` es el que vale aunque no haya macro: saber que el panel esta desactualizado
+ * ya evita el error caro —probar contra codigo viejo y creerle—. Automatizar el clic solo ahorra
+ * cinco segundos; SABER es lo que evita perder una tarde.
+ */
+const fs = require("fs"), path = require("path"), { execFile } = require("child_process");
+
+const RAIZ = path.join(__dirname, "..");
+const LATIDO = path.join(RAIZ, "intercambio", "latido.json");
+const args = process.argv.slice(2);
+const SOLO_MIRAR = args.indexOf("--mirar") !== -1;
+/*
+ * `--reiniciar`: la unica forma de recargar el plugin cuando esta INSTALADO.
+ *
+ * Instalado, el panel lee sus archivos AL ARRANCAR Premiere, asi que el macro de UDT no aplica
+ * y el reinicio ES la recarga. Y hasta hoy eso no se podia hacer sin el editor: Premiere NO
+ * atiende su propio `quit` por AppleEvent —contesta `get name` sin problema pero `quit` y
+ * `quit saving no` dan timeout (-1712) y la app sigue abierta 60s despues— y `osascript` no
+ * puede simular un Cmd+Q porque no tiene Accesibilidad ("is not allowed to send keystrokes").
+ *
+ * Lo que SI funciona es un macro de Keyboard Maestro, porque KM ya tiene Accesibilidad —es como
+ * clickea el boton de UDT—. Medido el 2026-09-05: cerro en 2 segundos y SIN escribir dump, o sea
+ * limpio, a diferencia de `pkill`, que cierra pero deja el dialogo de crash y un dump de
+ * terminacion por señal.
+ */
+const REINICIAR = args.indexOf("--reiniciar") !== -1;
+const DESTRABAR = args.indexOf("--destrabar") !== -1;
+const MACRO_CERRAR = "Cerrar Premiere";
+/*
+ * CUANTO SE ESPERA A QUE PREMIERE SE VAYA, y por que 180 y no 60.
+ *
+ * Eran 60s, y ese numero salia de un proyecto liviano. Medido el 2026-09-21 con el de un videoclip
+ * —483 medios, una secuencia de 227 clips— Premiere tardo MAS de 60s: a los 60 todavia
+ * estaba escribiendo el .prproj, y a los ~160 ya no habia ningun proceso. La espera se
+ * vencia, la herramienta informaba que el cierre habia fallado, y —lo caro— TRABABA EL
+ * TRANSPORTE de un reinicio que en realidad salio bien.
+ *
+ * 180 NO ES UN BORDE MEDIDO. No se sabe cuanto tarda el proyecto mas pesado; lo unico
+ * medido es que 60 es poco para uno de 483 medios. El numero es holgura, no una medicion,
+ * y por eso el tope solo no alcanza: ver `GUARDANDO_S`.
+ */
+const TOPE_CIERRE_S = 180;
+/*
+ * Y LA ESPERA NO ES CIEGA. El tiempo que Premiere gasta al salir lo gasta GUARDANDO, y eso
+ * se ve desde afuera: el mtime del .prproj cambia. Si cambio hace menos de esto, esta
+ * trabajando y hay que dejarlo; si hace rato que no lo toca Y sigue vivo, ahi si algo lo
+ * tiene frenado y corresponde mirar la ventana.
+ *
+ * Es la diferencia entre "esta tardando" y "esta trabado", que la version de 60s no hacia
+ * y por eso ponia la traba sobre un cierre sano.
+ */
+const GUARDANDO_S = 10;
+const MACRO = args.filter((a) => a !== "--mirar" && a !== "--reiniciar" && a !== "--destrabar")[0] || "Reload Bridge";
+/* Y el macro para CARGARLO de cero, que no es el mismo: en UDT el boton dice `Load` cuando el
+ * plugin no esta corriendo y `Reload` cuando si. Los macros clickean POR IMAGEN, asi que
+ * disparar "Reload Bridge" con el panel muerto no encuentra nada y falla en silencio —
+ * exactamente lo que paso el 2026-09-01: se reporto "el macro no encontro el boton" cuando el
+ * problema era que se estaba pidiendo el macro equivocado. */
+const MACRO_CARGA = "Load Bridge";
+
+/*
+ * LOS MACROS CLICKEAN POR IMAGEN, asi que UDT tiene que estar AL FRENTE y con su ventana
+ * visible: si no, no hay boton en pantalla y el click no encuentra nada. El macro corre, KM
+ * no tira error, y el panel nunca arranca — y la herramienta informaba "no arrancó en 120s",
+ * que le echa la culpa al panel cuando el problema es la ventana.
+ *
+ * Medido el 2026-09-02: con Claude al frente, "Load Bridge" no hace nada. Y desde acá NO se
+ * puede traer UDT adelante: ni `tell application ... to activate` ni `open -a` la levantan
+ * —probadas las dos— y `System Events` no tiene acceso de asistencia para forzarlo.
+ *
+ * Asi que lo unico honesto es MIRAR y decirlo antes de esperar dos minutos al vacio.
+ */
+function alFrente() {
+  try {
+    return require("child_process").execFileSync("osascript",
+      ["-e", 'tell application "System Events" to get name of first application process whose frontmost is true'],
+      { encoding: "utf8", timeout: 8000 }).trim();
+  } catch (e) { return null; }
+}
+function corriendo(patron) {
+  try {
+    require("child_process").execFileSync("pgrep", ["-f", patron], { encoding: "utf8", timeout: 5000 });
+    return true;
+  } catch (e) { return false; }
+}
+
+/*
+ * EL FLUJO EN FRIO, MEDIDO EL 2026-09-03 CON TODO CERRADO.
+ *
+ * La causa de que "Load Bridge" no anduviera NO era el macro ni el tiempo de arranque de UDT:
+ * era EL FOCO. Con UDT al frente en el instante del click, el panel arranco en **1 segundo**.
+ *
+ * Y eso se pudo automatizar porque una afirmacion del CLAUDE.md era falsa: decia que desde aca
+ * NO se puede traer UDT adelante, con tres metodos "probados". `activate` SI funciona — lo que
+ * no funciona es sobre UDT **cerrado**, que es como se habia medido. Con UDT corriendo:
+ *
+ *     tell application "Adobe UXP Developer Tools" to activate   ->  queda al frente
+ *
+ * Asi que el orden es: Premiere (bloquea, porque necesita un proyecto que elige el usuario),
+ * abrir UDT si hace falta, ESPERARLO, traerlo al frente, y recien ahi el macro.
+ *
+ * La espera es FIJA y se dice que lo es: `System Events` no tiene acceso de asistencia en esta
+ * maquina —`get count of windows` contesta "not allowed assistive access"— asi que no hay forma
+ * de detectar que UDT termino de inicializar. Un numero fijo y declarado es mas honesto que un
+ * chequeo que no puede mirar.
+ */
+const ESPERA_UDT_MS = 9000;
+
+function exigirPremiere() {
+  if (corriendo("Adobe Premiere Pro")) return true;
+  console.error("  PREMIERE NO ESTA ABIERTO. El panel del bridge corre ADENTRO de Premiere:\n" +
+    "  sin host no hay nada que cargar, y el macro clickearia al vacio.\n" +
+    "  Abri Premiere CON UN PROYECTO y volve a correr esto.");
+  return false;
+}
+
+/*
+ * LA SESION REMOTA, medida con los dos controles el 2026-09-16.
+ *
+ * Con una sesion remota abierta Keyboard Maestro no inyecta eventos, y este archivo ya tenia eso
+ * anotado como la primera de las causas de "el macro no anduvo". Lo que NO servia era como se
+ * detectaba: contar conexiones ESTABLISHED por PID daba **0 con el editor conectado**, porque
+ * `lsof -nPi -a -p <pid>` devuelve CERO lineas para esos procesos — la conexion no vive en ellos.
+ *
+ * Lo que si se ve, medido:
+ *
+ *   desconectado   2 procesos JumpConnect, los dos con ppid 1 (demonios, dias de vida)
+ *   conectado      los mismos 2 MAS dos hijos, con ppid = un JumpConnect y 3 minutos de vida
+ *
+ * O sea que la marca es **un proceso cuyo padre es OTRA instancia del mismo binario**. No es
+ * "tiene hijos" a secas: Chrome Remote Desktop tiene `remoting_me2me_host` colgando de
+ * `remoting_me2me_host_service` de forma permanente, y ahi los nombres son DISTINTOS.
+ *
+ * ALCANCE, y conviene decirlo: esto esta medido para Jump Desktop y nada mas. Para las otras
+ * familias no hay medicion, asi que un `false` significa "no vi una sesion de Jump", no "no hay
+ * nadie conectado". Por eso el que llama no frena con esto: lo NOMBRA como sospecha.
+ *
+ * Y `parsecd` salio de la lista: es un proceso del sistema (CoreParsec.framework), no el Parsec
+ * de escritorio remoto. Estaba ahi por el nombre.
+ */
+function sesionRemotaJump(salidaPs) {
+  try {
+    /* La salida de `ps` se puede inyectar para poder probar LAS DOS direcciones sin depender de
+     * que haya o no una sesion abierta en la maquina donde corre el test. */
+    const o = salidaPs !== undefined ? salidaPs
+      : require("child_process").execFileSync("ps", ["-eo", "pid=,ppid=,comm="],
+        { encoding: "utf8", timeout: 5000 });
+    const filas = o.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
+      const m = l.match(/^(\d+)\s+(\d+)\s+(.*)$/);
+      return m ? { pid: m[1], ppid: m[2], comm: m[3] } : null;
+    }).filter(Boolean);
+    const porPid = {};
+    for (const f of filas) porPid[f.pid] = f;
+    return filas.some((f) => /JumpConnect$/.test(f.comm) &&
+                             porPid[f.ppid] && porPid[f.ppid].comm === f.comm);
+  } catch (e) { return false; }
+}
+
+/*
+ * LA PANTALLA BLOQUEADA, que es la CUARTA causa distinta de "el macro no anduvo".
+ *
+ * Con el login screen puesto, Keyboard Maestro NO puede inyectar teclas en ninguna app: el
+ * macro corre, KM no tira error, y Premiere no se entera. El 2026-09-16 costó TRES intentos y
+ * dos esperas de 60s, con el informe culpando al macro y al cartel — y encima dejando el
+ * transporte trabado, que es lo correcto para un cierre que no termina pero un desperdicio
+ * cuando la causa se puede leer en un comando.
+ *
+ * Las otras tres ya estaban anotadas: la sesión remota, el macro equivocado (`Load` con el panel
+ * caído contra `Reload`) y la ventana de UDT sin foco.
+ *
+ * `CGSSessionScreenIsLocked` sale de `ioreg` y no necesita Quartz — el `python3` del sistema no
+ * lo trae, y ese fue el primer intento de detectarlo, que fallo por importar un modulo ausente.
+ *
+ * Y sólo BLOQUEA cuando la respuesta es un Yes explícito: si la clave no aparece —otra versión
+ * de macOS, otro formato— se sigue adelante. Una guarda que frena porque no pudo averiguar
+ * rechaza uso correcto, que es su peor modo de fallo y la regla de este repo.
+ */
+function pantallaBloqueada() {
+  try {
+    const o = require("child_process").execFileSync("ioreg", ["-n", "Root", "-d1", "-r"],
+      { encoding: "utf8", timeout: 5000 });
+    const m = o.match(/CGSSessionScreenIsLocked"?\s*=\s*(\w+)/);
+    return !!(m && /^(Yes|true)$/i.test(m[1]));
+  } catch (e) { return false; }
+}
+
+function exigirPantallaDesbloqueada(paraQue) {
+  if (!pantallaBloqueada()) return true;
+  console.error(`  LA PANTALLA ESTA BLOQUEADA, asi que ${paraQue} no va a llegar.`);
+  console.error("  Keyboard Maestro no puede inyectar teclas con el login screen puesto: el macro");
+  console.error("  corre, KM no tira error, y la app no se entera. NO disparo nada.");
+  console.error("  Desbloquea la pantalla y volve a correr esto.");
+  return false;
+}
+
+function osa(script, timeout) {
+  try {
+    return require("child_process").execFileSync("osascript", ["-e", script],
+      { encoding: "utf8", timeout: timeout || 8000 }).trim();
+  } catch (e) { return null; }
+}
+
+/*
+ * LA VENTANA DEL FRENTE, PREGUNTADA A KEYBOARD MAESTRO (medido el 2026-09-18, cableado el 09-19).
+ *
+ * Es la unica via medida para ver un CARTEL de Premiere desde aca, y hace falta porque un modal
+ * es INVISIBLE por el panel: esta medido que con el dialogo en pantalla `estado` contesta su
+ * resumen completo. Desde este lado no se nota nada y se sigue trabajando sobre un Premiere
+ * trabado — el 2026-09-11 eso termino con la carpeta de un proyecto todavia abierto borrada.
+ *
+ * `%WindowName%1%` devuelve el titulo de la ventana del frente de la app del frente. Registrado
+ * leyendo una vez por segundo mientras el editor abria un dialogo a proposito:
+ *
+ *     antes         /Users/.../Proyecto.prproj *|Adobe Premiere
+ *     CON EL MODAL  Project Settings|Adobe Premiere
+ *     despues       /Users/.../Proyecto.prproj *|Adobe Premiere
+ *
+ * OJO CON EL `|Adobe Premiere`: NO lo agrega el token, es parte del titulo de la ventana de
+ * Premiere. Medido el 2026-09-19 con el control que faltaba —otra app al frente— y WhatsApp
+ * devolvio `WhatsApp` pelado, sin pipe. O sea que QUE app tiene el foco se pregunta con
+ * `alFrente()`, y sacarlo de este string habria andado solo en Premiere.
+ *
+ * Y NO puede leer una app que no tenga el foco. Es el limite y no tiene vuelta: este repo tiene
+ * medido que `activate` por AppleEvent contra Premiere da TIMEOUT, asi que no se lo puede traer
+ * adelante para mirarlo. Encaja igual donde se lo usa, porque el macro de cerrar YA activa
+ * Premiere antes del Cmd+Q.
+ */
+/*
+ * Hace cuantos segundos que cambio el archivo. `null` si no se pudo leer — y el que llama
+ * TIENE que distinguir ese null de un numero grande: "no pude mirar" no es "hace rato".
+ * Ese es el lado por el que este repo ya pago un cuadro negro y un clip dado por activo.
+ */
+function haceCuantoCambio(ruta) {
+  try { return (Date.now() - fs.statSync(ruta).mtimeMs) / 1000; }
+  catch (e) { return null; }
+}
+
+function ventanaAlFrente() {
+  /* Se comprueba que KM Engine este corriendo en vez de dejar que AppleScript lo LANCE: un
+     diagnostico no abre aplicaciones. Y de paso, que no este es por si solo una causa de que
+     ningun macro ande, que es justo lo que se esta tratando de averiguar. */
+  if (!corriendo("Keyboard Maestro Engine")) {
+    return { ok: false, porque: "Keyboard Maestro Engine NO esta corriendo" };
+  }
+  const app = alFrente();
+  const t = osa('tell application "Keyboard Maestro Engine" to process tokens "%WindowName%1%"', 8000);
+  if (t === null) return { ok: false, porque: "Keyboard Maestro no contesto el token de ventana", app: app };
+  return { ok: true, app: app, titulo: t };
+}
+
+/*
+ * Y LA PREGUNTA QUE IMPORTA: lo que esta al frente de Premiere, es su proyecto, o es un cartel?
+ *
+ * El discriminador es `.prproj` EN EL TITULO, no el pipe: un dialogo trae su propio nombre
+ * ("Project Settings") y la ventana del proyecto trae la ruta del archivo.
+ *
+ * NO EXISTE la respuesta "no hay cartel". Las tres posibles son: es la ventana del proyecto,
+ * hay OTRA ventana —y se dice cual—, o NO SE PUDO MIRAR. Devolver la duda como "esta todo bien"
+ * seria el falso negativo que este repo ya pago cinco veces, y aca el daño concreto es seguir
+ * trabajando sobre un Premiere trabado creyendo que contesta porque esta sano.
+ *
+ * De regalo sale el `*` del titulo, que significa CAMBIOS SIN GUARDAR: es justo lo que el panel
+ * no puede decir, porque esta medido que `Project.DIRTY` nunca dispara.
+ */
+function ventanaDePremiere() {
+  const v = ventanaAlFrente();
+  if (!v.ok) return { miro: false, porque: v.porque };
+  if (!v.app || !/Premiere/i.test(v.app)) {
+    return { miro: false,
+      porque: `el foco esta en "${v.app || "?"}" y no en Premiere, y a Premiere no se lo puede ` +
+              "traer adelante desde aca (`activate` por AppleEvent da TIMEOUT, medido)" };
+  }
+  const titulo = v.titulo || "";
+  return {
+    miro: true,
+    esProyecto: /\.prproj/i.test(titulo),
+    /* el asterisco va pegado a la extension: "....prproj *|Adobe Premiere" */
+    sucio: /\.prproj\s*\*/i.test(titulo),
+    titulo: titulo,
+  };
+}
+
+async function prepararUDT() {
+  if (!corriendo("UXP Developer")) {
+    console.log("  UDT no esta abierto, lo abro…");
+    osa('tell application "Adobe UXP Developer Tools" to activate', 15000);
+    for (let i = 0; i < 20 && !corriendo("UXP Developer"); i++) await dormir(1000);
+    if (!corriendo("UXP Developer")) {
+      console.error("  no pude abrir UDT. Abrilo a mano y volve a correr esto.");
+      return false;
+    }
+    /* La primera apertura INICIALIZA y el click no corre si se dispara antes. Dicho por el
+     * editor y confirmado: el macro abrio UDT y el panel no cargo. No se puede detectar, se
+     * espera. */
+    console.log(`  esperando ${ESPERA_UDT_MS / 1000}s a que UDT inicialice (no es detectable: ` +
+                "System Events no tiene acceso de asistencia)…");
+    await dormir(ESPERA_UDT_MS);
+  }
+  /* AL FRENTE, porque los macros clickean por IMAGEN. */
+  osa('tell application "Adobe UXP Developer Tools" to activate');
+  await dormir(1200);
+  const f = alFrente();
+  if (f && !/UXP Developer/i.test(f)) {
+    console.error(`  no pude traer UDT al frente (quedo "${f}"). Traelo a mano y volve a correr esto.`);
+    return false;
+  }
+  console.log("  UDT al frente.");
+  return true;
+}
+
+/* El estado del entorno EN EL MOMENTO DEL FALLO, que es cuando explica algo. */
+function porQueNoAndubo() {
+  /* KM Engine PRIMERO: sin el no anda NINGUN macro, y es lo mas barato de comprobar. Estaba
+     descartado a mano en cada diagnostico y nunca escrito acá, asi que cada vez se volvia a
+     mirar. */
+  if (!corriendo("Keyboard Maestro Engine")) {
+    return "y KEYBOARD MAESTRO ENGINE NO ESTA CORRIENDO: sin el no se dispara ningun macro. " +
+           "Abrí Keyboard Maestro y reintentá.";
+  }
+  if (sesionRemotaJump()) {
+    return "y hay una SESION REMOTA de Jump Desktop abierta: Keyboard Maestro no inyecta eventos " +
+           "con una sesion remota. Probá desde la máquina.";
+  }
+  if (pantallaBloqueada()) {
+    return "y LA PANTALLA ESTA BLOQUEADA: con el login screen puesto Keyboard Maestro no puede " +
+           "inyectar teclas en ninguna app. Desbloquea y reintenta.";
+  }
+  const udt = corriendo("UXP Developer");
+  const f = alFrente();
+  if (!udt) return "y UDT NI SIQUIERA ESTA ABIERTO.";
+  if (f && !/UXP Developer/i.test(f)) {
+    /* Si lo que le robo el foco a UDT es PREMIERE, se puede decir con QUE ventana — y un
+       cartel suyo explica de una por que no se pudo activar UDT. Un nombre de app deja a
+       alguien buscando en la pantalla; el titulo del dialogo lo manda directo. */
+    const v = /Premiere/i.test(f) ? ventanaDePremiere() : null;
+    return `y al frente quedo "${f}": los macros clickean por IMAGEN, asi que el click no ` +
+           "encontro el boton. Algo le robo el foco a UDT." +
+           (v && v.miro && !v.esProyecto
+             ? ` Y es un CARTEL de Premiere: "${v.titulo}". Resolvelo —puede estar en otro monitor.`
+             : "");
+  }
+  return "UDT esta abierto y al frente, asi que el boton no estaba donde el macro lo busca: " +
+         "fijate que UDT este en la fila del plugin y que la ventana no este tapada.";
+}
+
+const masNuevo = () => {
+  const dir = path.join(RAIZ, "plugin");
+  let t = 0;
+  const rec = (d) => {
+    for (const n of fs.readdirSync(d)) {
+      const p = path.join(d, n), st = fs.statSync(p);
+      if (st.isDirectory()) rec(p);
+      else if (/\.(js|html|json)$/.test(n)) t = Math.max(t, st.mtimeMs);
+    }
+  };
+  rec(dir);
+  return t;
+};
+const leerLatido = () => {
+  try { return JSON.parse(fs.readFileSync(LATIDO, "utf8")); } catch (e) { return null; }
+};
+const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function reiniciarPremiere() {
+  const { enviar, ponerTraba, sacarTraba } = require(path.join(RAIZ, "server", "bridge.js"));
+  /*
+   * PRIMERO todos los proyectos abiertos, no solo el del foco.
+   *
+   * `guardar` guarda el que TIENE FOCO, y eso alcanzaba mientras hubiera uno solo. Con dos
+   * abiertos, el Cmd+Q saca el cartel de "guardar antes de cerrar" DEL OTRO, ese cartel
+   * BLOQUEA el quit, y esta herramienta se cuelga los 45s y termina informando que el macro
+   * no anduvo — el informe equivocado que este repo ya pago tres veces con otras causas.
+   * Paso el 2026-09-11 con un proyecto descartable abierto al lado del bueno.
+   *
+   * Los que tienen archivo se GUARDAN. Los HUERFANOS —sin ruta, o con la ruta ya borrada—
+   * no se pueden guardar y son exactamente los que van a sacar el cartel, asi que se cierran
+   * descartando. Que el archivo exista en disco lo mira ESTE lado: el panel no ve el disco.
+   */
+  /* Cuantos habia ABIERTOS. Se guarda afuera del try porque lo necesita la decision de
+   * mas abajo: con CERO proyectos, `guardar` tira y eso NO es un fallo. */
+  let cuantosAbiertos = null;
+  try {
+    /*
+     * EL ORDEN ES EL ARREGLO, y esta invertido respecto de la primera version.
+     *
+     * Aquella pedia "guarda todos" y DESPUES cerraba los huerfanos. Pero un proyecto cuyo
+     * archivo fue borrado sigue teniendo RUTA, asi que entraba en el guardado y Premiere
+     * abria "Project Modified" — el modal que todo esto existe para evitar, producido por
+     * el propio arreglo. Verificado el 2026-09-11 con un descartable sin archivo.
+     *
+     * Ahora: se LEE la lista, el que ve el disco (este lado) separa los huerfanos, se los
+     * CIERRA descartando, y recien entonces se pide guardar, nombrando las rutas una por una.
+     */
+    const pa = await enviar("proyectosAbiertos", {}, 120000);
+    const abiertos = pa.proyectos || [];
+    cuantosAbiertos = abiertos.length;
+    if (abiertos.length > 1) console.log(`  ${abiertos.length} proyectos abiertos`);
+
+    const huerfanos = abiertos.filter((x) => !x.ruta || !fs.existsSync(x.ruta));
+    for (const h of huerfanos) {
+      try {
+        const c = await enviar("cerrarProyecto", { cual: h.nombre, descartar: true }, 120000);
+        console.log(`  "${h.nombre}" no tiene archivo en disco -> ${c.cerro ? "CERRADO descartando" : "NO se pudo cerrar"}`);
+      } catch (e) {
+        console.error(`  huerfano "${h.nombre}": no se pudo cerrar (${String(e.message).split("\n")[0].slice(0, 90)})`);
+        console.error("  el Cmd+Q probablemente se trabe con su cartel de guardar.");
+      }
+    }
+
+    /* Y RECIEN AHORA guardar, y solo los que de verdad tienen archivo. */
+    const guardables = abiertos.filter((x) => x.ruta && fs.existsSync(x.ruta)).map((x) => x.ruta);
+    if (guardables.length) {
+      const g = await enviar("proyectosAbiertos", { guardar: guardables }, 300000);
+      const fallaron = (g.proyectos || []).filter((x) => x.guardado && x.guardado !== "sí");
+      if (fallaron.length) {
+        console.error(`  OJO: no se pudieron guardar: ${fallaron.map((x) => `"${x.nombre}" (${x.guardado})`).join(", ")}`);
+      } else if (guardables.length > 1) {
+        console.log(`  guardados los ${guardables.length} que tienen archivo`);
+      }
+    }
+  } catch (e) {
+    console.error(`  no pude preparar los proyectos abiertos: ${String(e.message).split("\n")[0].slice(0, 90)}`);
+    console.error("  sigo, pero si hay otro proyecto sucio el Cmd+Q se va a trabar.");
+  }
+
+  /* La ruta sale de `guardar`, que ademas GUARDA: es lo unico que hace que cerrar sea gratis.
+   *
+   * CERO PROYECTOS ABIERTOS NO ES UN FALLO, y esta guarda lo trataba como tal. Con Premiere
+   * abierto y sin proyecto, `guardar` tira "No hay un proyecto abierto" y la version anterior
+   * contestaba "no cierro nada, guardá vos y volvé a intentar" — pidiendo guardar algo que no
+   * existe. Rechazar uso correcto es el peor modo de fallo de una guarda, y este es el caso mas
+   * seguro que hay: no hay nada que perder ni nada que reabrir.
+   *
+   * Se decide por el CONTEO de `proyectosAbiertos`, no por el texto del error: juzgar por el
+   * mensaje es lo que este repo tiene prohibido desde el principio. Y si el conteo NO se pudo
+   * leer (`null`), se mantiene el rechazo — la duda no se resuelve a favor de cerrar. */
+  let ruta = null;
+  const sinProyecto = cuantosAbiertos === 0;
+  try {
+    const g = await enviar("guardar", {}, 120000);
+    ruta = g.ruta || null;
+    console.log(`  guardado: ${ruta || "(sin ruta en la respuesta)"}`);
+  } catch (e) {
+    if (sinProyecto) {
+      console.log("  no hay ningún proyecto abierto: nada que guardar y nada que reabrir.");
+    } else {
+      console.error(`  NO se pudo guardar antes de cerrar: ${e.message.split("\n")[0]}`);
+      console.error("  no cierro nada. Guardá vos y volvé a intentar.");
+      return false;
+    }
+  }
+  if (!ruta && !sinProyecto) {
+    console.error("  `guardar` no devolvió la ruta del proyecto, así que no sabría cuál reabrir. No cierro.");
+    return false;
+  }
+
+  if (!exigirPantallaDesbloqueada("el Cmd+Q")) return false;
+
+  const marca = Date.now();
+  if (!osa(`tell application "Keyboard Maestro Engine" to do script "${MACRO_CERRAR}"`, 20000) &&
+      corriendo("MacOS/Adobe Premiere Pro")) {
+    /* `do script` devuelve "missing value" cuando anda, asi que no se juzga por el retorno: se
+     * juzga por si el proceso se fue. Lo de siempre en este repo. */
+  }
+  console.log(`  macro "${MACRO_CERRAR}" disparado, esperando a que Premiere cierre…`);
+  let cerro = false;
+  let mtimeVisto = haceCuantoCambio(ruta);
+  for (let i = 0; i < TOPE_CIERRE_S; i++) {
+    if (!corriendo("MacOS/Adobe Premiere Pro")) { cerro = true; console.log(`  cerró a los ${i}s`); break; }
+    /* Se informa cada vez que el .prproj cambia: eso es Premiere guardando, y verlo en vivo
+       es lo que evita creer que esta colgado cuando esta trabajando. */
+    const h = haceCuantoCambio(ruta);
+    if (h !== null && mtimeVisto !== null && h < mtimeVisto) {
+      console.log(`  …sigue GUARDANDO: el .prproj cambió recién (van ${i}s)`);
+    }
+    if (h !== null) mtimeVisto = h + 1;
+    await dormir(1000);
+  }
+  if (!cerro) {
+    /*
+     * ¿ESTA TARDANDO O ESTA TRABADO? Son dos cosas distintas y la version de 60s las
+     * confundia: daba las dos por "el macro no anduvo" y trababa el transporte.
+     *
+     * El dato que las separa es el mtime del .prproj. Si Premiere lo toco recien, esta
+     * guardando y el cierre va en camino — trabar ahi es romper un reinicio sano. Si hace
+     * rato que no lo toca y el proceso sigue vivo, algo lo tiene frenado.
+     */
+    const hace = haceCuantoCambio(ruta);
+    const seguiaGuardando = hace !== null && hace < GUARDANDO_S;
+    if (seguiaGuardando) {
+      console.error(`  Premiere sigue abierto tras ${TOPE_CIERRE_S}s, PERO TODAVIA ESTA GUARDANDO:`);
+      console.error(`  tocó el .prproj hace ${hace.toFixed(0)}s. Eso no es un cartel ni un macro roto,`);
+      console.error("  es un proyecto pesado terminando de escribir.");
+      console.error("  NO trabo el transporte y NO reabro: esperá un minuto y volvé a correr esto.");
+      return false;
+    }
+    console.error(`  Premiere SIGUE ABIERTO tras ${TOPE_CIERRE_S}s` +
+      (hace === null
+        ? " y NO se pudo leer el .prproj, así que no sé si estaba guardando."
+        : ` y hace ${hace.toFixed(0)}s que no toca el .prproj: no está guardando.`));
+    /*
+     * Y ACA SE MIRA, en vez de adivinar. Hasta el 2026-09-19 esta rama decia "PUEDE haber un
+     * diálogo esperando en pantalla" y dejaba las dos causas —el cartel y el macro— sin separar.
+     * Eso importa porque mandan a lugares distintos: un cartel se resuelve en pantalla, un macro
+     * roto se resuelve en Keyboard Maestro, y buscar en el lado equivocado ya costo tres
+     * intentos y dos esperas de 60s.
+     *
+     * Es gratis aca: el macro ya activo Premiere para mandarle el Cmd+Q, y un modal se queda
+     * con el foco, asi que la condicion que el lector necesita esta puesta.
+     */
+    const v = ventanaDePremiere();
+    if (v.miro && !v.esProyecto) {
+      console.error(`  HAY UN CARTEL: al frente de Premiere esta "${v.titulo}", que no es su proyecto.`);
+      console.error("  Eso es lo que bloquea el Cmd+Q. Resolvelo en pantalla —puede estar en OTRO MONITOR,");
+      console.error("  aca son tres— y despues volvé a correr esto.");
+    } else if (v.miro) {
+      console.error(`  La ventana al frente de Premiere es su proyecto ("${v.titulo}"),`);
+      console.error(`  asi que NO hay un cartel tapando el Cmd+Q: mirá el macro "${MACRO_CERRAR}",`);
+      console.error("  que exista y esté habilitado.");
+    } else {
+      console.error(`  NO pude mirar si hay un cartel: ${v.porque}.`);
+      console.error(`  Asi que queda sin separar: o hay un diálogo en pantalla, o el macro`);
+      console.error(`  "${MACRO_CERRAR}" no existe / está deshabilitado.`);
+    }
+    console.error("  NO lo fuerzo con pkill:");
+    console.error("  eso le deja a Premiere un dump de terminación anormal y al usuario un diálogo de crash.");
+    /*
+     * Y ADEMAS SE TRABA EL TRANSPORTE. Esto es lo que faltaba el 2026-09-11: el cierre fallo,
+     * el cartel quedo en pantalla —posiblemente en otro monitor—, EL PANEL SIGUIO LATIENDO Y
+     * CONTESTANDO, y se siguio trabajando sobre un Premiere a medio cerrar hasta borrar la
+     * carpeta de un proyecto que todavia estaba abierto.
+     *
+     * Informar no alcanzaba: el informe se lee y se sigue igual. La traba hace que TODA
+     * llamada siguiente rebote hasta que alguien mire la pantalla.
+     */
+    /* Y EL HALLAZGO VA EN LA TRABA, que es el texto que ve TODA llamada que rebote despues.
+       Sin esto la traba decia "lo mas probable es que haya un cartel" — una hipotesis, escrita
+       en el unico lugar que alguien iba a leer. Con el titulo adentro, nombra el dialogo. */
+    const puesta = ponerTraba(
+      `se pidio cerrar Premiere y a los ${TOPE_CIERRE_S}s seguia abierto y SIN guardar. ` +
+      (v.miro && !v.esProyecto ? `HAY UN CARTEL ABIERTO: "${v.titulo}" — resolvelo en pantalla. `
+        : v.miro ? "La ventana al frente ES el proyecto, asi que el cartel NO es la causa: mirá el macro. "
+        : `No se pudo mirar si hay un cartel (${v.porque}). `) +
+      `Proyecto en reinicio: ${ruta}`);
+    console.error(puesta
+      ? "  TRANSPORTE TRABADO: toda llamada al bridge va a rebotar hasta que resuelvas el cartel\n" +
+        "  en Premiere y corras:  node herramientas/recargar.js --destrabar"
+      : "  (no se pudo dejar la marca de traba, ojo)");
+    return false;
+  }
+
+  /*
+   * ESPERAR A LOS AUXILIARES, NO SOLO AL PROCESO PRINCIPAL (2026-09-11).
+   *
+   * Antes esto reabria 2 segundos despues de que el proceso principal desapareciera.
+   * Premiere deja procesos auxiliares terminando —CEP, el host de UXP, el motor de
+   * medios— y reabrir encima de ellos deja la app a medio inicializar: sale un modal
+   *
+   *     "Failed to initialize — An unexpected error occurred in SelectionFoundation."
+   *
+   * Premiere despues ANDA: abre el proyecto, edita, exporta, y el panel late. Lo que rompe
+   * es el ciclo de esta herramienta, porque **un modal BLOQUEA el Cmd+Q**: el siguiente
+   * `--reiniciar` se cuelga los 60s enteros y le echa la culpa al macro, que esta bien.
+   *
+   * Y el modal puede caer en OTRO MONITOR. Aca son tres pantallas y salio en la 1 con
+   * Premiere trabajando en la 3, asi que desde el teclado no se ve y parece que no pasa
+   * nada — hasta que el reinicio siguiente falla sin motivo aparente.
+   *
+   * A mano nunca se veia porque entre cerrar y reabrir pasan varios segundos.
+   */
+  const t0 = Date.now();
+  while (Date.now() - t0 < 45000) {
+    if (!corriendo("Adobe Premiere Pro")) break;       /* incluye los auxiliares */
+    await dormir(1000);
+  }
+  const quedan = corriendo("Adobe Premiere Pro");
+  await dormir(8000);                                   /* margen de asentado */
+  if (quedan) console.log("  OJO: quedaban procesos de Premiere tras 45s; reabro igual");
+  /* SIN PROYECTO se reabre PREMIERE, no un archivo. `open` con `ruta` nula tiraria, y
+   * abrir un proyecto que no habia seria peor: la sesion volveria con algo que nadie pidio. */
+  console.log(ruta ? `  reabriendo ${path.basename(ruta)}…` : "  reabriendo Premiere (no había proyecto)…");
+  try {
+    require("child_process").execFileSync("open",
+      ruta ? [ruta] : ["-a", "Adobe Premiere Pro 2026"], { timeout: 20000 });
+  } catch (e) {
+    console.error(`  no se pudo reabrir: ${e.message.split("\n")[0]}`);
+    return false;
+  }
+  /* EL VEREDICTO ES EL SELLO DE CARGA, no que el latido exista: el archivo viejo sigue en disco
+   * y su mtime puede ser reciente si el panel moribundo alcanzo a escribirlo. Se exige un
+   * `cargadoEn` POSTERIOR a la marca. */
+  for (let i = 0; i < 90; i++) {
+    await dormir(2000);
+    const l = leerLatido();
+    if (l && l.cargadoEn > marca) {
+      console.log(`  panel NUEVO cargado a los ${i * 2}s (${new Date(l.cargadoEn).toLocaleTimeString()})`);
+      return true;
+    }
+  }
+  console.error("  Premiere reabrió pero el panel no cargó en 180s.");
+  return false;
+}
+
+(async () => {
+  if (DESTRABAR) {
+    /* Se levanta A MANO y a proposito: la traba existe porque alguien tiene que MIRAR la
+       pantalla, y levantarla sola por tiempo seria devolver el problema al punto de partida. */
+    const { sacarTraba, leerTraba } = require(path.join(RAIZ, "server", "bridge.js"));
+    const habia = leerTraba();
+    if (!habia) { console.log("  no habia ninguna traba puesta."); process.exit(0); }
+    console.log(`  traba puesta el ${habia.cuando}\n  motivo: ${habia.motivo}`);
+    console.log(sacarTraba() ? "  LEVANTADA. Asegurate de que no haya quedado ningun cartel abierto en Premiere."
+                             : "  no se pudo borrar la marca.");
+    process.exit(0);
+  }
+  if (REINICIAR) {
+    if (!corriendo("MacOS/Adobe Premiere Pro")) {
+      console.error("  Premiere no está abierto: no hay nada que reiniciar.");
+      process.exit(1);
+    }
+    process.exit((await reiniciarPremiere()) ? 0 : 2);
+  }
+  const codigo = masNuevo();
+  const antes = leerLatido();
+  console.log(`  plugin mas nuevo: ${new Date(codigo).toLocaleTimeString()}`);
+
+  /* EL PANEL MUERTO NECESITA `Load`, NO `Reload`, y eso decide QUE MACRO disparar.
+   *
+   * En UDT el boton dice `Load` cuando el plugin no esta corriendo y `Reload` cuando si, y los
+   * macros clickean POR IMAGEN: pedir "Reload Bridge" con el panel caido no encuentra el boton
+   * y el informe queda culpando al macro. La antiguedad del latido lo distingue sin ambiguedad
+   * —el panel late ~1 vez por segundo—, asi que no hay que adivinar. */
+  const edad = (() => { try { return (Date.now() - fs.statSync(LATIDO).mtimeMs) / 1000; } catch (e) { return Infinity; } })();
+  /* LA ANTIGUEDAD DEL LATIDO NO ALCANZA PARA DECLARARLO MUERTO.
+   *
+   * El panel late ~1 vez por segundo, pero cuando Premiere esta ocupado el latido se atrasa: se
+   * midio 13s con el panel PERFECTAMENTE VIVO —`estado` contestaba— y el umbral de 10s lo dio por
+   * muerto. Eso habria disparado `Load Bridge` sobre un panel cargado, o sea cargarlo dos veces.
+   *
+   * Asi que un latido viejo es una SOSPECHA, no un veredicto: se confirma preguntandole al panel.
+   * Es el "no se juzga por el mensaje, se juzga por el estado" de CLAUDE.md, con el latido en el
+   * papel del mensaje. */
+  let muerto = !antes;
+  if (!muerto && edad > 10) {
+    try {
+      const { enviar } = require(path.join(RAIZ, "server", "bridge.js"));
+      await enviar("estado", {}, 20000);
+      console.log(`  el latido tiene ${Math.round(edad)}s pero el panel CONTESTA: esta vivo, solo atrasado.`);
+    } catch (e) { muerto = true; }
+  }
+  if (muerto) {
+    console.log(`  el panel NO esta latiendo (${antes ? Math.round(edad) + "s sin latir" : "sin archivo"}): hay que CARGARLO, no recargarlo.`);
+    if (SOLO_MIRAR) process.exit(2);
+    try {
+      if (!exigirPremiere()) process.exit(1);
+      if (!(await prepararUDT())) process.exit(1);
+      await new Promise((res, rej) => execFile("osascript",
+        ["-e", `tell application "Keyboard Maestro Engine" to do script "${MACRO_CARGA}"`],
+        (e, so, se) => (e ? rej(new Error(String(se || e.message).trim())) : res())));
+    } catch (e) {
+      console.error(`  no se pudo disparar "${MACRO_CARGA}": ${e.message.split("\n")[0]}`);
+      process.exit(2);
+    }
+    console.log(`  macro "${MACRO_CARGA}" disparado, esperando a que el panel arranque…`);
+    for (let i = 0; i < 30; i++) {
+      await dormir(4000);
+      let e2 = Infinity;
+      try { e2 = (Date.now() - fs.statSync(LATIDO).mtimeMs) / 1000; } catch (e) {}
+      if (e2 < 5) {
+        const ahora = leerLatido();
+        console.log(`  el panel arrancó a los ${(i + 1) * 4}s` +
+          (ahora && ahora.cargadoEn ? ` (cargado ${new Date(ahora.cargadoEn).toLocaleTimeString()})` : ""));
+        /* Y se comprueba que ademas sea el codigo NUEVO: arrancar no es estar al dia. */
+        if (ahora && ahora.cargadoEn && ahora.cargadoEn < codigo) {
+          console.log("  OJO: arrancó pero con el codigo VIEJO. Recargá una vez mas.");
+          process.exit(2);
+        }
+        process.exit(0);
+      }
+    }
+    console.error("  no arrancó en 120s, " + porQueNoAndubo());
+    process.exit(2);
+  }
+  if (antes.cargadoEn === undefined) {
+    console.log("  el latido todavia no trae `cargadoEn`: este reload hay que hacerlo a mano UNA vez.");
+  } else if (antes.cargadoEn > codigo) {
+    console.log(`  ya estaba al dia (cargado ${new Date(antes.cargadoEn).toLocaleTimeString()}), no hago nada.`);
+    process.exit(0);
+  }
+
+  console.log(`  el panel esta DESACTUALIZADO (cargado ${antes.cargadoEn ? new Date(antes.cargadoEn).toLocaleTimeString() : "?"}).`);
+  if (SOLO_MIRAR) {
+    console.log("  hay que recargar el panel en UDT para que corra el codigo nuevo.");
+    process.exit(2);
+  }
+
+  /* Si KM no esta, o el macro no existe, se DICE — no se sigue como si hubiera recargado. */
+  try {
+    if (!exigirPremiere()) process.exit(1);
+    if (!(await prepararUDT())) process.exit(1);
+    await new Promise((res, rej) => execFile("osascript",
+      ["-e", `tell application "Keyboard Maestro Engine" to do script "${MACRO}"`],
+      (e, so, se) => (e ? rej(new Error(String(se || e.message).trim())) : res())));
+  } catch (e) {
+    console.error(`  no se pudo disparar el macro "${MACRO}": ${e.message.split("\n")[0]}`);
+    console.error("  recargá el panel a mano en UDT.");
+    process.exit(2);
+  }
+  console.log(`  macro "${MACRO}" disparado, esperando a que el panel vuelva…`);
+
+  /* El veredicto es el SELLO, no que el macro no haya tirado. */
+  for (let i = 0; i < 40; i++) {
+    await dormir(500);
+    const l = leerLatido();
+    if (l && l.cargadoEn !== undefined && l.cargadoEn > codigo) {
+      console.log(`  RECARGADO: el panel se cargo ${new Date(l.cargadoEn).toLocaleTimeString()}, ` +
+                  `despues del ultimo cambio. Vuelta ${l.vuelta}.`);
+      process.exit(0);
+    }
+  }
+  console.error("  NO ENTRO: pasaron 20s y el panel sigue con el codigo viejo,\n  " +
+                porQueNoAndubo());
+  process.exit(1);
+})().catch((e) => { console.error("  ERROR: " + e.message); process.exit(1); });
