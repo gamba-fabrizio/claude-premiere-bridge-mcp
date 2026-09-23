@@ -2078,8 +2078,9 @@ async function transcripcion(params) {
   if (tiene !== true && !(tiene && tiene.value === true)) {
     return {
       resumen:
-        `"${nombreClip}" no tiene transcripción. Se dispara a mano en Premiere ` +
-        "(panel Text > Transcribe): la API puede leerlas e importarlas, pero no crearlas.",
+        `"${nombreClip}" no tiene transcripción. Desde 26.5 se crea por API: ` +
+        "`node herramientas/audio.js <archivo>` la dispara y la relee. Lo que no se puede es " +
+        "importar una hecha afuera: esa entra solo a mano, con el Import del panel Text.",
       clip: nombreClip, hay: false
     };
   }

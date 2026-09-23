@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 /**
- * Transcribe un medio AFUERA de Premiere y mapea qué hay en cada segundo.
+ * Transcribe un medio y mapea qué hay en cada segundo.
  *
- * Por qué existe: la API de Premiere puede LEER transcripciones pero no
- * crearlas — hay que apretar Transcribe a mano, clip por clip. Esto se puede
- * disparar en tanda, sobre archivos que todavía no están importados.
+ * Por qué existe: para transcribir en TANDA. Hasta Premiere 26.5 la API solo
+ * LEÍA transcripciones, y había que apretar Transcribe a mano, clip por clip;
+ * desde 26.5 las crea, y el motor `premiere` importa el medio y la dispara.
+ * `whisper` y `scribe` corren del lado del disco, sobre archivos que ni
+ * siquiera están importados.
  *
  * Vive acá y no en `plugin/` porque el panel corre adentro de Premiere: no
- * puede leer archivos de audio ni ejecutar ffmpeg. Esto es del lado del disco.
+ * puede leer archivos de audio ni ejecutar ffmpeg, y la envolvente de los tres
+ * motores sale de un wav.
  *
  * Salida: un JSON con dos cosas, las dos en segundos de la FUENTE.
  *   palabras: [{texto, desde, dura, confianza, eos, hablante}]

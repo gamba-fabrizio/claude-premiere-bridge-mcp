@@ -399,8 +399,10 @@ server.registerTool(
       "Sin argumentos devuelve el texto completo y los segmentos. Con `buscar` devuelve solo " +
       "dónde aparece esa palabra, que es lo que sirve para ir a un punto sin traerse todo. " +
       "Con `palabras: true` agrega el tiempo de CADA palabra, para cortes finos.\n\n" +
-      "OJO: la API puede leer transcripciones pero NO crearlas. Si el clip no tiene, hay que " +
-      "transcribirlo a mano en Premiere (panel Text > Transcribe).\n\n" +
+      "Si el clip no tiene transcripción, desde Premiere 26.5 se CREA por API: " +
+      "`node herramientas/audio.js <archivo>` —el motor por defecto es Premiere— importa el " +
+      "medio, la dispara y la relee. Lo que la API NO puede es recibir una hecha afuera " +
+      "(Whisper, Scribe): esa entra solo a mano, con el Import del panel Text.\n\n" +
       "Las palabras marcadas como recortadas caen fuera del clip: están en el material pero no " +
       "en el timeline, así que no se puede cortar ahí.",
     inputSchema: soloEstas({

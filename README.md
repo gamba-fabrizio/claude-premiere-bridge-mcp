@@ -198,16 +198,30 @@ de verdad.
 sirva. Sin ellas, el bridge solo ve lo que el usuario dejó seleccionado y el
 momento donde dejó el cursor — una mirilla que mueve otro.
 
-## Transcribir afuera de Premiere — `herramientas/audio.js`
+## Transcribir en tanda — `herramientas/audio.js`
 
-La API **lee** transcripciones pero no las crea: hay que apretar Transcribe a
-mano, clip por clip. Esta herramienta transcribe del lado del disco, en tanda, y
-sobre archivos que todavía no están importados.
+Desde Premiere 26.5 la API **crea** transcripciones, además de leerlas. Lo que sigue sin poder es
+**recibir** una hecha afuera: `importFromJSON` devuelve un cascarón vacío, así que lo que transcribe
+otro motor entra al panel Text solo a mano, con su Import. Esta herramienta transcribe en tanda y
+deja, de cada medio, qué se dice y qué suena en cada segundo de la fuente, con tres motores:
+
+| motor | dónde corre | lo que da |
+|---|---|---|
+| `premiere` (el default) | en Premiere: importa el medio al proyecto con foco si no está, dispara la transcripción y la relee | gratis, y queda incrustada en el proyecto. Pierde nombres propios y números |
+| `scribe` | en la API de ElevenLabs | el más completo y el único que separa hablantes. Gasta créditos |
+| `whisper` | local, sobre archivos que ni siquiera están importados | el único que toma glosario. Sobre audio difícil, su VAD se come habla real |
+
+**El ranking cambia con el material**, y más palabras no quiere decir mejor: la cabecera de
+`audio.js` tiene lo medido. Si el texto se va a LEER —subtítulos, una cita, una voz en off— no
+alcanza con Premiere, porque un nombre de marca perdido o un número con un factor de mil se
+entregan.
 
 No es un verbo del panel a propósito: el panel corre adentro de Premiere y no
-puede leer archivos de audio ni ejecutar `ffmpeg`.
+puede leer archivos de audio ni ejecutar `ffmpeg`, y de un wav sale la envolvente de
+los tres motores.
 
-**Instalar** (una vez por máquina):
+**Instalar** (una vez por máquina). `ffmpeg` hace falta siempre; `whisper-cpp` y los dos
+modelos, solo para `--motor whisper`:
 
 ```bash
 brew install ffmpeg whisper-cpp
@@ -222,8 +236,11 @@ si falta alguno.
 **Usar:**
 
 ```bash
-node herramientas/audio.js material.mp4 --glosario @/ruta/proyecto/glosario.txt \\
-                                       --destino /ruta/donde/escribir
+node herramientas/audio.js material.mp4 --destino /ruta/donde/escribir
+
+# whisper, con el glosario del proyecto
+node herramientas/audio.js material.mp4 --motor whisper \
+     --glosario @/ruta/proyecto/glosario.txt --destino /ruta/donde/escribir
 ```
 
 Sin `--destino` escribe al lado del material, y en una tanda de 147 clips eso son
@@ -242,8 +259,9 @@ El SRT corta por fin de oración y no por cantidad de palabras, y fusiona los
 bloques huérfanos: el tope de caracteres puede cortar a mitad de frase y dejar
 una palabra sola parpadeando (medido: quedó un bloque con "compases." de 0,45s).
 
-**El glosario es del PROYECTO, no del bridge**, así que va en un archivo al lado
-del material y se pasa con `@`. Los nombres propios de un curso de bajo no le
+**El glosario lo toma solo `whisper`**: con otro motor, la herramienta avisa y lo ignora. Y
+es del PROYECTO, no del bridge, así que va en un archivo al lado del material y se pasa
+con `@`. Los nombres propios de un curso de bajo no le
 sirven a otro trabajo.
 
 **Escribilo como PROSA, nunca terminando en una lista.** Un glosario que decía
@@ -258,6 +276,9 @@ misma tanda, una alucinación tenía confianza media 0,820 y una charla real de
 rodaje 0,358. Lo que sí separa locución de todo lo demás es palabras por segundo.
 
 ### Las tres cosas que se midieron acá, y por qué están así
+
+Se midieron con `whisper`, antes de que hubiera motor de Premiere. El umbral de silencio vale
+para los tres, porque sale de la onda y no del motor.
 
 **El VAD no es opcional.** Sin él, atravesando un pasaje largo sin voz el
 timestamp **deriva 12 segundos** y el modelo **inventa texto** sobre la música

@@ -463,8 +463,9 @@ if (inventadas.length) {
 }
 
 /*
- * `herramientas/audio.js` corre AFUERA de Premiere, así que no lo cubre ninguno
- * de los chequeos de verbos. Lo mínimo: que cargue y que exporte sus dos piezas.
+ * `herramientas/audio.js` corre del lado del disco, y sus llamadas al panel —las
+ * del motor `premiere`— ya las mira "nadie llama a un verbo con una clave que la
+ * tabla no acepta". Lo mínimo acá: que cargue y que exporte sus dos piezas.
  *
  * No se chequea que whisper esté instalado: es opcional y en otra máquina puede
  * no estar todavía. La herramienta ya avisa con la ruta exacta si falta.
