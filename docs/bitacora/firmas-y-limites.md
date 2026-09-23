@@ -4,6 +4,26 @@
 > estaba. «Arriba» y «abajo» se refieren a aquel archivo único. Los títulos no se
 > tocaron: el código que cita una sección «de CLAUDE.md» la encuentra acá con `grep`.
 
+## Vigente (2026-09-23)
+
+- **La referencia al día de las firmas está en `docs/api.md`**; acá queda cómo se midieron las que
+  costaron caro. → «Las que costaron caro», «Tipos de retorno que NO son uniformes»
+- **Los in/out sin marca devuelven el sentinel −400000**, y se puede reescribir. → «El sentinel de
+  los in/out»
+- **`editar salida` es un punto de FUENTE**, y `createSetInPointAction` además mueve el clip.
+  → «`editar salida` es punto de FUENTE», «`createSetInPointAction` además MUEVE»
+- **El socio vinculado es del OTRO tipo**, y se le pasa el delta, no el valor. → «Deducir el
+  vínculo», «Los vinculados: el delta»
+- **`copiarEfecto` COMPARTE la instancia; `clonar` sí copia**, y toma offsets. → «`copiarEfecto` NO
+  es una copia», «Y `clonar` SÍ es una copia»
+- **Copiar los componentes no copia el look**: Opacity y Blend Mode van aparte. → «Copiar los
+  componentes NO es copiar el look»
+- **Un medio se repunta a otro archivo, sin Cmd+Z.** → «Un medio se puede REPUNTAR»
+- **Un cartel abierto bloquea el Cmd+Q y el panel sigue contestando.** → «El cartel de guardar
+  BLOQUEA»
+- **El `.prproj` tiene lo que la API no expone**, y un lector no informa "no hay" sin un control
+  positivo. → «Lo que el `.prproj` tiene», «Tres falsos negativos»
+
 # Firmas de la API, medidas y no deducidas
 
 **Antes de adivinar una firma, reflejala.** El verbo `api` lee los nombres de métodos sin

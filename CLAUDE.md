@@ -36,7 +36,8 @@ Hasta el 2026-09-23 era también la bitácora —1.222 líneas, con las reglas r
 USO.md            cómo USAR el bridge desde una sesión de trabajo. Vale también acá, y es corto
                   a propósito: se lee entero
 docs/bitacora/    las mediciones, movidas TAL CUAL y partidas por tema: ver el índice de abajo
-README.md         qué hace cada herramienta, y las firmas y comportamientos medidos de la API
+docs/api.md       las firmas y los comportamientos medidos de la API: se lee ANTES de tocar un verbo
+README.md         el manual: instalar, qué hace cada herramienta, los flujos
 ```
 
 **Lo nuevo no vuelve acá.** Un caso va al archivo de su tema en `docs/bitacora/`; acá sube solo
@@ -159,7 +160,7 @@ Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que
 - **Antes de escribir un verificador, preguntate qué hace con un medio SIN VIDEO.** Tres verbos
   informaron "no entró" sobre un audio que sí había entrado. → `verificacion.md`
 - **Un lector nuevo no informa "no hay" sin un control positivo**: un vacío es "no lo encontré".
-  → `verificacion.md`, `api.md`
+  → `verificacion.md`, `firmas-y-limites.md`
 - **Un parámetro con el mismo nombre significa lo mismo en todos los verbos**: `pistaAudio` es
   1-based en todos (A1 es 1).
 - **Premiere devuelve los nombres en NFC y las rutas en NFD.** Se compara normalizando, y una ruta
@@ -182,6 +183,9 @@ Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que
   hace otra cosa. Ya pasó dos veces.
 - **Decí lo que NO comprobaste.** "3 ESCRITOS (transacción corrida; el valor NO se releyó)"
   es honesto; "3 aplicados" no lo era.
+- **Antes de adivinar una firma, reflejala** con el verbo `api`, que lee nombres sin llamar a
+  nada; si igual no se deduce, enumerá los valores reales y probalos. La prueba es el efecto, no
+  que la llamada no tire. → `docs/api.md`, *Firmas que no se adivinan*
 
 `test.js` chequea **las dos direcciones**: que no haya verbos sin herramienta, y que los que
 no la tienen estén **declarados a propósito** en una lista. El default —no hacer nada— falla.
@@ -211,10 +215,13 @@ no la tienen estén **declarados a propósito** en una lista. El default —no h
 Los punteros van por TAREA y no por síntoma: las trampas de acá hacen falta antes de escribir la
 llamada, no después de que algo se rompa. Todos en `docs/bitacora/`:
 
+**Cada archivo arranca con *Vigente*: leé eso primero** —las primeras ~40 líneas, con `limit`— y
+bajá a un caso solo cuando haga falta: los punteros «...» dicen a cuál.
+
 ```
 crashes.md            un verbo que barre una pista, encadena transacciones o lee params, y el
                       espaciado; y cuando Premiere se cae o se cuelga
-api.md                las firmas medidas, lo que la API no permite (copiarEfecto COMPARTE la
+firmas-y-limites.md   las firmas medidas, lo que la API no permite (copiarEfecto COMPARTE la
                       instancia, clonar sí copia, relink), el cartel que traba el cierre, y lo
                       que el .prproj tiene y la API no expone
 cuadros-y-nombres.md  Unicode, la grilla de cuadro, el sub-frame, los huecos de un cuadro

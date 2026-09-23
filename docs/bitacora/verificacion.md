@@ -1,3 +1,26 @@
+
+
+## Vigente (2026-09-23)
+
+- **Una guarda se verifica haciéndola fallar**, mirando por posición y sin comentarios ni strings.
+  → «Una guarda se verifica HACIÉNDOLA FALLAR»
+- **Medí el piso del instrumento**: si el resultado se mueve con un parámetro, no mediste. → «Medí
+  el PISO DEL INSTRUMENTO»
+- **Un test de render lleva un valor que tenga que verse, y un umbral.** → «Un test de render se
+  hace»
+- **Verificar cada paso no verifica la tanda.** → «Verificar cada paso NO verifica la tanda»
+- **Un contador que mira el lugar equivocado convierte un éxito en fracaso**, y un medio sin video
+  no pone nada en V. → «El contador ciego», «Un contador que mira la pista de VIDEO»
+- **Homónimos: se compara la ruta, no el nombre.** → «Homónimos: el material entra»
+- **Un parámetro que el verbo no lee rebota.** → «Un parámetro no declarado»
+- **Antes de informar que algo no está, un control positivo.** → «Antes de informar que algo no
+  está»
+- **Lo que se escribe tiene que poder releerse.** → «Escribir algo que nada puede releer»
+- **Un item nulo no voltea un recorrido: se cuenta.** → «Recorrer bins: un item nulo»
+- **Un nombre parcial que engancha más de uno rebota.** → «El match parcial del proyecto»
+- **`clips` y `revisar` leen la salida de cada pista.** → «Una pista con el OJO APAGADO»
+- **Un pendiente se cierra en la misma tanda que su trabajo.** → «Un pendiente que no se cierra»
+
 # Método de verificación
 
 > Bitácora movida TAL CUAL desde `CLAUDE.md` el 2026-09-23, en el orden en que
@@ -106,50 +129,6 @@ sobre clones que sí habían entrado**.
 Lo destapó **contar el total de la secuencia**: 12 clips al empezar, 18 después de las corridas
 "fallidas". El número de la pista mentía; el del conjunto no. Cuando un contador parcial diga
 que no pasó nada, contá el total.
-
-## ~~Una pista con el OJO APAGADO no la ve NINGÚN verbo~~ RESUELTO
-
-```
-clips             la lista igual, en su lugar y con su duración
-revisar           "sin problemas"
-el colocador      "6 de 6 colocados y verificados"
-el frame          NEGRO
-```
-
-**`VideoTrack.isMuted()` existía y nadie lo había mirado.** La lectura entró en `clips` y en
-`revisar`, y con eso el fallo dejó de ser silencioso: `clips` avisa en el RESUMEN y `revisar`
-mete la pista en su lista de problemas, así que ya no puede imprimir "sin problemas" sobre un
-render negro.
-
-**Las dos clases de pista, medidas por separado**, porque el aviso dice cosas distintas y
-afirmar la de audio sin medirla habría sido inventar:
-
-```
-pista de VIDEO   media del cuadro  89,07  ->  0,00        (negro)
-pista de AUDIO   mean -37,1 dB     ->  -91,0 dB           (silencio digital)
-```
-
-Cuatro decisiones que valen para cualquier verbo que agregue una lectura:
-
-- **El aviso va en el RESUMEN**, no sólo en el dato: un dato que está en la respuesta y no en
-  el resumen es un dato que no está.
-- **En `revisar` entra en la lista que suprime el "sin problemas"**, y PRIMERO: una pista sin
-  salida invalida todo lo demás que el verbo pueda informar.
-- **UNA lectura por PISTA, no por clip.** El `track` ya está en la mano. Medido: el verbo pasó
-  de 203 ms a 202 ms.
-- **Si la lectura falla se INFORMA, no se asume `false`.** `false` significa "se ve", así que
-  tragarse el error reportaría como sana una pista que no se pudo mirar.
-
-Los tres primeros informes son CORRECTOS —el clip está ahí— y ninguno contesta la pregunta
-que importaba, que es si se ve.
-
-**Se confirma MIDIENDO el cuadro, no mirándolo**: la media dio **0** en la pista apagada y
-**22,8** en otra. Un número separa los dos casos; el ojo no, porque un cuadro negro y un
-cuadro vacío se ven igual.
-
-Y hay una trampa de segundo orden: **el visor muestra un PNG negro o transparente como
-BLANCO**, así que el primer diagnóstico fue "sale todo blanco" y se buscó un gráfico que no
-existía.
 
 ## Homónimos: el material entra al clip equivocado
 
@@ -305,3 +284,51 @@ distinguirlos desde adentro del texto. Al cerrar un trabajo, cerrar también su 
 tanda. Y cada tanto, cotejar la lista contra el CÓDIGO en vez de contra la memoria: los dos se
 encontraron con un `grep` de "SIGUE|FALTA|sin hacer" y cinco minutos de leer lo que supuestamente
 faltaba.
+
+## Cerrados: casos resueltos, acotados o desmentidos
+
+> Lo que estos casos dejaron de cómo anda hoy está arriba, en *Vigente*. Acá queda cómo se llegó.
+
+## ~~Una pista con el OJO APAGADO no la ve NINGÚN verbo~~ RESUELTO
+
+```
+clips             la lista igual, en su lugar y con su duración
+revisar           "sin problemas"
+el colocador      "6 de 6 colocados y verificados"
+el frame          NEGRO
+```
+
+**`VideoTrack.isMuted()` existía y nadie lo había mirado.** La lectura entró en `clips` y en
+`revisar`, y con eso el fallo dejó de ser silencioso: `clips` avisa en el RESUMEN y `revisar`
+mete la pista en su lista de problemas, así que ya no puede imprimir "sin problemas" sobre un
+render negro.
+
+**Las dos clases de pista, medidas por separado**, porque el aviso dice cosas distintas y
+afirmar la de audio sin medirla habría sido inventar:
+
+```
+pista de VIDEO   media del cuadro  89,07  ->  0,00        (negro)
+pista de AUDIO   mean -37,1 dB     ->  -91,0 dB           (silencio digital)
+```
+
+Cuatro decisiones que valen para cualquier verbo que agregue una lectura:
+
+- **El aviso va en el RESUMEN**, no sólo en el dato: un dato que está en la respuesta y no en
+  el resumen es un dato que no está.
+- **En `revisar` entra en la lista que suprime el "sin problemas"**, y PRIMERO: una pista sin
+  salida invalida todo lo demás que el verbo pueda informar.
+- **UNA lectura por PISTA, no por clip.** El `track` ya está en la mano. Medido: el verbo pasó
+  de 203 ms a 202 ms.
+- **Si la lectura falla se INFORMA, no se asume `false`.** `false` significa "se ve", así que
+  tragarse el error reportaría como sana una pista que no se pudo mirar.
+
+Los tres primeros informes son CORRECTOS —el clip está ahí— y ninguno contesta la pregunta
+que importaba, que es si se ve.
+
+**Se confirma MIDIENDO el cuadro, no mirándolo**: la media dio **0** en la pista apagada y
+**22,8** en otra. Un número separa los dos casos; el ojo no, porque un cuadro negro y un
+cuadro vacío se ven igual.
+
+Y hay una trampa de segundo orden: **el visor muestra un PNG negro o transparente como
+BLANCO**, así que el primer diagnóstico fue "sale todo blanco" y se buscó un gráfico que no
+existía.

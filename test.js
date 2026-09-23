@@ -3941,22 +3941,26 @@ titulo("`desmarcar` recuenta sobre el sujeto del que borro, no sobre la secuenci
  * que distingue una advertencia de una receta.
  */
 
-titulo("Cada mencion de `getKeyframePtr` en el README va con su advertencia");
+titulo("Cada mencion de `getKeyframePtr` en el README y en docs/api.md va con su advertencia");
 
 {
   const VENTANA = 1500;
-  const apariciones = [...srcReadme.matchAll(/getKeyframePtr/g)].map((x) => x.index);
-  if (!apariciones.length) {
-    ok("el README no menciona `getKeyframePtr`");
-  } else {
+  /* Desde el 2026-09-23 la referencia de la API vive en docs/api.md: mirar solo el README daria "no
+   * lo menciona" sobre un README que ya no tiene esa seccion, o sea una guarda que se aprueba sola. */
+  const rutaApi = path.join(raiz, "docs/api.md");
+  if (!fs.existsSync(rutaApi)) mal("falta docs/api.md", "ahi viven las firmas y los comportamientos medidos");
+  const fuentes = [["README.md", srcReadme], ["docs/api.md", fs.existsSync(rutaApi) ? fs.readFileSync(rutaApi, "utf8") : ""]];
+  for (const [nom, src] of fuentes) {
+    const apariciones = [...src.matchAll(/getKeyframePtr/g)].map((x) => x.index);
+    if (!apariciones.length) { ok(`${nom} no menciona \`getKeyframePtr\``); continue; }
     const huerfanas = apariciones.filter((i) =>
-      srcReadme.slice(Math.max(0, i - VENTANA), i + VENTANA).indexOf("SIGBUS") === -1);
+      src.slice(Math.max(0, i - VENTANA), i + VENTANA).indexOf("SIGBUS") === -1);
     if (huerfanas.length) {
-      mal(huerfanas.length + " mencion(es) de `getKeyframePtr` en el README sin `SIGBUS` cerca",
+      mal(huerfanas.length + ` mencion(es) de \`getKeyframePtr\` en ${nom} sin \`SIGBUS\` cerca`,
         "devuelve un PUNTERO a la estructura interna del keyframe y en rafaga tira Premiere.\n         " +
         "Nombrarlo sin decir eso es una receta, no una advertencia. Para leer un valor va `getValueAtTime`.");
     } else {
-      ok("las " + apariciones.length + " menciones de `getKeyframePtr` van con la advertencia del SIGBUS");
+      ok("las " + apariciones.length + ` menciones de \`getKeyframePtr\` en ${nom} van con la advertencia del SIGBUS`);
     }
   }
 }
@@ -5749,13 +5753,47 @@ titulo("CLAUDE.md liviano: reglas acá, la bitácora en docs/bitacora/ y USO.md 
   const rotos = [];
   for (const [nom, src] of [["CLAUDE.md", claude], ["USO.md", uso || ""]]) {
     for (const m of src.matchAll(/([A-Za-z0-9_-]+\.md)\b/g)) {
-      const existe = [m[1], "docs/bitacora/" + m[1], "herramientas/" + m[1]]
+      const existe = [m[1], "docs/" + m[1], "docs/bitacora/" + m[1], "herramientas/" + m[1]]
         .some((r) => fs.existsSync(path.join(raiz, r)));
       if (!existe && !rotos.includes(nom + " → " + m[1])) rotos.push(nom + " → " + m[1]);
     }
   }
   if (rotos.length) mal("punteros a archivos que no existen: " + rotos.join(", "));
   else ok("todo archivo .md que nombran CLAUDE.md y USO.md existe");
+
+  /* La referencia de la API vive en docs/api.md y el CLAUDE.md manda ahí (2026-09-23). Antes mandaba
+   * a leer el README entero —63 KB, casi todo manual para humanos— antes de cambiar nada. */
+  if (!fs.existsSync(path.join(raiz, "docs/api.md"))) mal("falta docs/api.md", "ahí viven las firmas y los comportamientos medidos");
+  else if (!/docs\/api\.md/.test(claude)) mal("el CLAUDE.md no manda a docs/api.md", "es donde viven las firmas; el README es el manual");
+  else if (!/docs\/api\.md/.test(srcReadme)) mal("el README no dice que la referencia de la API está en docs/api.md");
+  else ok("la referencia de la API está en docs/api.md, y el CLAUDE.md y el README mandan ahí");
+
+  /* Cada archivo de la bitácora arranca con lo que vale HOY, y cada puntero «...» de esa sección es un
+   * pedazo de un título del mismo archivo. Un resumen es donde se cuelan los errores: el puntero es lo
+   * que deja comprobarlo contra el caso, y uno que no apunta a nada no deja comprobar nada. */
+  const sinVig = [], largos = [], rotosVig = [];
+  for (const f of bit) {
+    const lin = fs.readFileSync(path.join(dirBit, f), "utf8").split("\n");
+    const iv = lin.findIndex((l) => /^## Vigente\b/.test(l));
+    if (iv < 0 || iv > 15) { sinVig.push(f); continue; }
+    /* Termina en el TÍTULO SIGUIENTE, del nivel que sea: medir hasta el próximo `##` se comía los casos
+     * que arrancan con `###` y daba 150 líneas sobre un Vigente de 9. */
+    let fin = lin.findIndex((l, i) => i > iv && /^#{1,6} /.test(l));
+    if (fin < 0) fin = lin.length;
+    if (fin - iv > 45) largos.push(f + " (" + (fin - iv) + ")");
+    const titulos = []; let codigo = false;
+    lin.forEach((l, i) => {
+      if (/^\s*```/.test(l)) { codigo = !codigo; return; }
+      if (!codigo && (i < iv || i >= fin) && /^#{1,6} /.test(l)) titulos.push(l.replace(/^#+ /, ""));
+    });
+    const cuerpo = lin.slice(iv + 1, fin).join(" ").replace(/\s+/g, " ");
+    for (const m of cuerpo.matchAll(/«([^»]+)»/g))
+      if (!titulos.some((x) => x.includes(m[1]))) rotosVig.push(f + " → «" + m[1] + "»");
+  }
+  if (sinVig.length) mal("archivos de bitácora sin «## Vigente» arriba: " + sinVig.join(", "), "lo que vale hoy va antes de la historia");
+  else if (largos.length) mal("secciones Vigente de más de 45 líneas: " + largos.join(", "), "un resumen que no se lee de un vistazo ya es bitácora");
+  else if (rotosVig.length) mal("punteros de Vigente que no apuntan a ningún título: " + rotosVig.join(" · "));
+  else ok(`los ${bit.length} archivos de bitácora arrancan con su Vigente, y todos sus punteros existen`);
 }
 
 if (fallos) {

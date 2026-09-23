@@ -4,6 +4,30 @@
 > estaba. «Arriba» y «abajo» se refieren a aquel archivo único. Los títulos no se
 > tocaron: el código que cita una sección «de CLAUDE.md» la encuentra acá con `grep`.
 
+## Vigente (2026-09-23)
+
+- **Antes de teorizar sobre un crash, leé el reporte**: son cinco regímenes distintos, con firmas
+  distintas. → «Los regímenes que tiran Premiere»
+- **Una ráfaga de transacciones tira Premiere.** El espaciado real es `PAUSA + MS_POLL` y tiene que
+  dar 500 ms o más; `test.js` lo exige. → «El espaciado real es la SUMA»
+- **El borde se mueve con el peso del proyecto y con la acción.** → «El umbral depende del PESO»,
+  «El borde también depende de la ACCIÓN»
+- **Menos transacciones antes que menos espera**: `porTransaccion` hasta `TOPE_LOTE` (10).
+  → «Agrupar por transacción gana MÁS»
+- **Un verbo con su propio bucle de lotes necesita su propia pausa entre lotes.** → «Y un verbo que
+  hace su PROPIO bucle»
+- **La pausa protege escrituras**; antes de una lectura no compra nada. → «El espaciado protege
+  ESCRITURAS»
+- **`getKeyframePtr` en ráfaga es un SIGBUS**: los valores salen de `getValueAtTime`.
+  → «1. `getKeyframePtr` en ráfaga»
+- **Leer valores de params en volumen tira Premiere**, y antes de barrer conviene fijarse si el dato
+  ya está en una respuesta anterior. → «3. Lecturas de VALOR de params», «Releer lo que ya se tiene»
+- **Verificar en un verbo de tanda no puede costar lecturas de valor.** → «En un verbo de TANDA»
+- **`borrar` rebota desde el 6º borrado en 60 s**, y barrer una pista con solapes tiró Premiere.
+  → «La guarda contra el BARRIDO», «4. `borrar` sobre una pista con SOLAPES»
+- **Recargar el plugin con su `setInterval` vivo crasheaba**: el panel se desarma en
+  `beforeunload`. → «5. Recargar el plugin»
+
 # Los regímenes que tiran Premiere
 
 Son **cinco distintos**, con firmas distintas, y confundirlos costó días. La regla general:

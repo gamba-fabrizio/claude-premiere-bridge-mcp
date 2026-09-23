@@ -1,3 +1,18 @@
+
+
+## Vigente (2026-09-23)
+
+- **Los nombres llegan en NFC y las rutas en NFD**: se compara normalizando, y una ruta de la API
+  se pasa tal cual. → «Los nombres vienen en DOS normalizaciones», «Y las RUTAS vienen al revés»
+- **Premiere recuantiza el in-point a la grilla de la SECUENCIA, y el del audio no.** → «Premiere
+  recuantiza el in-point»
+- **Mover no se pega al cuadro; insertar sí.** → «Sub-frame: mover NO se pega»
+- **Cortar entre cuadros deja un hueco de uno**: se cuantiza con aritmética entera sobre ticks.
+  → «Cortar entre frames deja huecos»
+- **La grilla es la de la secuencia, no una constante.** → «La grilla es la de LA SECUENCIA»
+- **Una comparación con `>` rechaza el valor que cae exacto a medio cuadro.** → «Una comparación en
+  segundos con»
+
 # Unicode, cuadros y otras trampas del mundo real
 
 > Bitácora movida TAL CUAL desde `CLAUDE.md` el 2026-09-23, en el orden en que
