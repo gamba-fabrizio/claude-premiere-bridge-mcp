@@ -676,15 +676,10 @@ async function copiarEfecto(params) {
    * tiene que seguir siendo la activa igual. */
   let seqOrigen = sequence, dondeOrigen = "la misma secuencia";
   if (params.secuenciaOrigen) {
+    /* Con `unaSecuencia`, como borrar y duplicar: «la primera que contiene» agarraba, con «REEL 06» y
+       «REEL 06 B», la que viniera antes en un orden que no es el de creación. */
     const lista = await project.getSequences();
-    const nombres = [];
-    let hallada = null;
-    for (let i = 0; i < lista.length; i++) {
-      const n = String(lista[i].name);
-      nombres.push(n);
-      if (!hallada && n.toLowerCase().indexOf(String(params.secuenciaOrigen).toLowerCase()) !== -1) hallada = lista[i];
-    }
-    if (!hallada) throw new Error(`No hay ninguna secuencia que coincida con "${params.secuenciaOrigen}". Hay: ${nombres.join(", ")}.`);
+    const { seq: hallada } = await unaSecuencia(lista, params.secuenciaOrigen);
     if (String(hallada.name) === String(sequence.name)) {
       dondeOrigen = "la misma secuencia (secuenciaOrigen apunta a la activa)";
     } else {
@@ -2417,6 +2412,35 @@ async function armarSecuencia(params) {
     viaCreacion = "desde el material";
   }
 
+  /*
+   * DESDE ACÁ LA SECUENCIA EXISTE, y un error ya no puede salir pelado (2026-09-24).
+   *
+   * Una excepción en el lazo de fragmentos voló el verbo con la secuencia creada —23 de 34
+   * fragmentos, ninguna capa— y el mensaje era sólo «Cannot read properties of null»: quien lo leía
+   * no sabía que había basura en el proyecto, ni que los medios quedaban recortados en el panel,
+   * porque devolver los in/out es lo último que se hace. `A_MEDIAS` le deja al despachador qué
+   * decir y qué deshacer si esto tira; se borra antes del `return`.
+   */
+  const avance = { fragmentos: 0, capas: 0 };
+  A_MEDIAS.armarSecuencia = {
+    describir: () => `quedó CREADA la secuencia "${String(nueva.name || nombre)}" con ${avance.fragmentos} de ` +
+      `${fragmentos.length} fragmento(s)` +
+      (Array.isArray(params.capas) && params.capas.length ? ` y ${avance.capas} de ${params.capas.length} capa(s)` : "") +
+      ": borrala con premiere_borrar_secuencia o seguila a mano",
+    limpiar: async () => {
+      const tocados = Object.values(cache);
+      if (!tocados.length) return "";
+      let ok = false;
+      project.lockedAccess(() => {
+        ok = project.executeTransaction((a) => {
+          for (const t of tocados) a.addAction(t.clipItem.createClearInOutPointsAction());
+        }, "devolver los in/out de los medios");
+      });
+      return ok ? `in/out devueltos en ${tocados.length} medio(s)`
+        : "OJO: NO se pudieron devolver los in/out de los medios, quedaron recortados en el panel";
+    }
+  };
+
   const sacados = params.preset ? 0 : await vaciarSecuencia(project, nueva);
 
   /*
@@ -2448,6 +2472,7 @@ async function armarSecuencia(params) {
   const editor = ppro.SequenceEditor.getEditor(nueva);
   const puestos = [];
   const fallidos = [];
+  const sinReleer = [];
   let cursor = 0;
 
   for (let i = 0; i < fragmentos.length; i++) {
@@ -2481,11 +2506,34 @@ async function armarSecuencia(params) {
      * Es el contador ciego de `cortesDeEscena` —y el que `insertar` ya pagó con el .wav del
      * tema— cometido una tercera vez, en otro verbo.
      */
-    const trackV = await nueva.getVideoTrack(0);
-    const trackA = await nueva.getAudioTrack(0);
-    const itemsV = trackV ? await trackV.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
-    const itemsA = trackA ? await trackA.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
+    /*
+     * HUECOS EN LA LISTA. `getTrackItems` a veces devuelve un null entre los items —el mismo hueco
+     * que ya voltaba `importar`, sin causa conocida—, y `tiemposDe(null)` tiraba «Cannot read
+     * properties of null (reading 'getStartTime')» sin decir en qué fragmento: pasó el 2026-09-24
+     * con 34 fragmentos + 57 capas en un podcast, y dejó la secuencia a medias, con 23
+     * fragmentos y ninguna capa. Ahora se relee hasta dos veces; si el hueco sigue, el fin se
+     * CALCULA —puede correrse un cuadro— y el resumen lo dice. Frenar ahí no sirve: el siguiente
+     * fragmento caería en el mismo cursor y pisaría a éste.
+     */
+    let itemsV = [], itemsA = [], huecos = 0;
+    try {
+      for (let intento = 0; intento < 3; intento++) {
+        const trackV = await nueva.getVideoTrack(0);
+        const trackA = await nueva.getAudioTrack(0);
+        itemsV = trackV ? await trackV.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
+        itemsA = trackA ? await trackA.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
+        huecos = itemsV.filter((x) => !x).length + itemsA.filter((x) => !x).length;
+        if (!huecos) break;
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    } catch (e) {
+      fallidos.push(`${i + 1} (${m.nombre} ${f.desde}-${f.hasta}s): se pegó pero no se pudo releer la pista: ` +
+        `${e && e.message ? e.message : e}. Los fragmentos siguientes pueden haber quedado corridos`);
+      cursor += f.hasta - f.desde;
+      continue;
+    }
     // `puestos.length` es cuántos fragmentos entraron: cada uno deja un item en SU pista.
+    // Se cuenta CON los huecos: un null es un item que está y no se pudo leer.
     const items = itemsV.length > puestos.length ? itemsV
                 : itemsA.length > puestos.length ? itemsA : null;
     if (!items) {
@@ -2493,15 +2541,26 @@ async function armarSecuencia(params) {
         `en el timeline (ni en V1 ni en A1: V1 tiene ${itemsV.length} y A1 ${itemsA.length})`);
       continue;
     }
-    let fin = 0;
-    for (let k = 0; k < items.length; k++) {
-      const t = await tiemposDe(items[k]);
-      if (t.hasta > fin) fin = t.hasta;
+    /* Y medir también puede tirar, con un item que está pero no contesta: ahí el fin se calcula
+       igual que con un hueco, y se dice. */
+    let fin = 0, midio = true;
+    try {
+      for (let k = 0; k < items.length; k++) {
+        if (!items[k]) continue;
+        const t = await tiemposDe(items[k]);
+        if (t.hasta > fin) fin = t.hasta;
+      }
+    } catch (e) { midio = false; }
+    if (huecos || !midio) {
+      const calculado = cursor + (f.hasta - f.desde);
+      sinReleer.push(`${i + 1} (${m.nombre} ${f.desde}-${f.hasta}s)` + (midio ? "" : ": releerlo tiró"));
+      if (calculado > fin) fin = calculado;
     }
     puestos.push({
       medio: m.nombre, desdeFuente: f.desde, hastaFuente: f.hasta,
       enLaSecuencia: Number(cursor.toFixed(3)), hasta: fin
     });
+    avance.fragmentos = puestos.length;
     cursor = fin;
   }
 
@@ -2518,6 +2577,7 @@ async function armarSecuencia(params) {
   const capas = Array.isArray(params.capas) ? params.capas : [];
   const capasPuestas = [];
   const capasFallidas = [];
+  const apagadasV = [];
 
   for (let i = 0; i < capas.length; i++) {
     const c = capas[i];
@@ -2555,6 +2615,7 @@ async function armarSecuencia(params) {
       const its = track ? await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
       let ok = false;
       for (let k = 0; k < its.length; k++) {
+        if (!its[k]) continue;  // el hueco de getTrackItems: ver el lazo de fragmentos
         const t = await tiemposDe(its[k]);
         if (Math.abs(t.desde - c.en) < 0.15) {
           ok = true;
@@ -2584,6 +2645,8 @@ async function armarSecuencia(params) {
             errorExtras: extras || undefined
           });
           if (quedoNombre === false) capasFallidas.push(`capa ${i + 1}: NO se renombró a "${c.nombre}"`);
+          if (c.apagado === true) apagadasV.push({ capa: i + 1, item: its[k], puesta: capasPuestas[capasPuestas.length - 1] });
+          avance.capas = capasPuestas.length;
           break;
         }
       }
@@ -2614,11 +2677,61 @@ async function armarSecuencia(params) {
       const its = track ? await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
       let sigue = false;
       for (let k = 0; k < its.length; k++) {
+        if (!its[k]) continue;
         const t = await tiemposDe(its[k]);
         if (Math.abs(t.desde - c.en) < 0.15 && Math.abs(t.hasta - c.hasta) < 0.15) { sigue = true; break; }
       }
       if (!sigue) capasRotas.push(`${c.pista} ${c.en.toFixed(2)}–${c.hasta.toFixed(2)}s (${c.medio || "?"})`);
     } catch (e) { capasRotas.push(`${c.pista} ${c.en}s: no se pudo releer`); }
+  }
+
+  /*
+   * EL AUDIO DE LAS CAPAS APAGADAS. `apagado` deshabilitaba sólo el item de VIDEO, y el audio
+   * vinculado seguía sonando: el 2026-09-24, en un podcast, las ISO —6 streams cada una—
+   * quedaron prendidas de A2 a A8 encima del switch, y el verbo informaba «2/2 capas, apagado». Es el
+   * agujero que `desactivar` cerró el 2026-09-10, y que ahí también quedaba a medias: un socio por
+   * clip.
+   *
+   * Los socios salen de `sociosDe`, en una pasada para todas las capas: TODOS los streams, y el audio
+   * que no se puede atribuir sin adivinar —un suplente sacado del mismo archivo que el plano de
+   * abajo— queda sin tocar y se dice. Se apagan con `enLotes`: 57 capas de 6 streams son 342
+   * acciones, que en una sola transacción es el cuelgue medido con 50.
+   */
+  let audioApagado = null;
+  if (apagadasV.length) {
+    audioApagado = { capas: apagadasV.length, socios: 0, quedaron: 0, sinSocio: [], dudosas: [], transacciones: 0, error: null };
+    try {
+      const res = await sociosDe(nueva, apagadasV.map((a) => a.item), true);
+      const vistos = new Set();
+      const socios = [];
+      const gruposTx = [];
+      res.forEach((r, j) => {
+        const a = apagadasV[j];
+        if (r.motivo) audioApagado.dudosas.push(`capa ${a.capa}: ${r.motivo}`);
+        else if (!r.socios.length) audioApagado.sinSocio.push(a.capa);
+        const g = [];
+        for (const so of r.socios) {
+          const k = so.pista + "|" + so.indice;
+          if (vistos.has(k)) continue;
+          vistos.add(k);
+          socios.push(so);
+          g.push(() => so.clip.createSetDisabledAction(true));
+        }
+        a.puesta.audioVinculado = g.length;
+        gruposTx.push(g);
+      });
+      audioApagado.socios = socios.length;
+      if (socios.length) {
+        const tx = await enLotes(project, gruposTx, "apagar el audio de las capas apagadas");
+        audioApagado.transacciones = tx.lotes;
+        if (tx.errores.length) audioApagado.error = tx.errores.join(" · ");
+        // Se relee: que la acción entrara no prueba que el estado quedó.
+        for (const so of socios) {
+          try { if ((await so.clip.isDisabled()) === true) audioApagado.quedaron++; } catch (e) { /* audio sin getter */ }
+        }
+        audioApagado.pistas = Array.from(new Set(socios.map((x) => x.pista)));
+      }
+    } catch (e) { audioApagado.error = e && e.message ? e.message : String(e); }
   }
 
   /*
@@ -2656,6 +2769,7 @@ async function armarSecuencia(params) {
   const nombreReal = String(nueva.name || nombre);
   const cortoPunto = nombre.lastIndexOf(".") !== -1 && nombreReal === nombre.slice(0, nombre.lastIndexOf("."));
 
+  delete A_MEDIAS.armarSecuencia;
   return {
     resumen:
       `Secuencia "${nombreReal}"` +
@@ -2683,6 +2797,22 @@ async function armarSecuencia(params) {
         ? ` · ${capasRotas.length} capa(s) SE PISARON entre sí y ya no están enteras: ${capasRotas.join(", ")} — dos capas en la misma pista y la misma posición se comen; poné cada una en su pista`
         : "") +
       (capasFallidas.length ? ` · CAPAS FALLIDAS: ${capasFallidas.join(" | ")}` : "") +
+      (audioApagado
+        ? (audioApagado.socios
+            ? ` · audio de las capas apagadas: ${audioApagado.quedaron}/${audioApagado.socios} clip(s) apagados`
+            : " · audio de las capas apagadas: no se apagó ninguno") +
+          (audioApagado.pistas ? ` (${audioApagado.pistas.join(", ")})` : "") +
+          (audioApagado.transacciones > 1 ? ` en ${audioApagado.transacciones} transacciones` : "") +
+          (audioApagado.quedaron < audioApagado.socios ? " · OJO: el resto SIGUE SONANDO, releé con clips" : "") +
+          (audioApagado.error ? ` · OJO: ${audioApagado.error} — el audio de esas capas PUEDE ESTAR SONANDO` : "") +
+          (audioApagado.dudosas.length
+            ? ` · OJO: audio SIN TOCAR porque no se puede atribuir sin adivinar: ${audioApagado.dudosas.join(" | ")}` : "") +
+          (audioApagado.sinSocio.length ? ` · sin audio vinculado: capa(s) ${audioApagado.sinSocio.join(", ")}` : "")
+        : "") +
+      (sinReleer.length
+        ? ` · OJO: la API devolvió huecos al releer ${sinReleer.length} fragmento(s) y su fin se CALCULÓ, ` +
+          `puede haber un cuadro de hueco o de solape: ${sinReleer.join(", ")} — pasá revisar`
+        : "") +
       (inOutLimpiados === null ? "" :
         inOutLimpiados ? ` · in/out devueltos en ${inOutLimpiados} medio(s)` :
         " · OJO: NO se pudieron devolver los in/out de los medios, quedaron recortados en el panel") +
@@ -2698,10 +2828,67 @@ async function armarSecuencia(params) {
     inOutLimpiados: inOutLimpiados,
     puestos: puestos,
     capasPuestas: capasPuestas,
+    audioApagado: audioApagado,
+    sinReleer: sinReleer,
     capasFallidas: capasFallidas,
     fallidos: fallidos,
     duracionTotal: Number(cursor.toFixed(3))
   };
+}
+
+/**
+ * UNA secuencia por nombre, o rebota. La usan los verbos que destruyen o copian una secuencia.
+ *
+ * Antes cada uno agarraba «la primera cuyo nombre CONTIENE el texto» en el orden de
+ * `getSequences()`, y ese orden NO es el de creación: medido el 2026-09-24 en un podcast,
+ * la 05 nueva quedó en el puesto 10 y la vieja en el 18. Con «REEL 06» y «REEL 06 B» no había forma
+ * de nombrar sólo a la primera, y con dos «REEL 05» `borrarSecuencia` se llevó la NUEVA. Es la regla
+ * de `cerrarProyecto`: ante ambigüedad no se adivina.
+ *
+ * El orden: una coincidencia EXACTA gana sobre las parciales —si no, «REEL 06» nunca se podría
+ * nombrar—. Dos homónimas exactas no se distinguen por nombre, así que se piden por `duracion`
+ * (segundos, ±0,05), que es como la sesión que lo reportó terminó sabiendo cuál era cuál.
+ */
+async function unaSecuencia(lista, buscado, duracion) {
+  const q = norm(buscado).toLowerCase();
+  if (!q) throw new Error("Falta `nombre`: el nombre (o parte) de la secuencia. Se exige objetivo explícito.");
+  const nombres = [];
+  for (let i = 0; i < lista.length; i++) nombres.push(norm(lista[i].name));
+  const exactas = [], parciales = [];
+  for (let i = 0; i < lista.length; i++) {
+    const n = nombres[i].toLowerCase();
+    if (n === q) exactas.push(i); else if (n.indexOf(q) !== -1) parciales.push(i);
+  }
+  let cand = exactas.length ? exactas : parciales;
+  if (!cand.length) throw new Error(`No hay ninguna secuencia que coincida con "${buscado}". Hay: ${nombres.join(", ")}.`);
+
+  // La duración se lee sólo de las candidatas: son getters baratos, pero no se barre el proyecto.
+  const largo = async (i) => {
+    try { return Number(aSegundos(await lista[i].getEndTime()).toFixed(2)); } catch (e) { return null; }
+  };
+  if (typeof duracion === "number") {
+    const conLargo = [];
+    for (const i of cand) conLargo.push({ i: i, d: await largo(i) });
+    const pegan = conLargo.filter((c) => c.d !== null && Math.abs(c.d - duracion) <= 0.05);
+    if (pegan.length !== 1) {
+      throw new Error(`"${buscado}" con duración ${duracion}s: coinciden ${pegan.length} de ` +
+        conLargo.map((c) => `"${nombres[c.i]}" (${c.d === null ? "?" : c.d + "s"})`).join(", ") + ". NO se tocó nada.");
+    }
+    cand = [pegan[0].i];
+  }
+  if (cand.length > 1) {
+    const desc = [], largos = [];
+    for (const i of cand) { const d = await largo(i); largos.push(d); desc.push(`"${nombres[i]}" (${d === null ? "?" : d + "s"})`); }
+    /* Dos gemelas —mismo nombre y mismo largo— no se distinguen ni con `duracion`: pedirlo es mandar
+       a probar algo que no puede andar. Medido el 2026-09-24 con dos «X Copy» de 2 s. */
+    const gemelas = exactas.length > 1 && largos.every((d) => d !== null && Math.abs(d - largos[0]) <= 0.05);
+    throw new Error(`"${buscado}" coincide con ${cand.length}${exactas.length > 1 ? " con el MISMO nombre" : ""}: ` +
+      desc.join(", ") + ". " +
+      (gemelas ? "Tienen además el MISMO largo, así que por acá no se distinguen: la que sobre se borra a mano en Premiere. "
+        : exactas.length > 1 ? "Pasá `duracion` para elegir una. " : "Sé más específico (el nombre exacto gana). ") +
+      "NO se tocó nada.");
+  }
+  return { seq: lista[cand[0]], nombres: nombres };
 }
 
 /** Borra una secuencia del proyecto, por nombre. */
@@ -2710,16 +2897,11 @@ async function borrarSecuencia(params) {
   if (!project) throw new Error("No hay un proyecto abierto en Premiere.");
 
   const lista = await project.getSequences();
-  const nombres = [];
-  let objetivo = null;
-  for (let i = 0; i < lista.length; i++) {
-    const n = String(lista[i].name);
-    nombres.push(n);
-    if (!objetivo && n.toLowerCase().indexOf(String(params.nombre || "").toLowerCase()) !== -1) objetivo = lista[i];
-  }
-  if (!objetivo) throw new Error(`No hay ninguna secuencia que coincida con "${params.nombre}". Hay: ${nombres.join(", ")}.`);
+  const { seq: objetivo, nombres } = await unaSecuencia(lista, params.nombre, params.duracion);
 
   const nombreObjetivo = String(objetivo.name);
+  const largo = async (sq) => { try { return Number(aSegundos(await sq.getEndTime()).toFixed(2)); } catch (e) { return null; } };
+  const largoObjetivo = await largo(objetivo);
   let excepcion = null;
   try { await project.deleteSequence(objetivo); }
   catch (e) { excepcion = e && e.message ? e.message : String(e); }
@@ -2729,13 +2911,24 @@ async function borrarSecuencia(params) {
   const quedan = [];
   for (let i = 0; i < despues.length; i++) quedan.push(String(despues[i].name));
 
+  /* Y con homónimas, CUÁL: que la cuenta baje en uno no dice cuál se fue, que fue justo el reporte
+     —con dos «REEL 05» se llevó la NUEVA—. Se dice el largo de la borrada y el de las que quedan. */
+  const homonimas = [];
+  for (let i = 0; i < despues.length; i++) {
+    if (norm(despues[i].name).toLowerCase() === norm(nombreObjetivo).toLowerCase()) homonimas.push(await largo(despues[i]));
+  }
+  const fmt = (d) => (d === null ? "?" : d + "s");
+
   return {
     resumen:
-      `"${nombreObjetivo}": ${nombres.length} → ${quedan.length} secuencias` +
+      `"${nombreObjetivo}"${largoObjetivo === null ? "" : ` (${largoObjetivo}s)`}: ${nombres.length} → ${quedan.length} secuencias` +
       (excepcion ? ` · excepción: ${excepcion}` : "") +
       (quedan.length < nombres.length ? "" : " · NO SE BORRÓ") +
+      (homonimas.length ? ` · quedan ${homonimas.length} con el mismo nombre: ${homonimas.map(fmt).join(", ")}` : "") +
       ` · quedan: ${quedan.join(", ")}`,
     borrada: quedan.length < nombres.length,
+    duracionBorrada: largoObjetivo,
+    homonimasQuedan: homonimas,
     quedan: quedan
   };
 }
@@ -3611,6 +3804,124 @@ async function audioQueCubre(sequence, clip) {
  * objetos, así que compararlos como texto da "[object Object]" y no matchea
  * nada. La pista es un dato inequívoco y se recorre igual.
  */
+/*
+ * LOS SOCIOS DEL OTRO TIPO DE VARIOS CLIPS, en UNA pasada por las pistas (2026-09-24).
+ *
+ * El vínculo la API no lo expone: se deduce por el mismo medio con el mismo inicio y el mismo fin
+ * en ticks, la regla de `buscarVinculados`. Pero `desactivar` guardaba UN socio por clip —el primero
+ * que aparecía— y un medio multicanal deja uno POR PISTA: una ISO de 6 streams quedaba con 5
+ * sonando, y el resumen decía «1 de 1 vinculado también». `armarSecuencia` con `apagado` no buscaba
+ * ninguno (un reporte de uso). Acá se devuelven TODOS.
+ *
+ * Y lo que la regla no distingue se dice, no se adivina. Dos planos de VIDEO del mismo medio en el
+ * mismo instante —un suplente sacado del mismo archivo que el principal, o un alt-drag— dan la
+ * misma clave, y el audio de uno se leería como del otro. Ahí se desempata por el in-point de
+ * FUENTE; si igual no se puede, ese clip se queda sin socios y `motivo` dice por qué. Apagar el
+ * audio del plano principal creyendo que es el del suplente es el peor resultado posible: el
+ * resumen diría que salió bien.
+ *
+ * `clips` son track items de UN tipo (`sonVideo`). Devuelve, en el mismo orden, `{ socios, motivo }`,
+ * con `motivo` en null cuando no hubo nada que dudar. El inicio se lee primero: descarta casi todo
+ * sin pedirle el medio a cada item.
+ */
+async function sociosDe(sequence, clips, sonVideo) {
+  const leer = async (it) => {
+    const ini = String((await it.getStartTime()).ticks);
+    const fin = String((await it.getEndTime()).ticks);
+    const nom = String((await it.getProjectItem()).name);
+    let entrada = null;
+    try { entrada = String((await it.getInPoint()).ticks); } catch (e) { entrada = null; }
+    return { ini: ini, clave: nom + "\u0000" + ini + "\u0000" + fin, nombre: nom, entrada: entrada };
+  };
+  const fuentes = [];
+  for (const c of clips) {
+    try { fuentes.push(await leer(c)); } catch (e) { fuentes.push(null); }
+  }
+  const inicios = new Set(fuentes.filter(Boolean).map((f) => f.ini));
+
+  const indexar = async (esVideo) => {
+    const indice = new Map();
+    const cuantas = esVideo ? await sequence.getVideoTrackCount() : await sequence.getAudioTrackCount();
+    for (let t = 0; t < cuantas; t++) {
+      const track = esVideo ? await sequence.getVideoTrack(t) : await sequence.getAudioTrack(t);
+      if (!track) continue;
+      const its = await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
+      for (let i = 0; i < its.length; i++) {
+        if (!its[i]) continue;   // el hueco de getTrackItems: ver `armarSecuencia`
+        let l = null;
+        try {
+          if (!inicios.has(String((await its[i].getStartTime()).ticks))) continue;
+          l = await leer(its[i]);
+        } catch (e) { continue; }
+        if (!indice.has(l.clave)) indice.set(l.clave, []);
+        indice.get(l.clave).push({ clip: its[i], pista: (esVideo ? "V" : "A") + (t + 1), indice: i, entrada: l.entrada });
+      }
+    }
+    return indice;
+  };
+  const deVideo = await indexar(true);
+  const deAudio = await indexar(false);
+
+  return fuentes.map((f) => {
+    if (!f) return { socios: [], motivo: "no se pudo leer el clip" };
+    const videos = deVideo.get(f.clave) || [];
+    const otros = (sonVideo ? deAudio.get(f.clave) : videos) || [];
+    // Un solo plano de video con esa clave: todo lo del otro tipo es suyo, un stream por pista.
+    if (videos.length <= 1) return { socios: otros, motivo: null };
+    if (f.entrada === null) {
+      return { socios: [], motivo: `hay ${videos.length} planos de "${f.nombre}" en el mismo instante y no se pudo leer el in-point` };
+    }
+    if (sonVideo && videos.filter((v) => v.entrada === f.entrada).length > 1) {
+      return { socios: [], motivo: `hay ${videos.length} copias iguales de "${f.nombre}" en el mismo instante: no se sabe de cuál es el audio` };
+    }
+    const suyos = otros.filter((o) => o.entrada === f.entrada);
+    if (!suyos.length || (!sonVideo && suyos.length > 1)) {
+      return { socios: [], motivo: `hay ${videos.length} planos de "${f.nombre}" en el mismo instante y el in-point no desempata` };
+    }
+    return { socios: suyos, motivo: null };
+  });
+}
+
+/*
+ * ACCIONES EN LOTES, con el tope y la espera medidos (2026-09-24).
+ *
+ * `TOPE_LOTE` (10) y `MS_ENTRE_TX` son las dos mitades de la regla: con 50 acciones por transacción
+ * Premiere se colgó, y 27 transacciones seguidas adentro de una llamada lo tiraron. Apagar el audio
+ * de 57 capas de una ISO de 6 streams son 342 acciones: en UNA transacción es el primer caso, y de a
+ * una, el segundo.
+ *
+ * `grupos` es una lista de listas de fábricas de acciones, y un grupo —un clip con sus socios— no se
+ * parte nunca: se deshace entero con el mismo Cmd+Z. Un grupo más grande que el tope va solo.
+ */
+async function enLotes(project, grupos, nombre) {
+  const lotes = [];
+  let actual = [];
+  for (const g of grupos) {
+    if (!g.length) continue;
+    if (actual.length && actual.length + g.length > TOPE_LOTE) { lotes.push(actual); actual = []; }
+    actual = actual.concat(g);
+  }
+  if (actual.length) lotes.push(actual);
+  let corrieron = 0;
+  const errores = [];
+  for (let i = 0; i < lotes.length; i++) {
+    if (i) await esperarEntreTx();
+    try {
+      let ok = false;
+      project.lockedAccess(() => {
+        ok = project.executeTransaction((a) => {
+          for (const f of lotes[i]) a.addAction(f());
+        }, nombre + (lotes.length > 1 ? ` (${i + 1}/${lotes.length})` : ""));
+      });
+      if (ok) corrieron++;
+      else errores.push(`lote ${i + 1}: la transacción devolvió false`);
+    } catch (e) {
+      errores.push(`lote ${i + 1}: ${e && e.message ? e.message : e}`);
+    }
+  }
+  return { lotes: lotes.length, corrieron: corrieron, errores: errores };
+}
+
 async function buscarVinculados(sequence, clip) {
   const inicio = String((await clip.getStartTime()).ticks);
   const fin = String((await clip.getEndTime()).ticks);
@@ -3637,6 +3948,7 @@ async function buscarVinculados(sequence, clip) {
       if (!track) continue;
       const items = await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
       for (let i = 0; i < items.length; i++) {
+        if (!items[i]) continue;   // el hueco de getTrackItems: ver `armarSecuencia`
         if (items[i] === clip) { esVideo = grupo.video; continue; }
         if (String((await items[i].getStartTime()).ticks) !== inicio) continue;
         if (String((await items[i].getEndTime()).ticks) !== fin) continue;
@@ -7812,17 +8124,8 @@ async function duplicarSecuencia(params) {
   if (!project) throw new Error("No hay un proyecto abierto en Premiere.");
 
   const lista = await project.getSequences();
-  const nombres = [];
-  let objetivo = null;
-  const buscada = String(params.nombre || "").toLowerCase();
-  for (let i = 0; i < lista.length; i++) {
-    const n = String(lista[i].name);
-    nombres.push(n);
-    if (!objetivo && buscada && n.toLowerCase().indexOf(buscada) !== -1) objetivo = lista[i];
-  }
-  if (!objetivo) {
-    throw new Error(`No hay ninguna secuencia que coincida con "${params.nombre}". Hay: ${nombres.join(", ")}.`);
-  }
+  // Duplicar la equivocada no rompe nada, pero el llamador edita la copia creyendo que es otra.
+  const { seq: objetivo, nombres } = await unaSecuencia(lista, params.nombre, params.duracion);
   const nombreOrigen = String(objetivo.name);
   const antes = lista.length;
 
@@ -7851,11 +8154,22 @@ async function duplicarSecuencia(params) {
     throw new Error(`No se pudo duplicar "${nombreOrigen}". Intentos: ${intentos.join(" | ")}.`);
   }
 
-  // Cuál es la nueva: la que no estaba antes.
+  /*
+   * CUÁL ES LA NUEVA: por `guid`, no por nombre (2026-09-24). Premiere le pone «X Copy» a TODAS las
+   * copias, así que con una copia vieja del mismo nombre la nueva no aparecía como nueva: no se
+   * renombraba y el resumen decía «la copia se llama "?"» sin avisar. Medido en el proyecto de
+   * prueba: la segunda copia de «REP BORRAR A B» salió «REP BORRAR A B Copy», igual que la primera.
+   * El nombre queda de respaldo, para el caso en que los guid no se puedan leer o no distingan.
+   */
+  const guidDe = (sq) => { try { const g = String(sq.guid); return g && g !== "undefined" && g !== "null" ? g : null; } catch (e) { return null; } };
+  const guidsAntes = lista.map(guidDe);
+  const porGuid = guidsAntes.every(Boolean) && new Set(guidsAntes).size === guidsAntes.length;
   const nuevos = [];
   for (let i = 0; i < despues.length; i++) {
     const n = String(despues[i].name);
-    if (nombres.indexOf(n) === -1) nuevos.push({ seq: despues[i], nombre: n });
+    const g = guidDe(despues[i]);
+    const esNueva = porGuid ? (g !== null && guidsAntes.indexOf(g) === -1) : nombres.indexOf(norm(n)) === -1;
+    if (esNueva) nuevos.push({ seq: despues[i], nombre: n, guid: g });
   }
   /*
    * El renombre va por el ProjectItem, NO por la Sequence: `Sequence` no tiene
@@ -7865,32 +8179,50 @@ async function duplicarSecuencia(params) {
    */
   let renombrada = null;
   let fallaRenombre = null;
-  if (params.nuevoNombre && nuevos.length === 1) {
+  /* `saltados` va AFUERA del try: adentro, el `return` de abajo no lo veía y el verbo tiraba
+   * «saltados is not defined» DESPUÉS de haber duplicado —y, sin `nuevoNombre`, siempre—. Quien le
+   * creía al error duplicaba de nuevo (un reporte de uso, 2026-09-24). */
+  let saltados = 0;
+  if (params.nuevoNombre && nuevos.length !== 1) {
+    fallaRenombre = `no se pudo saber cuál es la copia nueva (${nuevos.length} candidata(s))`;
+  } else if (params.nuevoNombre) {
     const quiero = String(params.nuevoNombre);
     try {
-      const raiz = await project.getRootItem();
+      /* El ProjectItem sale de la PROPIA secuencia nueva. Buscarlo por nombre en el panel agarraba el
+         primero que se llamara «X Copy», que con una copia vieja es la vieja. El recorrido queda de
+         respaldo, y sólo si ese nombre es único. */
       let item = null;
-      let saltados = 0;
-      const buscar = async (carpeta, prof) => {
-        if (item || prof > 8) return;
-        const hijos = await hijosDe(carpeta);
-        if (!hijos) return;
-        for (let i = 0; i < hijos.length && !item; i++) {
-          const n0 = nombreDeItem(hijos[i]);
-          if (n0 === null) { saltados++; continue; }
-          if (n0 === nuevos[0].nombre) { item = hijos[i]; return; }
-          await buscar(hijos[i], prof + 1);
-        }
-      };
-      await buscar(raiz, 0);
-      if (!item) throw new Error(`no se encontró "${nuevos[0].nombre}" en el panel de proyecto`);
+      try { item = await nuevos[0].seq.getProjectItem(); } catch (e) { item = null; }
+      if (!item || typeof item.createSetNameAction !== "function") {
+        item = null;
+        const iguales = despues.filter((sq) => String(sq.name) === nuevos[0].nombre).length;
+        if (iguales !== 1) throw new Error(`hay ${iguales} secuencias "${nuevos[0].nombre}" y la nueva no da su ProjectItem`);
+        const raiz = await project.getRootItem();
+        const buscar = async (carpeta, prof) => {
+          if (item || prof > 8) return;
+          const hijos = await hijosDe(carpeta);
+          if (!hijos) return;
+          for (let i = 0; i < hijos.length && !item; i++) {
+            const n0 = nombreDeItem(hijos[i]);
+            if (n0 === null) { saltados++; continue; }
+            if (n0 === nuevos[0].nombre) { item = hijos[i]; return; }
+            await buscar(hijos[i], prof + 1);
+          }
+        };
+        await buscar(raiz, 0);
+        if (!item) throw new Error(`no se encontró "${nuevos[0].nombre}" en el panel de proyecto`);
+      }
 
       project.lockedAccess(() => {
         project.executeTransaction((a) => { a.addAction(item.createSetNameAction(quiero)); }, "renombrar la copia");
       });
-      // La prueba: releer la lista de secuencias.
+      /* La prueba: releer la lista y mirar LA NUEVA —por guid—, no cualquiera que se llame así: una
+         secuencia vieja con ese nombre confirmaba un renombre que no había pasado. */
       const rel = await project.getSequences();
-      for (let i = 0; i < rel.length; i++) if (String(rel[i].name) === quiero) renombrada = quiero;
+      for (let i = 0; i < rel.length; i++) {
+        const esLaNueva = nuevos[0].guid ? guidDe(rel[i]) === nuevos[0].guid : String(rel[i].name) === quiero;
+        if (esLaNueva && String(rel[i].name) === quiero) renombrada = quiero;
+      }
       if (!renombrada) fallaRenombre = `la copia sigue llamándose "${nuevos[0].nombre}"`;
     } catch (e) {
       fallaRenombre = e && e.message ? e.message : String(e);
@@ -7904,7 +8236,8 @@ async function duplicarSecuencia(params) {
   return {
     resumen:
       `Duplicada "${nombreOrigen}": ${antes} → ${despues.length} secuencias · ` +
-      `la copia se llama "${renombrada || (nuevos[0] ? nuevos[0].nombre : "?")}" · vía ${via}` +
+      (nuevos.length === 1 ? `la copia se llama "${renombrada || nuevos[0].nombre}"` : `NO SE SABE CUÁL ES LA COPIA: ${nuevos.length} candidata(s)`) +
+      ` · vía ${via}` + (porGuid ? "" : " · identificada por nombre: los guid no se pudieron leer") +
       (fallaRenombre ? ` · NO SE PUDO RENOMBRAR: ${fallaRenombre}` : "") +
       (saltados ? ` · OJO: ${saltados} item(s) del panel no se pudieron leer y se saltearon` : ""),
     origen: nombreOrigen,
@@ -10456,6 +10789,7 @@ async function desactivar(params) {
     const track = esAudio ? await sequence.getAudioTrack(idx) : await sequence.getVideoTrack(idx);
     const its = await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
     for (let i = 0; i < its.length; i++) {
+      if (!its[i]) continue;   // el hueco de getTrackItems: el índice se conserva para releer
       items.push({ clip: its[i], nombre: String(await its[i].getName()), pista: etiqueta, indice: i });
     }
     donde = `${etiqueta} entera (${items.length} clip(s))`;
@@ -10476,36 +10810,43 @@ async function desactivar(params) {
    * paliativo fue mutear A2/A3/A4 a mano en CORTE.
    */
   const traerSocios = params.vinculados !== false;
-  const socios = [];
+  /*
+   * `socios[n]` son TODOS los del clip n. Hasta el 2026-09-24 el índice guardaba UNO por clave —el
+   * primero que aparecía—, y una ISO de 6 streams quedaba con 5 sonando mientras el resumen decía
+   * «1 de 1 vinculado también». `dudosos` son los clips cuyo socio no se puede atribuir sin
+   * adivinar: dos planos del mismo medio en el mismo instante. Ver `sociosDe`.
+   */
+  const socios = items.map(() => []);
+  const dudosos = [];
   if (traerSocios) {
-    const hayVideo = items.some((it) => it.pista[0] === "V");
-    const hayAudio = items.some((it) => it.pista[0] === "A");
-    const indice = new Map();
-    const grupos = [];
-    if (hayVideo) grupos.push({ cuantas: await sequence.getAudioTrackCount(), traer: (i) => sequence.getAudioTrack(i), et: "A" });
-    if (hayAudio) grupos.push({ cuantas: await sequence.getVideoTrackCount(), traer: (i) => sequence.getVideoTrack(i), et: "V" });
-    for (const g of grupos) {
-      for (let t = 0; t < g.cuantas; t++) {
-        const track = await g.traer(t);
-        if (!track) continue;
-        const its = await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
-        for (let i = 0; i < its.length; i++) {
-          let nom = null;
-          try { nom = String((await its[i].getProjectItem()).name); } catch (e) { nom = null; }
-          const k = `${g.et}|${nom}|${String((await its[i].getStartTime()).ticks)}|${String((await its[i].getEndTime()).ticks)}`;
-          if (!indice.has(k)) indice.set(k, { clip: its[i], pista: g.et + (t + 1), indice: i });
-        }
-      }
-    }
-    for (const it of items) {
-      const otro = it.pista[0] === "V" ? "A" : "V";
-      let nom = null;
-      try { nom = String((await it.clip.getProjectItem()).name); } catch (e) { nom = null; }
-      const k = `${otro}|${nom}|${String((await it.clip.getStartTime()).ticks)}|${String((await it.clip.getEndTime()).ticks)}`;
-      socios.push(nom ? (indice.get(k) || null) : null);
+    for (const tipo of ["V", "A"]) {
+      const cuales = [];
+      items.forEach((it, n) => { if (it.pista[0] === tipo) cuales.push(n); });
+      if (!cuales.length) continue;
+      const res = await sociosDe(sequence, cuales.map((n) => items[n].clip), tipo === "V");
+      res.forEach((r, j) => {
+        socios[cuales[j]] = r.socios;
+        if (r.motivo) dudosos.push(`${items[cuales[j]].pista}[${items[cuales[j]].indice}]: ${r.motivo}`);
+      });
     }
   }
-  const conSocio = socios.filter(Boolean).length;
+
+  /* Cada clip va con SUS socios en el mismo grupo —un Cmd+Z saca el video y su audio juntos—, y un
+     socio que apareciera para dos clips se toca y se cuenta una vez. */
+  const tomados = new Set();
+  const sociosUnicos = [];
+  const gruposTx = items.map((it, n) => {
+    const g = [() => it.clip.createSetDisabledAction(!activar)];
+    for (const so of socios[n]) {
+      const k = so.pista + "|" + so.indice;
+      if (tomados.has(k)) continue;
+      tomados.add(k);
+      sociosUnicos.push(so);
+      g.push(() => so.clip.createSetDisabledAction(!activar));
+    }
+    return g;
+  });
+  const conSocio = sociosUnicos.length;
 
   /* El ANTES, leído clip por clip: `isDisabled` puede no existir en clips de audio. */
   const antes = [];
@@ -10517,16 +10858,12 @@ async function desactivar(params) {
   }
   const yaEstaban = antes.filter((x) => x === !activar).length;
 
-  let ok = false, error = null;
-  try {
-    project.lockedAccess(() => {
-      ok = project.executeTransaction((a) => {
-        for (const it of items) a.addAction(it.clip.createSetDisabledAction(!activar));
-        /* En la MISMA transaccion: un solo Cmd+Z saca el video y su audio juntos. */
-        for (const s of socios) if (s) a.addAction(s.clip.createSetDisabledAction(!activar));
-      }, activar ? "reactivar clips" : "desactivar clips");
-    });
-  } catch (e) { error = e && e.message ? e.message : String(e); }
+  /* En lotes de hasta `TOPE_LOTE` acciones, espaciados: una pista entera de ISOs son cientos de
+     acciones, y en UNA transacción es el cuelgue medido con 50. Con un clip y sus socios sigue
+     siendo UNA transacción. */
+  const tx = await enLotes(project, gruposTx, activar ? "reactivar clips" : "desactivar clips");
+  const ok = tx.lotes > 0 && tx.corrieron === tx.lotes;
+  const error = tx.errores.length ? tx.errores.join(" · ") : null;
 
   /* SE RELEE, y volviendo a PEDIR los items: el objeto viejo puede tener el estado
    * cacheado, que es lo que ya pasó con el nombre de pista en `renombrarPista`. */
@@ -10547,8 +10884,7 @@ async function desactivar(params) {
 
   /* Los socios tambien se releen: que la accion entrara no prueba que el estado quedo. */
   let sociosOk = 0;
-  for (const so of socios) {
-    if (!so) continue;
+  for (const so of sociosUnicos) {
     try { if ((await so.clip.isDisabled()) === !activar) sociosOk++; } catch (e) { /* audio sin getter */ }
   }
 
@@ -10564,12 +10900,16 @@ async function desactivar(params) {
   const pedido = activar ? "reactivar" : "desactivar";
   const cambiaron = Math.max(0, quedaron - yaEstaban);
   let veredicto;
-  if (!ok) {
+  if (!tx.corrieron) {
     veredicto = ` · LA TRANSACCIÓN NO CORRIÓ (ok=false): NADA de esto se aplicó` + (error ? ` · ${error}` : "");
+  } else if (!ok) {
+    veredicto = ` · CORRIERON ${tx.corrieron} de ${tx.lotes} transacciones: el resto NO se aplicó` + (error ? ` · ${error}` : "");
   } else if (cambiaron === 0) {
     veredicto = ` · NO CAMBIÓ NADA: ya estaban así. NO hay Cmd+Z que deshacer acá`;
   } else if (quedaron === items.length) {
-    veredicto = ` · UN Cmd+Z los saca todos, van en una sola transacción`;
+    veredicto = tx.lotes === 1
+      ? ` · UN Cmd+Z los saca todos, van en una sola transacción`
+      : ` · van en ${tx.lotes} transacciones de hasta ${TOPE_LOTE} acciones, cada clip con sus vinculados: ${tx.lotes} Cmd+Z`;
   } else {
     veredicto = ` · NO QUEDÓ COMO SE PIDIÓ, transacción ${ok}` + (error ? ` · ${error}` : "");
   }
@@ -10579,14 +10919,19 @@ async function desactivar(params) {
       `${donde}: ${pedido} · ${quedaron} de ${items.length} quedaron ${activar ? "activos" : "desactivados"}` +
       (cambiaron !== quedaron ? ` (${cambiaron} cambiaron, ${yaEstaban} ya estaban así)` : "") +
       (conSocio ? ` · ${sociosOk} de ${conSocio} vinculado(s) también` : "") +
-      (traerSocios && !conSocio ? ` · sin vinculados que arrastrar` : "") +
+      (traerSocios && !conSocio && !dudosos.length ? ` · sin vinculados que arrastrar` : "") +
+      (dudosos.length
+        ? ` · OJO: ${dudosos.length} clip(s) con sus vinculados SIN TOCAR, porque no se pueden atribuir sin adivinar —` +
+          `si hay que apagarlos, por pista con vinculados:false—: ${dudosos.join(" | ")}`
+        : "") +
       (!traerSocios ? ` · vinculados NO tocados (se pidió vinculados:false)` : "") +
       (noSeSabe ? ` · ${noSeSabe} no se pudo releer` : "") +
       (sinLeer ? ` · ${sinLeer} sin isDisabled (¿audio?)` : "") +
       veredicto,
     donde: donde, pedido: pedido, total: items.length, quedaron: quedaron,
     cambiaron: cambiaron, yaEstaban: yaEstaban,
-    vinculados: conSocio, vinculadosOk: sociosOk, transaccion: ok
+    vinculados: conSocio, vinculadosOk: sociosOk, dudosos: dudosos,
+    transacciones: tx.lotes, transaccion: ok
   };
 }
 
@@ -11921,7 +12266,7 @@ const PARAMS_DE = {
   borrar: ["dejarHueco", "indice", "nombre", "pista", "vinculados"],
   transcripcion: ["buscar", "crudo", "indice", "medio", "nombre", "palabras", "pista"],
   armarSecuencia: ["alto", "ancho", "capas", "fps", "fragmentos", "medio", "nombre", "preset"],
-  borrarSecuencia: ["nombre"],
+  borrarSecuencia: ["duracion", "nombre"],
   vistazo: ["ancho", "cuantos", "desde", "hasta"],
   mirarMedio: ["ancho", "cuantos", "medio", "tiempos"],
   analizar: ["ancho", "cuantos", "medio"],
@@ -11943,7 +12288,7 @@ const PARAMS_DE = {
   leerEscalas: ["desdeIndice", "limite", "pista"],
   aplicarAnim: ["desdeIndice", "limite", "pista", "plan", "porTransaccion"],
   unirVideo: ["pista", "rangos"],
-  duplicarSecuencia: ["nombre", "nuevoNombre"],
+  duplicarSecuencia: ["duracion", "nombre", "nuevoNombre"],
   api: ["objeto"],
 };
 
@@ -11959,6 +12304,17 @@ function distancia(a, b) {
               : Math.min(m[i - 1][j - 1] + 1, m[i][j - 1] + 1, m[i - 1][j] + 1);
   return m[b.length][a.length];
 }
+
+/*
+ * LO QUE UN VERBO DEJÓ HECHO CUANDO TIRA A MITAD (2026-09-24).
+ *
+ * Un verbo que CREA algo y después tira deja basura en el proyecto, y el error pelado no lo dice:
+ * `armarSecuencia` voló con «Cannot read properties of null (reading 'getStartTime')» dejando una
+ * secuencia con 23 de 34 fragmentos, y quien lo leyó no supo qué había quedado. El verbo anota acá,
+ * apenas crea, cómo describir lo que quedó y qué deshacer —los in/out que escribió en los medios—,
+ * y lo borra antes de devolver. Si tira en el medio, `ejecutar` lo usa para que el error lo diga.
+ */
+const A_MEDIAS = {};
 
 /*
  * Se cuelga del global y no de module.exports: los scripts se cargan con
@@ -12208,5 +12564,17 @@ async function ejecutar(cmd, params) {
       }
     }
   }
-  return await fn(p);
+  delete A_MEDIAS[cmd];
+  try {
+    return await fn(p);
+  } catch (e) {
+    const am = A_MEDIAS[cmd];
+    delete A_MEDIAS[cmd];
+    if (!am) throw e;
+    let limpio = "";
+    try { limpio = am.limpiar ? await am.limpiar() : ""; }
+    catch (e2) { limpio = "OJO: tampoco se pudo deshacer lo de los medios: " + String((e2 && e2.message) || e2).slice(0, 80); }
+    throw new Error(`"${cmd}" SE CORTÓ A MEDIAS: ${am.describir()}` + (limpio ? ` · ${limpio}` : "") +
+      ` · el error: ${e && e.message ? e.message : e}`);
+  }
 }

@@ -75,8 +75,11 @@ const flag = (n) => args.indexOf("--" + n) !== -1;
  * argumento de curl y ahi queda visible en `ps` mientras dura el pedido; con fetch no hay argv. */
 const KEY = process.env.ELEVENLABS_API_KEY;
 if (!KEY) {
-  console.error("Falta $ELEVENLABS_API_KEY. Ponela en tu shell:\n" +
-                '  echo \'export ELEVENLABS_API_KEY="..."\' >> ~/.zshrc');
+  /* NO en ~/.zshrc: Claude Code no hereda sus export —de la shell pasa sólo el PATH—, así que el
+   * aviso viejo mandaba justo al lugar que no anda (2026-09-24). */
+  console.error("Falta $ELEVENLABS_API_KEY. Desde Claude Code va en el \"env\" de ~/.claude/settings.json\n" +
+                '  ("env": { "ELEVENLABS_API_KEY": "..." }) y se lee al ABRIR la sesión: abrí una nueva.\n' +
+                "  ~/.zshrc sólo sirve para correrlo desde una terminal propia: las sesiones no lo leen.");
   process.exit(1);
 }
 const H = { "xi-api-key": KEY, "Content-Type": "application/json" };

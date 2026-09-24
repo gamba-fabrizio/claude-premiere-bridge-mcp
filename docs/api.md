@@ -357,6 +357,14 @@ en 10s.
 compararlos como texto da `[object Object]` y el filtro sale invertido — se
 probó, y dio exactamente al revés.
 
+**Un medio multicanal deja UN clip de audio por pista**, todos con el mismo inicio,
+fin e in-point que su video (medido con 6 streams mono): los socios son TODOS, no el
+primero. Y dos planos del mismo medio en el mismo instante —un suplente sacado del
+mismo archivo que el principal— tienen la misma clave: se desempatan por el in-point
+de fuente, y si ni así, no se tocan. Es `sociosDe`, que usan `desactivar` y `apagado`.
+Ojo que después de ARRASTRAR un clip el in-point del video se recuantiza y el del
+audio no: ahí el desempate falla, y lo que no se puede atribuir queda sin tocar.
+
 ## Cortar por texto
 
 El flujo completo anda: `premiere_transcripcion` da los tiempos, se eligen los
@@ -426,7 +434,10 @@ el bridge: cada una es una medición contra Premiere, no una deducción del nomb
 - `Project.createProject(ruta)` con la carpeta padre inexistente NO falla: crea un gzip sin
   extensión un nivel más arriba e informa éxito. El prevuelo de `server/bridge.js` lo rebota antes.
 - `project.close(opts)` con `CloseProjectOptions.setPromptIfDirty(false)` cierra sin preguntar y
-  DESCARTA lo que no estaba guardado.
+  DESCARTA lo que no estaba guardado. Con `save()` antes —lo que hace `cerrarProyecto` sin
+  `descartar`— lo sucio llega al disco, y el foco cae solo en otro proyecto abierto.
+- `project.save()` reescribe el `.prproj` aunque no haya cambios: una fecha que no se movió después
+  de guardar es un guardado que no escribió (medido el 2026-09-24).
 - `ProjectUtils.getProjectViewIds()` + `getProjectFromViewId()` enumeran los proyectos abiertos;
   `ProjectUtils.getSelection(project)` da la selección del panel de proyecto.
 - `ProjectSettings.getScratchDiskSettings(project).getScratchDiskPath(FOLDERTYPE_*)` lee los
@@ -469,6 +480,10 @@ el bridge: cada una es una medición contra Premiere, no una deducción del nomb
 - `createSubsequence()` copia el contenido a una secuencia nueva y deja la madre igual: no anida.
   Una nest es `armarSecuencia` + `insertar`.
 - `getCaptionTrackCount()` vive en `Sequence`; no hay fábrica para crear una pista de captions.
+- `getSequences()` NO devuelve en orden de creación. Dos secuencias con el mismo nombre se
+  distinguen por `String(seq.guid)`, y `seq.getEndTime()` da el largo también de una que no es la
+  activa. Para renombrar una, su `ProjectItem` sale de `seq.getProjectItem()`: Premiere le pone
+  «X Copy» a TODAS las copias, así que buscarla por nombre en el panel agarra la vieja.
 - `SequenceEditor.getEditor(seq).insertMogrtFromPath(ruta, tick, pistaV, pistaA)` coloca un MOGRT;
   su `Source Text` no se puede escribir.
 
@@ -483,7 +498,8 @@ el bridge: cada una es una medición contra Premiere, no una deducción del nomb
   audio vinculado no.
 - `TrackItem.getTrackIndex()` es 0-based y separa dos copias del mismo clip en el mismo instante.
 - `isDisabled()` lo tienen los clips de video y los de audio; `isAdjustmentLayer()`, solo
-  `VideoClipTrackItem`.
+  `VideoClipTrackItem`. `createSetDisabledAction(true)` sobre el audio lo calla en el render: medido
+  por banda en un export, -47 dB apagado contra -2 dB prendido.
 - `VideoTrack.isMuted()` / `setMute()` es el ojito de la pista y llega al render; no pasa por
   `executeTransaction`.
 - `getTrackItems(tipo, false)`: con `true` incluye los vacíos, y sin el segundo argumento tira

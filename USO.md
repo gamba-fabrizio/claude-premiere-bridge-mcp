@@ -45,8 +45,10 @@ en `CLAUDE.md`.
 - **`editar salida` es un punto de FUENTE, no una duración.** Un PNG o un Transparent Video entran
   con in-point ~3600: leé la `entrada` real y sumale la duración. Y **`editar entrada` además
   MUEVE el clip**: la entrada en una llamada y `desde` en otra.
-- **`borrar` y `editar` arrastran el audio vinculado**, que se deduce por medio y rango iguales;
-  `desactivar` también apaga el audio socio.
+- **`borrar` y `editar` arrastran el audio vinculado**, que se deduce por medio y rango iguales.
+  `desactivar` y el `apagado` de las capas apagan también el audio socio: TODOS los streams de un
+  medio multicanal. Si dos planos del mismo medio están en el mismo instante y el in-point no
+  desempata, no lo tocan y lo dicen.
 - **`pistaAudio` es 1-based (A1 es 1)**: 0 rebota, y una que no existe se crea, pero UNA y al final:
   pidiendo A9 con seis, el audio cae en A7 (`pistaAudioReal` dice dónde quedó). El overwrite PISA
   también en audio, así que dos cosas en la misma pista y posición se comen.
@@ -57,7 +59,10 @@ en `CLAUDE.md`.
 - **`armarSecuencia` crea aunque el nombre exista**, no reemplaza. `fragmentos` son
   `{desde, hasta, medio}` en segundos de FUENTE; `capas`, `{en, dura, pista, medio, desde,
   pistaAudio}`. Pone los fps y el formato del reloj que les toca, y lo relee: si no entra, lo
-  dice. Y Premiere corta el nombre después del último punto: `secuencia` trae el que quedó.
+  dice. Y Premiere corta el nombre después del último punto: `secuencia` trae el que quedó. Si se
+  corta a mitad, el error dice qué secuencia dejó y con cuántos fragmentos y capas.
+- **`borrar_secuencia` elige por el nombre EXACTO**; si coinciden varias rebota, y dos con el mismo
+  nombre se eligen con `duracion`. Dos gemelas —mismo nombre y mismo largo— se borran a mano.
 - **`marcar` cuantiza al cuadro.** Con `clip`, el marcador va al MEDIO: `segundos` es tiempo de
   fuente y aparece en toda instancia de ese material.
 - **`transicion` es solo video** —el crossfade de audio va a mano— y no se puede releer: el conteo
@@ -77,6 +82,10 @@ en `CLAUDE.md`.
 - **`relink` no tiene Cmd+Z**, y `clonar` puede crear pistas de video que nada borra.
 - **Los proxies no tienen `detachProxy`**: no adjuntes uno que viva en una carpeta temporal.
 - **Las rutas que devuelve la API vienen en NFD**: pasalas tal cual, nunca retipeadas.
+- **`cerrar_proyecto` guarda antes de cerrar y no descarta nunca.** No cierra el último abierto ni
+  uno cuyo `.prproj` ya no está en disco —guardarlo abriría un cartel que el panel no ve—: esos los
+  cierra el editor. Si el que cerrás tenía el foco, el foco se va solo a otro, y el resumen dice a
+  cuál.
 
 ## Lo que NO se hace por el bridge
 
@@ -84,6 +93,8 @@ en `CLAUDE.md`.
 - Leer valores de efectos en volumen: tiró Premiere cuatro veces.
 - Replicar un look para retocarlo después: Cmd+C / Cmd+V, ver `copiarEfecto`.
 - Importar una transcripción o crear captions: el Import del panel Text, a mano.
+- Cerrar un proyecto DESCARTANDO sus cambios, tampoco por el transporte directo: lo decide el
+  editor, a mano.
 - Formatos de intercambio (AAF, FCPXML, OTIO): a mano, porque pierden cosas en silencio.
 
 ## Premiere y la máquina

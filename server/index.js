@@ -38,6 +38,13 @@ const { enviar } = require("./bridge.js");
  * `.strict()` hace que zod TIRE nombrando la clave, y de paso el JSON Schema sale con
  * `additionalProperties: false`, asi que la restriccion se ve ANTES de llamar.
  */
+/*
+ * Y ADENTRO TAMBIÉN (2026-09-24): `.strict()` en `soloEstas` cierra el PRIMER nivel, y los objetos de
+ * adentro de un array seguían descartando en silencio. `capas` no declaraba `pistaAudio` —que el
+ * panel sí lee y USO.md documenta—, así que pedirlo desde MCP lo tiraba sin aviso y el audio caía
+ * en otra pista. Es el agujero de arriba, un nivel más abajo: todo `z.object` de este archivo va
+ * con `.strict()`, y `test.js` lo exige.
+ */
 function soloEstas(shape) {
   return z.object(shape).strict();
 }
@@ -600,7 +607,7 @@ server.registerTool(
           medio: z.string().optional().describe("De qué medio sale este fragmento. Sin esto, el `medio` general."),
           desde: z.number().min(0).describe("Segundo de la FUENTE donde arranca el fragmento."),
           hasta: z.number().min(0).describe("Segundo de la FUENTE donde termina.")
-        }))
+        }).strict())
         .min(1)
         .describe("Los pedazos a pegar, en orden. Pueden salir de medios distintos."),
       capas: z
@@ -611,16 +618,19 @@ server.registerTool(
           desde: z.number().min(0).optional().describe("Segundo de la FUENTE donde empieza el pedazo. Por defecto 0, que sirve para un generador pero no para un pedazo concreto de un clip real."),
           dura: z.number().min(0).describe("Cuánto dura, en segundos."),
           nombre: z.string().optional().describe("Renombra el clip puesto, para rotular qué es sin tener que abrirlo."),
-          apagado: z.boolean().optional().describe("Lo deja apagado: ocupa lugar en la pista y no se ve. Sirve para dejar tomas alternativas a mano sin que tapen al titular.")
-        }))
+          pistaAudio: z.number().int().min(1).optional().describe("Pista de AUDIO, 1-based (A1 es 1). Por defecto la del mismo número que `pista`. Un medio de varios streams ocupa ésa y las siguientes, una por stream."),
+          apagado: z.boolean().optional().describe("Lo deja apagado —el video y TODO su audio vinculado—: ocupa lugar en la pista y ni se ve ni suena. Sirve para dejar tomas alternativas a mano sin que tapen al titular.")
+        }).strict())
         .optional()
         .describe("Medios en posiciones explícitas: capas de anotación, o una pista de tomas alternativas apagadas sobre el corte.")
     })
   },
   async (args) => {
     try {
-      const r = await enviar("armarSecuencia", args, 180000);
-      return texto(r.resumen, { puestos: r.puestos, capasPuestas: r.capasPuestas, fallidos: r.fallidos, capasFallidas: r.capasFallidas, duracion: r.duracionTotal, reajuste: r.reajuste, inOutLimpiados: r.inOutLimpiados });
+      /* 10 minutos: apagar el audio de muchas capas va en lotes espaciados —57 capas de 6 streams
+         son ~23 s más—, y con 180 s el servidor podía dejar de esperar a un panel que seguía. */
+      const r = await enviar("armarSecuencia", args, 600000);
+      return texto(r.resumen, { puestos: r.puestos, capasPuestas: r.capasPuestas, fallidos: r.fallidos, capasFallidas: r.capasFallidas, audioApagado: r.audioApagado, sinReleer: r.sinReleer, duracion: r.duracionTotal, reajuste: r.reajuste, inOutLimpiados: r.inOutLimpiados });
     } catch (e) {
       return fallo(e);
     }
@@ -645,13 +655,20 @@ server.registerTool(
           + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
           + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
         ),
-      nombre: z.string().describe("Parte del nombre de la secuencia a borrar.")
+      nombre: z.string().describe(
+        "Nombre (o parte) de la secuencia a borrar. El nombre EXACTO gana sobre las parciales; si "
+        + "igual coincide con más de una, REBOTA listándolas con su duración y no borra nada."
+      ),
+      duracion: z.number().optional().describe(
+        "Duración en segundos (±0,05) de la que se quiere borrar, para elegir entre dos secuencias "
+        + "con el MISMO nombre: el orden del proyecto no es el de creación."
+      )
     })
   },
-  async ({ nombre, proyecto, secuencia }) => {
+  async ({ nombre, duracion, proyecto, secuencia }) => {
     try {
-      const r = await enviar("borrarSecuencia", { nombre, proyecto, secuencia });
-      return texto(r.resumen, { borrada: r.borrada, quedan: r.quedan });
+      const r = await enviar("borrarSecuencia", { nombre, duracion, proyecto, secuencia });
+      return texto(r.resumen, { borrada: r.borrada, duracionBorrada: r.duracionBorrada, homonimasQuedan: r.homonimasQuedan, quedan: r.quedan });
     } catch (e) {
       return fallo(e);
     }
@@ -914,7 +931,7 @@ server.registerTool(
         .array(z.object({
           desde: z.number().min(0).describe("Segundo de la secuencia donde arranca el tramo a sacar."),
           hasta: z.number().min(0).describe("Segundo donde termina.")
-        }))
+        }).strict())
         .min(1)
         .describe("Los tramos a sacar. El orden no importa."),
       pista: z.union([z.number().int().min(1), z.string()]).optional().describe("Pista sobre la que operar. Por defecto V1.")
@@ -1056,7 +1073,7 @@ const PUNTO = z.object({
   valor: z.union([z.number(), z.boolean()]).optional().describe("Para params numéricos o de casilla."),
   x: z.number().optional().describe("Para params de punto: fracción horizontal (0.5 es el centro)."),
   y: z.number().optional().describe("Para params de punto: fracción vertical.")
-});
+}).strict();
 
 server.registerTool(
   "premiere_keyframe",
@@ -1626,9 +1643,15 @@ server.registerTool(
       "paliativo fue mutear A2/A3/A4 a mano--. El emparejado indexa el otro tipo en UNA pasada, no " +
       "llamando `buscarVinculados` por clip: eso serian N recorridos, el patron medido como causa de " +
       "crash. Con `vinculados:false` se toca solo lo nombrado.\n\n" +
-      "**Sin `indice` ni `nombre` opera sobre LA PISTA ENTERA, y todo en UNA transaccion.** Es a " +
-      "proposito: el caso real son decenas de suplentes, y una rafaga de transacciones tira Premiere " +
-      "con SIGSEGV. Un solo Cmd+Z deshace toda la tanda.\n\n" +
+      "**TODOS los streams**: un medio multicanal deja un clip de audio por pista, y se apagan todos. " +
+      "Hasta el 2026-09-24 se apagaba UNO: una ISO de 6 streams quedaba con 5 sonando. Y si dos planos " +
+      "de video del mismo medio estan en el mismo instante —un suplente sacado del mismo archivo que el " +
+      "principal—, el audio se atribuye por el in-point de fuente, y si ni eso desempata NO se toca: el " +
+      "resumen lo nombra en vez de adivinar.\n\n" +
+      "**Sin `indice` ni `nombre` opera sobre LA PISTA ENTERA**, en lotes de hasta 10 acciones " +
+      "espaciados, con cada clip y sus vinculados siempre en la misma transaccion. Es el tope medido: " +
+      "con 50 acciones Premiere se colgo, y una pista de ISOs son cientos. El resumen dice cuantos " +
+      "Cmd+Z; un clip solo con sus vinculados es uno.\n\n" +
       "**Exige objetivo**: un pedido sin `pista` ni `nombre` se rechaza en vez de desactivar la " +
       "secuencia entera.\n\n" +
       "**Se relee cada clip despues**, volviendo a pedirlos a la pista: que executeTransaction " +
@@ -1648,8 +1671,8 @@ server.registerTool(
       nombre: z.string().optional().describe("Nombre (o parte) del clip, alternativa al indice."),
       activar: z.boolean().optional().describe("true los REACTIVA. Por default desactiva."),
       vinculados: z.boolean().optional().describe(
-        "Por default TRUE: apagar un video apaga tambien su audio vinculado, en la MISMA " +
-        "transaccion. false toca solo lo que se nombra."),
+        "Por default TRUE: apagar un video apaga tambien su audio vinculado —todos los streams—, en la " +
+        "MISMA transaccion que el clip. false toca solo lo que se nombra."),
       secuencia: z.string().optional().describe("Guarda: rechaza si la secuencia activa no es esta.")
     })
   },
@@ -1863,6 +1886,160 @@ server.registerTool(
       return texto(r.resumen, { antes: r.antes, despues: r.despues, via: r.via, abrio: r.abrio });
     } catch (e) {
       return texto("ERROR: " + (e && e.message ? e.message : String(e)));
+    }
+  }
+);
+
+/*
+ * CERRAR UN PROYECTO (2026-09-24). El verbo `cerrarProyecto` existe desde el 2026-09-11 y hasta
+ * hoy lo llamaba solo `recargar.js`, que cierra DESCARTANDO los huerfanos antes del Cmd+Q. Lo
+ * pidio una sesion de uso, y NO se expone tal cual: dos cosas del verbo son
+ * seguras adentro de `recargar.js` y peligrosas en manos de un modelo.
+ *
+ * 1. EL GUARDADO PREVIO PUEDE SACAR UN CARTEL. Si el .prproj ya no esta en disco, `save()` abre
+ *    "Project Modified" —medido el 2026-09-11— y el panel sigue contestando como si nada. El
+ *    panel no ve el disco y este lado si: se lee la lista CON LAS RUTAS, se mira el archivo, y
+ *    recien entonces se pide el cierre. Es el mismo orden que `reiniciarPremiere`.
+ *
+ * 2. `descartar` NO SE OFRECE. Cuando el guardado falla, el verbo contesta "pedilo con
+ *    `descartar: true`": leido por un modelo es la solucion, y en el segundo intento se tira el
+ *    trabajo sin guardar, porque `close()` sin preguntar DESCARTA en silencio (medido). Por aca no
+ *    se descarta nunca: lo que no se puede guardar lo cierra el editor.
+ *
+ * El objetivo se resuelve ACA y viaja en `cual` con el nombre ENTERO que devolvio el panel. El
+ * verbo busca por subcadena, asi que pasandole ese nombre no puede enganchar otro distinto del
+ * que se miro en el disco: si otro abierto lo contuviera, ya habria rebotado aca por ambiguo.
+ */
+server.registerTool(
+  "premiere_cerrar_proyecto",
+  {
+    title: "Cerrar un proyecto abierto, guardándolo antes",
+    description:
+      "Cierra UNO de los proyectos abiertos en Premiere —tenga el foco o no— y lo GUARDA antes de " +
+      "cerrarlo. Sirve para pasar de un proyecto a otro sin dejar el viejo abierto.\n\n" +
+      "Lo que NO hace, a propósito:\n" +
+      "- NO DESCARTA CAMBIOS. `close()` sin preguntar los tira en silencio (medido el 2026-09-11), " +
+      "así que acá siempre se guarda primero. Si el guardado falla, no cierra: ese proyecto lo " +
+      "cierra el editor a mano.\n" +
+      "- No cierra un proyecto cuyo .prproj ya no está en disco: guardarlo abre el cartel " +
+      "'Project Modified' y el panel sigue contestando como si nada. Rebota ANTES de tocar nada.\n" +
+      "- No cierra el ÚLTIMO proyecto abierto, y ante un nombre que engancha más de uno no adivina.\n\n" +
+      "El veredicto sale de releer la lista de abiertos, y el guardado se mira en el DISCO: la fecha " +
+      "del .prproj antes y después. OJO: si el que se cierra tenía el foco, el foco se va SOLO a otro " +
+      "proyecto; el resumen dice a cuál, y las llamadas siguientes con `proyecto` se comparan contra ése.",
+    inputSchema: soloEstas({
+      secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
+      proyecto: z
+        .string()
+        .optional()
+        .describe(
+          "GUARDA: el proyecto que tiene que tener el FOCO para que esto corra. NO es el que se "
+          + "cierra —ése es `cual`—: sirve para cerrar otro y asegurarse de seguir parado en éste. "
+          + "Va en TODAS las herramientas a propósito: una guarda que hay que acordarse de tener no "
+          + "está cuando hace falta."
+        ),
+      cual: z
+        .string()
+        .describe(
+          "Nombre (o parte) del proyecto a CERRAR, tenga o no el foco. Es obligatorio: un verbo que "
+          + "cierra no tiene default. Si no engancha ninguno, la respuesta dice cuáles están abiertos."
+        )
+    })
+  },
+  async ({ cual, proyecto, secuencia }) => {
+    const fs = require("fs");
+    const norm = (s) => String(s || "").normalize("NFC").toLowerCase();
+    const hora = (d) => d.toTimeString().slice(0, 8);
+    try {
+      /* 1. La lista, con las rutas. Sin `guardar`: aca no se guarda nada en tanda. */
+      const pa = await enviar("proyectosAbiertos", { proyecto, secuencia }, 120000);
+      const abiertos = (pa.proyectos || []).filter((x) => x.nombre);
+      const lista = abiertos.map((x) => `"${x.nombre}"`).join(", ") || "ninguno";
+
+      /* 2. El objetivo, con la regla del verbo —parte del nombre, y ante dos no se adivina— y en
+         NFC, que es como llegan los nombres: una parte copiada de una ruta viene en NFD. */
+      const q = norm(cual).trim();
+      const pelado = (s) => norm(s).replace(/\.prproj$/, "").trim();
+      const candidatos = q ? abiertos.filter((x) => norm(x.nombre).indexOf(q) !== -1) : [];
+      if (!candidatos.length) {
+        throw new Error(`Ningún proyecto abierto coincide con "${cual}". Están: ${lista}. NO se cerró nada.`);
+      }
+      /* El nombre EXACTO gana, como en la guarda `proyecto` del despachador: pedir "Podcast" con
+         "Podcast" y "Podcast 2" abiertos no es ambiguo, y rebotarlo seria rechazar uso correcto. */
+      const exactos = candidatos.filter((x) => pelado(x.nombre) === pelado(cual));
+      const elegidos = candidatos.length > 1 && exactos.length === 1 ? exactos : candidatos;
+      if (elegidos.length > 1) {
+        throw new Error(`"${cual}" coincide con ${elegidos.length}: ${elegidos.map((x) => `"${x.nombre}"`).join(", ")}. ` +
+          "Pasá el nombre completo. NO se cerró nada.");
+      }
+      const objetivo = elegidos[0];
+      /* Y el VERBO lo tiene que poder distinguir. Busca por subcadena, y el nombre entero de uno
+         puede estar adentro del de otro —"Podcast.prproj" en "Mi Podcast.prproj"—: ahi rebotaria
+         pidiendo ser mas especifico sobre un nombre que ya es exacto. Se dice aca, y claro. */
+      const loContienen = abiertos.filter((x) => x !== objetivo && norm(x.nombre).indexOf(norm(objetivo.nombre)) !== -1);
+      if (loContienen.length) {
+        throw new Error(`"${objetivo.nombre}" está contenido en el nombre de ${loContienen.map((x) => `"${x.nombre}"`).join(", ")}: ` +
+          "el panel busca por PARTE del nombre y no puede elegir entre los dos. NO se cerró nada; ése lo cierra el editor a mano.");
+      }
+      const ruta = objetivo.ruta;
+
+      /* 3. EL DISCO, antes de pedir nada: guardar un proyecto sin archivo abre "Project Modified". */
+      if (!ruta || !fs.existsSync(ruta)) {
+        throw new Error(
+          `"${objetivo.nombre}" ` + (ruta ? `apunta a ${ruta}, que YA NO ESTÁ en disco` : "no tiene archivo en disco") +
+          ". Guardarlo abre el cartel \"Project Modified\" y el panel sigue contestando como si nada, así que " +
+          "acá no se intenta. NO se cerró nada: lo cierra el editor a mano, y si lo que tiene adentro no " +
+          "sirve, con Don't Save."
+        );
+      }
+      const antes = fs.statSync(ruta);
+
+      /* 4. Cerrar, GUARDANDO: `descartar` no viaja nunca desde aca. Y la invitacion del verbo a
+         pedirlo se saca del mensaje: es para quien llama por el transporte, y leida aca es
+         exactamente la salida que esta herramienta existe para no dar. Si el verbo cambia ese
+         texto, el reemplazo no engancha y queda la aclaracion de abajo, que alcanza. */
+      let r;
+      try {
+        r = await enviar("cerrarProyecto", { proyecto, secuencia, cual: objetivo.nombre }, 300000);
+      } catch (e) {
+        const msg = String(e && e.message ? e.message : e).replace(/\s*Si es descartable, pedilo con `descartar: true`\.?/, "");
+        throw new Error(msg +
+          " · Por esta herramienta no se descarta nunca: si lo que falló fue el guardado, ese proyecto lo cierra el editor a mano.");
+      }
+
+      /* 5. El guardado se mira AFUERA: que `save()` no tire no prueba que haya escrito. Y una fecha
+         que no se movio es una alarma, no una duda: medido el 2026-09-24, `save()` reescribe el
+         .prproj tambien SIN cambios —recien guardado, 02:56:44 → 02:56:58—, igual que con un
+         cambio sin guardar. Si no escribio, lo que no estaba guardado se fue con el cierre. */
+      let disco, reescrito = null;
+      try {
+        const despues = fs.statSync(ruta);
+        reescrito = despues.mtimeMs !== antes.mtimeMs;
+        disco = reescrito
+          ? `el .prproj se reescribió (${hora(antes.mtime)} → ${hora(despues.mtime)})`
+          : `OJO: el .prproj NO cambió de fecha (${hora(antes.mtime)}): el guardado previo no escribió, y lo que ` +
+            "no estaba guardado se perdió al cerrar. Reabrilo y mirá qué quedó";
+      } catch (e) {
+        disco = "no se pudo mirar el .prproj después: " + e.message;
+      }
+
+      /* 6. Donde quedo el foco. `abrirProyecto` SIN `ruta` no abre nada: informa el activo. */
+      let foco = "no se pudo leer";
+      try {
+        const a = await enviar("abrirProyecto", {}, 60000);
+        foco = !a.antes ? "NINGÚN proyecto activo"
+          : a.antes.ruta && a.antes.ruta === ruta
+            ? `figura TODAVÍA en "${a.antes.nombre}", el que se cerró: releé con premiere_estado antes de escribir`
+            : `"${a.antes.nombre}"`;
+      } catch (e) {
+        foco = "no se pudo leer (" + String(e && e.message ? e.message : e).split("\n")[0].slice(0, 80) + ")";
+      }
+
+      return texto(`${r.resumen} · en disco: ${disco} · foco ahora: ${foco}`,
+        { cerro: r.cerro, nombre: r.nombre, ruta: r.ruta, quedan: r.quedan, reescrito: reescrito,
+          mtimeAntes: antes.mtime.toISOString(), foco: foco });
+    } catch (e) {
+      return fallo(e);
     }
   }
 );

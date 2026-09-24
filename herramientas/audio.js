@@ -548,7 +548,8 @@ async function palabrasPremiere(cfg) {
  */
 async function palabrasScribe(cfg, wav, tmp) {
   const key = process.env.ELEVENLABS_API_KEY;
-  if (!key) throw new Error("falta $ELEVENLABS_API_KEY en el entorno. No se acepta por argumento: quedaria visible en `ps`.");
+  if (!key) throw new Error("falta $ELEVENLABS_API_KEY en el entorno. No se acepta por argumento: quedaria visible en `ps`. " +
+    "Desde Claude Code va en el \"env\" de ~/.claude/settings.json y se lee al ABRIR la sesion: ~/.zshrc no llega.");
 
   const mp3 = path.join(tmp, "a.mp3");
   execFileSync("ffmpeg", ["-v", "error", "-y", "-i", wav, "-c:a", "libmp3lame", "-b:a", "64k", mp3]);

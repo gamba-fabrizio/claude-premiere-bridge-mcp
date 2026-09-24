@@ -2,7 +2,7 @@
 
 Un bridge que le da a Claude acceso de lectura y escritura a Premiere Pro: leer la
 secuencia, **mirar el frame** bajo el playhead, animar, editar y armar timeline.
-**56 herramientas MCP sobre 73 verbos del panel.**
+**57 herramientas MCP sobre 73 verbos del panel.**
 
 > **Esto salió de un flujo de trabajo real, no de un ejercicio.** Se usó para armar
 > cortes de videoclips, cursos e institucionales, y casi todo lo que hay acá se pagó
@@ -138,8 +138,8 @@ claude mcp add premiere-bridge --scope user -- node /RUTA/A/TU/COPIA/premiere-br
 | `premiere_desmarcar` | Saca marcadores por nombre, o todos |
 | `premiere_editar_marcador` | Mueve un marcador, le cambia el color o el rango, sin rehacerlo |
 | `premiere_transcripcion` | El texto del clip con tiempos de secuencia, o dónde dice algo |
-| `premiere_armar_secuencia` | Crea una secuencia y le pega fragmentos de un medio |
-| `premiere_borrar_secuencia` | Saca una secuencia del proyecto |
+| `premiere_armar_secuencia` | Crea una secuencia y le pega fragmentos de un medio; las `capas` con `apagado` quedan sin verse ni sonar, con TODO su audio |
+| `premiere_borrar_secuencia` | Saca una secuencia del proyecto por su nombre exacto; si coinciden varias rebota, y dos homónimas se eligen con `duracion` |
 | `premiere_cortes_de_escena` | Detecta cambios de plano en un clip; `marcar` no toca el timeline, `cortar` lo parte, `subclips` los crea |
 | `premiere_etiquetar` | Etiquetas de color en el panel de proyecto; sin `color` sólo lee |
 | `premiere_interpretar` | Lee o cambia los fps con que Premiere lee un medio; sin `fps` sólo lee |
@@ -148,12 +148,13 @@ claude mcp add premiere-bridge --scope user -- node /RUTA/A/TU/COPIA/premiere-br
 | `premiere_transicion` | Pone un fundido en un corte. Default Cross Dissolve moderno; el AUDIO no lo toca |
 | `premiere_clonar` | Duplica un clip con sus efectos; el clon es INDEPENDIENTE del original |
 | `premiere_subclip` | Un pedazo con nombre de un medio, en el panel; verifica que el item aparezca |
-| `premiere_desactivar` | Apaga o prende el ojito DE UN CLIP, o de una pista entera en una sola transacción; existe para dejar los suplentes a la vista sin que tapen el corte |
+| `premiere_desactivar` | Apaga o prende el ojito DE UN CLIP, o de una pista entera, con TODOS los streams del audio vinculado y en lotes de 10 acciones; existe para dejar los suplentes a la vista sin que tapen el corte |
 | `premiere_renombrar_pista` | Le pone nombre a una pista de video o audio; relee para confirmar |
 | `premiere_exportar` | Renderiza la secuencia con un preset `.epr`; comprueba que el archivo aparezca |
 | `premiere_limpiar_rangos` | Saca los in/out de la secuencia (el Opt+X): `exportSequence` los RESPETA y un out viejo estira el export con negro al final |
 | `premiere_quitar_efecto` | Saca un efecto de un clip; el simétrico de agregar |
 | `premiere_abrir_proyecto` | Abre un .prproj por su ruta, o trae al frente uno ya abierto (no lo recarga) |
+| `premiere_cerrar_proyecto` | Cierra uno de los abiertos, tenga el foco o no, GUARDÁNDOLO antes; no descarta nunca, y no cierra el último ni uno cuyo .prproj ya no está en disco |
 | `premiere_crear_proyecto` | Crea un .prproj nuevo y lo deja con el foco |
 | `premiere_guardar` | Guarda el proyecto, y comprueba que el archivo se escribió |
 | `premiere_importar` | Importa archivos al panel de proyecto, opcionalmente a un bin; no necesita secuencia activa |
@@ -165,8 +166,9 @@ o `premiere_clips`: sin eso se escribe a ciegas.
 
 ### Verbos que NO son herramienta
 
-El panel entiende diez verbos más que el servidor no expone. Existen y andan,
-pero solo por el transporte directo:
+El panel entiende más verbos de los que expone el servidor. Estos existen y
+andan, pero solo por el transporte directo; las sondas de diagnóstico
+(`sonda…`), que son para medir una vez, no se listan:
 
 ```bash
 node -e "require('./server/bridge.js').enviar('leerEscalas', { pista: 1 }).then(r=>console.log(r.resumen))"
@@ -182,6 +184,9 @@ node -e "require('./server/bridge.js').enviar('leerEscalas', { pista: 1 }).then(
 | `unirAudio` | Une los pedazos de audio contiguos | idem |
 | `ajustarAlCuadro` | *Fit to frame* sobre un clip | idem |
 | `duplicarSecuencia` | Copia una secuencia entera | Toca el proyecto entero; un error cuesta caro |
+| `colocarLote` | Coloca muchos fragmentos en una sola transacción | Lo usa `colocar_fragmentos.js`. Suelto invita a colocar de a uno, y el in/out vive en el MEDIO: dos fragmentos del mismo material no pueden ir en el mismo lote |
+| `copiarEfecto` | Le pone a un clip el efecto de otro | NO copia: COMPARTE la instancia, y tocar el destino cambia el origen. Para una copia independiente, `premiere_clonar` o Cmd+C / Cmd+V |
+| `importarTranscripcion` | Intenta importar una transcripción hecha afuera | Diagnóstico: `Transcript.importFromJSON` devuelve un cascarón vacío, y es un bug de la API |
 | `mirarMedio` | Cuadros de un medio del panel, sin tocar el timeline | Diagnóstico |
 | `api` | Refleja nombres de métodos sin llamarlos | Diagnóstico |
 
@@ -457,8 +462,9 @@ pasó algo. Los errores siguen la misma regla: dicen qué había, no qué faltab
   está `performSceneEditDetectionOnSelection`, no el muestreo.
 - **No escucha nada.** Música, tono y ritmo quedan afuera, y eso incluye juzgar
   si un corte "suena bien".
-- **`keyframe`, `motion`, `agregarEfecto` y `transcripcion` usan el clip
-  seleccionado**; los verbos destructivos lo exigen por nombre o por pista e índice.
+- **`keyframe`, `motion` y `agregarEfecto` usan el clip seleccionado**, y `transcripcion`
+  también si no se le pasa `pista` e `indice`, `nombre` o `medio`. Los verbos destructivos exigen
+  el clip por nombre o por pista e índice.
 - **El techo es la API de `premierepro`**, no el bridge.
 
 ## Estructura
@@ -471,6 +477,11 @@ plugin/
   manifest.json id PROPIO (com.tunombre.premierebridge) — poné el tuyo
   index.js      poll + despacho + latido
   lib/comandos.js  los verbos: lo único que toca la API
+herramientas/   lo que corre del lado del disco: transcribir, colocar, comparar, revisar
+docs/api.md     las firmas y los comportamientos medidos de la API
+docs/bitacora/  los casos medidos, por tema
+test.js         lo que se rompe en silencio: corrélo antes de dar algo por terminado
+intercambio/    la carpeta que comparten el servidor y el panel
 ```
 
 El `id` y el `shortname` del manifest identifican al plugin para Premiere:

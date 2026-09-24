@@ -223,7 +223,8 @@ if (huerfanos.length) {
   mal("el servidor manda verbos que el panel no conoce", huerfanos.join(", ") +
       " — el panel tiene: " + delPanel.join(", "));
 } else {
-  ok("todos los verbos del servidor existen en el panel", delServidor.length + ": " + delServidor.join(", "));
+  const unicos = [...new Set(delServidor)];
+  ok("todos los verbos del servidor existen en el panel", unicos.length + ": " + unicos.join(", "));
 }
 
 /*
@@ -238,14 +239,18 @@ if (huerfanos.length) {
  * No todo verbo TIENE que ser herramienta. Por eso esto no compara a secas: pide
  * que la decisión esté escrita. Si agregás un verbo, o le hacés su herramienta o
  * lo ponés acá, y en los dos casos lo decidiste. El default —no hacer nada— falla.
+ *
+ * Y la razón tiene que ser LA SUYA. `cerrarProyecto` y `proyectosAbiertos` vivieron dos
+ * semanas en la línea de las sondas, con "lista fija de lecturas" como razón: uno cierra
+ * proyectos y el otro los guarda. Esta lista los dejaba pasar igual —mira que el nombre
+ * esté, no qué dice el comentario—, así que la decisión de no exponerlos nunca se había
+ * tomado. Lo destapó una sesión de uso que necesitó cerrar un proyecto (2026-09-24).
  */
 const SIN_HERRAMIENTA_A_PROPOSITO = [
   // Sonda de `Transcript.transcribeClipProjectItem`, que aparecio en 26.5. Mientras lo
   // que hace no este medido no se expone: un verbo que baja un modelo y tarda no se
   // ofrece antes de saber cuanto tarda ni que devuelve.
   "sondaTranscribir",
-  /* Los usa `recargar.js` para que el Cmd+Q no se trabe con el cartel de guardar. */
-  "proyectosAbiertos", "cerrarProyecto",
   // Piezas del flujo de edición del curso, que se manejan por tandas desde un
   // script con pausas: como herramienta suelta invitan a la ráfaga que tira
   // Premiere. Ver "Y una ráfaga de TRANSACCIONES también lo tira" en CLAUDE.md.
@@ -259,10 +264,10 @@ const SIN_HERRAMIENTA_A_PROPOSITO = [
   // fragmentos del mismo material NO pueden ir en el mismo lote —el verbo los reparte solo— y si
   // eso se rompiera, los N entrarian con el recorte del ULTIMO: se ve como que coloco todo.
   "colocarLote",
-  // Sonda del pendiente 7: contesta si createAppendComponentAction acepta un componente de OTRO
-  // clip, o sea si un efecto se puede copiar CON SUS VALORES sin leer ~460 params. Mientras la
-  // respuesta no este medida, exponerla como herramienta seria ofrecer una copia que quizas
-  // entrega el efecto con sus defaults y se ve casi igual: el peor tipo de fallo.
+  // Nacio como sonda del pendiente 7 —si createAppendComponentAction acepta un componente de OTRO
+  // clip— y la respuesta ya esta medida: lo acepta y NO COPIA, COMPARTE la instancia. Tocar el
+  // destino cambia el origen, en otra secuencia y sin aviso (ver `copiarEfecto` en USO.md). Como herramienta
+  // seria ofrecer una copia que no es una copia: el peor tipo de fallo, el que se ve bien.
   "copiarEfecto",
   // Sonda: importar transcripciones NO SE PUEDE, y la causa está identificada —
   // `Transcript.importFromJSON` devuelve un TextSegments con el puntero interno en
@@ -302,15 +307,22 @@ if (noDeclarados.length) {
  * Y que los números del encabezado del CLAUDE.md sean los de verdad. Escritos a
  * mano envejecen: decían 33 herramientas sobre 43 verbos cuando eran 35 sobre 46,
  * y un lector los cruzó con la realidad y concluyó que había verbos huérfanos.
+ *
+ * Las herramientas se cuentan por `registerTool`, no por `enviar`. Contaba las llamadas
+ * al panel, y eso daba bien de casualidad mientras cada herramienta hacía UNA: la de
+ * cerrar proyecto hace tres —la lista, el cierre y el foco— y habría declarado 59
+ * herramientas donde había 57 (2026-09-24).
  */
+const nHerramientas = new Set(
+  [...srcServidor.matchAll(/registerTool\(\s*\n?\s*"(premiere_[a-z_]+)"/g)].map((x) => x[1])).size;
 {
   const srcClaude = fs.readFileSync(path.join(raiz, "CLAUDE.md"), "utf8");
   const m2 = srcClaude.match(/\*\*(\d+) herramientas MCP sobre (\d+) verbos/);
   if (!m2) {
     mal("el encabezado de CLAUDE.md no declara cuántas herramientas y verbos hay");
-  } else if (Number(m2[1]) !== delServidor.length || Number(m2[2]) !== delPanel.length) {
+  } else if (Number(m2[1]) !== nHerramientas || Number(m2[2]) !== delPanel.length) {
     mal("los números del encabezado de CLAUDE.md no son los reales",
-        `dice ${m2[1]} herramientas sobre ${m2[2]} verbos · son ${delServidor.length} sobre ${delPanel.length}`);
+        `dice ${m2[1]} herramientas sobre ${m2[2]} verbos · son ${nHerramientas} sobre ${delPanel.length}`);
   } else {
     ok("los números del encabezado de CLAUDE.md coinciden con la realidad");
   }
@@ -321,9 +333,9 @@ if (noDeclarados.length) {
   const srcReadme = fs.readFileSync(path.join(raiz, "README.md"), "utf8");
   const m3 = srcReadme.match(/\*\*(\d+) herramientas MCP sobre (\d+) verbos/);
   if (!m3) ok("el README no declara cuántas herramientas y verbos hay");
-  else if (Number(m3[1]) !== delServidor.length || Number(m3[2]) !== delPanel.length)
+  else if (Number(m3[1]) !== nHerramientas || Number(m3[2]) !== delPanel.length)
     mal("los números del README no son los reales",
-        `dice ${m3[1]} herramientas sobre ${m3[2]} verbos · son ${delServidor.length} sobre ${delPanel.length}`);
+        `dice ${m3[1]} herramientas sobre ${m3[2]} verbos · son ${nHerramientas} sobre ${delPanel.length}`);
   else ok("los números del README coinciden con la realidad");
 }
 }
@@ -460,6 +472,39 @@ if (inventadas.length) {
   mal("hay herramientas registradas que el README no nombra", nombradas.join(", "));
 } else {
   ok("el README y las herramientas registradas coinciden", registradas.length + " herramientas");
+}
+
+/*
+ * Y la tabla de los verbos que NO son herramienta, contra SIN_HERRAMIENTA_A_PROPOSITO.
+ *
+ * El README decia que este test la cruzaba "en las dos direcciones", y no la miraba nadie: se
+ * quedo en diez verbos con veinticuatro internos, sin `colocarLote`, `copiarEfecto` ni
+ * `importarTranscripcion` (2026-09-24). Una frase que promete una guarda que no existe es el
+ * comentario que describe la intencion en vez del codigo, escrito en la documentacion.
+ *
+ * Las sondas (`sonda…`) no van en la tabla: son para medir una vez, no para usar.
+ */
+{
+  const iSec = srcReadme.indexOf("### Verbos que NO son herramienta");
+  const resto = iSec === -1 ? "" : srcReadme.slice(iSec + 4);
+  const iFin = resto.search(/\n#{2,3} /);
+  const seccion = iFin === -1 ? resto : resto.slice(0, iFin);
+  const enTabla = [...seccion.matchAll(/^\|\s*`([a-zA-Z]+)`\s*\|/gm)].map((x) => x[1]);
+  const esperados = SIN_HERRAMIENTA_A_PROPOSITO.filter((v) => !/^sonda/.test(v));
+  const faltan = esperados.filter((v) => enTabla.indexOf(v) === -1);
+  const sobranT = enTabla.filter((v) => SIN_HERRAMIENTA_A_PROPOSITO.indexOf(v) === -1);
+  if (iSec === -1 || !enTabla.length) {
+    mal("el README no tiene la tabla de los verbos que NO son herramienta");
+  } else if (faltan.length) {
+    mal("hay verbos internos que la tabla del README no lista", faltan.join(", ") +
+        " — cada uno con qué hace y por qué no está expuesto");
+  } else if (sobranT.length) {
+    mal("la tabla del README lista verbos que no son internos", sobranT.join(", ") +
+        " — o tienen herramienta, o no existen: sacalos de la tabla");
+  } else {
+    ok("la tabla del README de verbos internos coincide con SIN_HERRAMIENTA_A_PROPOSITO",
+       enTabla.filter((v) => !/^sonda/.test(v)).length + " verbos, sin contar las sondas");
+  }
 }
 
 /*
@@ -2687,6 +2732,98 @@ titulo("Un `entrada` inventado adentro de un fragmento NO se descarta en silenci
   }
 }
 
+/*
+ * Y DESDE MCP TAMBIÉN, que era por donde seguía abierto (2026-09-24).
+ *
+ * La guarda de arriba vive en el PANEL, y desde las herramientas MCP no llegaba: zod descarta por
+ * defecto las claves que el schema no declara, y `soloEstas` endurecía sólo el primer nivel. Así que
+ * una clave inventada adentro de un fragmento se perdía ANTES de que el panel pudiera rebotarla. Y
+ * peor: `capas` no declaraba `pistaAudio`, que el panel sí lee y USO.md documenta, así que pedirlo
+ * desde MCP lo tiraba sin aviso y el audio caía en otra pista.
+ *
+ * Se mira en tiempo de ejecución, sobre los schemas registrados y pasados a JSON Schema: todo objeto,
+ * en cualquier nivel, con `additionalProperties: false`. Y las claves de cada campo anidado tienen que
+ * ser las MISMAS que acepta el panel: una de menos es una capacidad que desde MCP no existe.
+ */
+titulo("Las claves de adentro de los objetos también rebotan desde MCP, y son las del panel");
+
+{
+  let servidor = null, zod = null, error = null;
+  try {
+    servidor = require(path.join(raiz, "server", "index.js")).server;
+    zod = require(require.resolve("zod", { paths: [path.join(raiz, "server")] })).z;
+  } catch (e) { error = e.message; }
+  const tools = servidor && servidor._registeredTools;
+  if (error) {
+    /* Si el servidor no carga, la falla ya la contó «server/index.js NO carga», y es la misma causa
+       —en un clon recién bajado, falta `npm install`—. Contarla dos veces le mentiría a la lista de
+       tres fallas esperadas del README. Pero tampoco es un ok: se dice que no corrió. */
+    console.log("  NO CORRIÓ  los schemas no se pudieron leer porque el servidor no carga (ver arriba): " + error.split("\n")[0]);
+  } else if (!tools || !zod || typeof zod.toJSONSchema !== "function") {
+    mal("no se pudieron leer los schemas registrados del servidor", error || "sin `_registeredTools` o sin `z.toJSONSchema`: la guarda no puede correr");
+  } else {
+    const flojos = [], sinConvertir = [];
+    const esquemas = {};
+    for (const nombre of Object.keys(tools)) {
+      let js = null;
+      /* Con `io: "input"`, que es lo que zod ACEPTA. Sin eso da el schema de SALIDA, donde un objeto
+         flojo también sale `additionalProperties: false` —lo que sobra ya se descartó—, y esta guarda
+         pasaba sin `.strict()`: salió ciega en la primera prueba por mutación. */
+      try { js = zod.toJSONSchema(tools[nombre].inputSchema, { io: "input" }); } catch (e) { sinConvertir.push(nombre); continue; }
+      esquemas[nombre] = js;
+      const pasear = (nodo, ruta) => {
+        if (!nodo || typeof nodo !== "object") return;
+        if (nodo.type === "object" && nodo.properties && nodo.additionalProperties !== false) flojos.push(ruta);
+        for (const [k, v] of Object.entries(nodo.properties || {})) pasear(v, ruta + "." + k);
+        if (nodo.items) pasear(nodo.items, ruta + "[]");
+        for (const alt of [].concat(nodo.anyOf || [], nodo.oneOf || [], nodo.allOf || [])) pasear(alt, ruta);
+      };
+      pasear(js, nombre);
+    }
+
+    /* Las claves anidadas del panel, de la misma tabla que mira la guarda de arriba. */
+    const mc = srcComandos.match(/const CLAVES_DE_OBJETO = \{([\s\S]*?)\n  \};/);
+    const delPanelAnidadas = {};
+    if (mc) for (const par of mc[1].matchAll(/(\w+):\s*\{([^}]*)\}/g)) {
+      delPanelAnidadas[par[1]] = {};
+      for (const c of par[2].matchAll(/(\w+):\s*\[([^\]]*)\]/g))
+        delPanelAnidadas[par[1]][c[1]] = c[2].split(",").map((x) => x.trim().replace(/"/g, "")).filter(Boolean);
+    }
+    /* Qué herramienta llama a qué verbo, por su bloque en el fuente. */
+    const bloques = srcServidor.split(/registerTool\(/).slice(1);
+    const desparejos = [];
+    for (const b of bloques) {
+      const nom = (/^\s*"(premiere_[a-z_]+)"/.exec(b) || [])[1];
+      if (!nom || !esquemas[nom]) continue;
+      const verbos = [...new Set([...b.matchAll(/enviar\(\s*"(\w+)"/g)].map((x) => x[1]))];
+      for (const v of verbos) {
+        for (const [campo, delPanel] of Object.entries(delPanelAnidadas[v] || {})) {
+          const prop = (esquemas[nom].properties || {})[campo];
+          if (!prop) continue;   // la herramienta no expone ese campo: no hay nada que emparejar
+          const items = prop.items || (prop.anyOf || []).map((x) => x.items).find(Boolean);
+          const deMcp = Object.keys((items && items.properties) || {});
+          const faltan = delPanel.filter((k) => deMcp.indexOf(k) === -1);
+          const sobran = deMcp.filter((k) => delPanel.indexOf(k) === -1);
+          if (faltan.length || sobran.length)
+            desparejos.push(`${nom}.${campo}` + (faltan.length ? ` no declara ${faltan.join(", ")}` : "") + (sobran.length ? ` declara ${sobran.join(", ")} que el panel no lee` : ""));
+        }
+      }
+    }
+    if (sinConvertir.length) {
+      mal("hay schemas que no se pudieron pasar a JSON Schema", sinConvertir.join(", ") + " — sin eso esta guarda no los mira");
+    } else if (flojos.length) {
+      mal("hay objetos de los schemas MCP que descartan claves en silencio", flojos.slice(0, 6).join(", ") +
+        " — `.strict()` en cada `z.object`, también adentro de los arrays");
+    } else if (!mc) {
+      mal("no se encontró CLAVES_DE_OBJETO en el panel para emparejar las claves anidadas");
+    } else if (desparejos.length) {
+      mal("las claves anidadas de MCP no son las que acepta el panel", desparejos.join(" · "));
+    } else {
+      ok(`los ${Object.keys(esquemas).length} schemas rechazan claves inventadas en todos los niveles, y las anidadas son las del panel`);
+    }
+  }
+}
+
 /* ---------- copiarEfecto avisa que NO copia: comparte la instancia ---------- */
 
 titulo("copiarEfecto avisa que el componente queda COMPARTIDO, no copiado");
@@ -3047,6 +3184,17 @@ titulo("ninguna herramienta MCP declara un parametro que el verbo no lee");
  *
  * Solo el PRIMER NIVEL del inputSchema: adentro de `z.array(z.object({...}))` viven las claves de
  * los items, que no son parametros del verbo (`sacarRangos` recibe `rangos`, no `desde`/`hasta`).
+ *
+ * Dos arreglos del 2026-09-24, y el primero es un agujero que tenia desde el principio:
+ *
+ * - LAS CLAVES ESCRITAS EN DOS LINEAS —`ruta: z` y abajo `.string()`— NO SE VEIAN. El patron
+ *   pedia `z.` pegado, y se salteaba 91 de las 315 claves de los schemas. Con el patron
+ *   corregido no aparecio ningun parametro muerto: el agujero estaba, y todavia no habia cobrado.
+ * - Contra TODOS los verbos que llama la herramienta, no solo el primero.
+ *   `premiere_cerrar_proyecto` llama primero a `proyectosAbiertos` —hace falta la ruta para mirar
+ *   el disco— y despues a `cerrarProyecto`: mirando solo el primero, su `cual` sale "muerto" y la
+ *   guarda rechaza codigo correcto. No se noto de entrada por el agujero de arriba: `cual` esta
+ *   escrito en dos lineas.
  */
 {
   const src = fs.readFileSync(path.join(raiz, "server/index.js"), "utf8");
@@ -3058,12 +3206,13 @@ titulo("ninguna herramienta MCP declara un parametro que el verbo no lee");
     const iSchema = b.indexOf("inputSchema:");
     const iEnviar = b.search(/enviar\(\s*["'`](\w+)["'`]/);
     if (!nom || iSchema === -1 || iEnviar === -1) continue;
-    const verbo = /enviar\(\s*["'`](\w+)["'`]/.exec(b.slice(iEnviar))[1];
-    if (!DERIVADA[verbo]) { problemas.push(`${nom[1]} -> verbo desconocido "${verbo}"`); continue; }
+    const verbos = [...new Set([...b.slice(iEnviar).matchAll(/enviar\(\s*["'`](\w+)["'`]/g)].map((x) => x[1]))];
+    const raros = verbos.filter((v) => !DERIVADA[v]);
+    if (raros.length) { problemas.push(`${nom[1]} -> verbo desconocido "${raros[0]}"`); continue; }
     n++;
-    const ok2 = new Set([...DERIVADA[verbo], ...GLOB]);
-    for (const m of b.slice(iSchema, iEnviar).matchAll(/\n {6}([A-Za-z_$][\w$]*)\s*:\s*z\./g))
-      if (!ok2.has(m[1])) problemas.push(`${nom[1]} (-> ${verbo}) declara "${m[1]}"`);
+    const ok2 = new Set([...verbos.flatMap((v) => DERIVADA[v]), ...GLOB]);
+    for (const m of b.slice(iSchema, iEnviar).matchAll(/\n {6}([A-Za-z_$][\w$]*)\s*:\s*z\s*\./g))
+      if (!ok2.has(m[1])) problemas.push(`${nom[1]} (-> ${verbos.join(" + ")}) declara "${m[1]}"`);
   }
   const u = [...new Set(problemas)];
   if (u.length) mal("hay herramientas MCP que declaran parametros muertos", u.slice(0, 5).join(" · "));
@@ -3771,7 +3920,9 @@ titulo("`desactivar` arrastra el audio vinculado, en UNA pasada, y juzga por el 
   } else {
     /* La accion sobre los socios tiene que estar DENTRO del bucle que los recorre:
        que exista la variable no prueba que se los toque. */
-    const arrastra = /for\s*\(const \w+ of socios\)[\s\S]{0,160}createSetDisabledAction/.test(cuerpo);
+    /* `socios[n]`: desde el 2026-09-24 cada clip tiene su LISTA —todos los streams—, y el bucle es
+       por la lista del clip. */
+    const arrastra = /for\s*\(const \w+ of socios(\[\w+\])?\)[\s\S]{0,260}createSetDisabledAction/.test(cuerpo);
     if (!arrastra) {
       mal("`desactivar` no arrastra los vinculados",
         "apagar V2 vuelve a dejar SONANDO A2. Ya paso una vez y se tapo muteando a mano.");
@@ -3794,6 +3945,120 @@ titulo("`desactivar` arrastra el audio vinculado, en UNA pasada, y juzga por el 
     } else {
       ok("el veredicto distingue cambio de estado, y dice NO CAMBIÓ NADA cuando corresponde");
     }
+  }
+}
+
+/*
+ * LOS REPORTES DEL 2026-09-24 (un podcast), y lo que se encontró arreglándolos.
+ *
+ * - `borrarSecuencia` borraba «la primera que contiene» en el orden de `getSequences()`, que no es el
+ *   de creación: con dos «REEL 05» se llevó la NUEVA. Lo mismo `duplicarSecuencia` y `copiarEfecto`.
+ * - `duplicarSecuencia` tiraba `saltados is not defined` DESPUÉS de duplicar.
+ * - `armarSecuencia` se cayó con un null de `getTrackItems` y dejó la secuencia a medias sin decirlo.
+ * - `apagado` dejaba sonando el audio de las capas, y `desactivar` apagaba UN stream por clip.
+ * - Y el primer arreglo de lo último metía TODOS los socios en UNA transacción: 57 capas de 6 streams
+ *   son 342 acciones, contra un tope medido de 10 —con 50 Premiere se colgó—.
+ */
+titulo("Secuencias por nombre, vinculados completos y en lotes, y un armado que tira dice qué dejó");
+
+{
+  const limpiar = (t) => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const cuerpoDe = (firma) => {
+    const i = srcComandos.indexOf(firma);
+    return i === -1 ? "" : limpiar(srcComandos.slice(i, srcComandos.indexOf("\n}\n", i)));
+  };
+  const una = cuerpoDe("async function unaSecuencia(");
+  const socios = cuerpoDe("async function sociosDe(");
+  const lotes = cuerpoDe("async function enLotes(");
+  const desact = cuerpoDe("async function desactivar(");
+  const armar = cuerpoDe("async function armarSecuencia(");
+  const dupli = cuerpoDe("async function duplicarSecuencia(");
+  const disp = cuerpoDe("async function ejecutar(");
+
+  // 1. Una secuencia por nombre: el exacto gana, y ante dos no se adivina.
+  const conUna = ["borrarSecuencia", "duplicarSecuencia", "copiarEfecto"].filter((v) => !/unaSecuencia\(/.test(cuerpoDe("async function " + v + "(")));
+  const primeraQueContiene = ["borrarSecuencia", "duplicarSecuencia", "copiarEfecto"].filter((v) =>
+    /if\s*\(\s*!\s*(objetivo|hallada)\s*&&[^\n]*indexOf\(/.test(cuerpoDe("async function " + v + "(")));
+  if (!una) {
+    mal("no existe `unaSecuencia`", "borrar, duplicar y copiar de otra secuencia vuelven a agarrar la primera que contiene");
+  } else if (!/exactas\.length\s*\?\s*exactas\s*:\s*parciales/.test(una)) {
+    mal("`unaSecuencia` no hace ganar al nombre EXACTO", "con «REEL 06» y «REEL 06 B», «REEL 06» no se podría nombrar nunca");
+  } else if (!/if\s*\(\s*cand\.length\s*>\s*1\s*\)\s*\{[\s\S]{0,400}throw new Error/.test(una)) {
+    mal("`unaSecuencia` no rebota cuando coinciden varias", "vuelve a elegir por el orden de getSequences(), que no es el de creación");
+  } else if (conUna.length || primeraQueContiene.length) {
+    mal("hay verbos que eligen la secuencia sin `unaSecuencia`", conUna.concat(primeraQueContiene).join(", ") +
+      " — «la primera que contiene» borró la REEL 05 equivocada el 2026-09-24");
+  } else {
+    ok("borrar, duplicar y copiar eligen la secuencia con `unaSecuencia`: el exacto gana y ante dos rebota");
+  }
+
+  // 2. duplicarSecuencia: `saltados` se usa en el return, así que no puede nacer adentro del try.
+  const iSalt = dupli.search(/let saltados\b/);
+  const iRenombre = dupli.search(/if\s*\(\s*params\.nuevoNombre/);
+  if (iSalt === -1 || iRenombre === -1 || iSalt > iRenombre) {
+    mal("`duplicarSecuencia` declara `saltados` adentro del renombre",
+      "el return lo usa afuera: tira «saltados is not defined» DESPUÉS de duplicar, y quien le cree duplica de nuevo");
+  } else {
+    ok("`duplicarSecuencia` declara `saltados` antes del renombre");
+  }
+
+  // 3. Los vinculados: TODOS por clave, y lo dudoso no se toca.
+  if (!socios) {
+    mal("no existe `sociosDe`");
+  } else if (/if\s*\(\s*!\s*indice\.has\([^)]*\)\s*\)\s*indice\.set\([^)]*,\s*\{/.test(socios) || !/indice\.get\([^)]*\)\.push\(/.test(socios)) {
+    mal("`sociosDe` guarda UN socio por clave", "un medio multicanal deja uno por pista: una ISO de 6 streams queda con 5 sonando");
+  } else if (!/videos\.length\s*<=\s*1/.test(socios) || !/\.entrada\s*===\s*f\.entrada/.test(socios)) {
+    mal("`sociosDe` no desempata dos planos del mismo medio en el mismo instante",
+      "un suplente sacado del mismo archivo que el principal: apagar el suplente apagaría el audio del principal");
+  } else if (!/sociosDe\(/.test(desact) || !/sociosDe\(/.test(armar)) {
+    mal("`desactivar` o `armarSecuencia` no buscan los vinculados con `sociosDe`");
+  } else {
+    ok("`sociosDe` devuelve todos los streams y no atribuye lo que no se puede desempatar");
+  }
+
+  // 4. En lotes: el tope y la espera medidos, y ningún atajo a UNA transacción.
+  const unaSola = (c) => /for\s*\(const \w+ of socios\)\s*a\.addAction\(/.test(c);
+  if (!lotes) {
+    mal("no existe `enLotes`");
+  } else if (!/\.length\s*\+\s*g\.length\s*>\s*TOPE_LOTE/.test(lotes) || !/esperarEntreTx\(\)/.test(lotes)) {
+    mal("`enLotes` no respeta `TOPE_LOTE` o no espera entre transacciones",
+      "con 50 acciones por transacción Premiere se colgó, y 27 transacciones seguidas lo tiraron");
+  } else if (!/enLotes\(/.test(desact) || /executeTransaction\(/.test(desact)) {
+    mal("`desactivar` no pasa por `enLotes`", "una pista entera de ISOs son cientos de acciones en UNA transacción");
+  } else if (!/enLotes\(/.test(armar) || unaSola(armar)) {
+    mal("`armarSecuencia` apaga el audio de las capas sin `enLotes`", "57 capas de 6 streams son 342 acciones en una transacción");
+  } else {
+    ok("`desactivar` y el `apagado` de `armarSecuencia` van en lotes de `TOPE_LOTE`, espaciados");
+  }
+
+  // 5. Los huecos de getTrackItems: ningún tiemposDe sobre un item que puede ser null.
+  const sinGuarda = [...armar.matchAll(/tiemposDe\((\w+)\[(\w+)\]\)/g)].filter((m) => {
+    const antes = armar.slice(Math.max(0, m.index - 200), m.index);
+    return !new RegExp("if\\s*\\(\\s*!\\s*" + m[1] + "\\[" + m[2] + "\\]\\s*\\)\\s*continue").test(antes);
+  });
+  if (sinGuarda.length) {
+    mal("`armarSecuencia` mide items de `getTrackItems` sin saltear los null",
+      sinGuarda.map((m) => m[0]).join(", ") + " — es el «Cannot read properties of null (reading 'getStartTime')» del 2026-09-24");
+  } else {
+    ok("`armarSecuencia` saltea los huecos de `getTrackItems` antes de medir");
+  }
+
+  // 6. A medias: registrado apenas se crea, borrado antes del return, y usado por el despachador.
+  const iCrea = armar.search(/crearSecuenciaDesde\(/);
+  const iReg = armar.search(/A_MEDIAS\.armarSecuencia\s*=/);
+  const iDel = armar.search(/delete A_MEDIAS\.armarSecuencia/);
+  const iRet = armar.lastIndexOf("return {");
+  if (iReg === -1 || iCrea === -1 || iReg < iCrea) {
+    mal("`armarSecuencia` no anota lo que deja hecho apenas crea la secuencia",
+      "si tira después, el error sale pelado y la secuencia a medias queda sin que nadie lo sepa");
+  } else if (iDel === -1 || iDel > iRet) {
+    mal("`armarSecuencia` no borra su `A_MEDIAS` antes de devolver");
+  } else if (!/catch\s*\(\s*e\s*\)\s*\{[\s\S]{0,200}=\s*A_MEDIAS\[cmd\][\s\S]{0,700}\.describir\(\)/.test(disp)) {
+    /* Que el catch lo NOMBRE no alcanza: el `delete` también lo nombra. Tiene que leerlo y usar su
+       `describir()` en el error; la primera versión de esta guarda pasaba con `const am = null`. */
+    mal("el despachador no usa `A_MEDIAS` cuando un verbo tira", "lo anotado no lo lee nadie");
+  } else {
+    ok("un `armarSecuencia` que tira a mitad dice qué secuencia dejó y devuelve los in/out");
   }
 }
 
@@ -4745,6 +5010,84 @@ titulo("`cerrarProyecto` no descarta trabajo por comodidad");
       "que close() devuelva true no prueba que se haya cerrado: el veredicto sale del ESTADO");
   } else {
     ok("`cerrarProyecto` usa `cual`, no cierra el ultimo, guarda por defecto y relee");
+  }
+}
+
+/*
+ * LO QUE HACE FALTA PARA DARLE `cerrarProyecto` A UN MODELO (2026-09-24)
+ *
+ * Adentro de `recargar.js` el verbo es seguro: el que llama ya miro el disco y decidio a quien
+ * descartar. Como herramienta MCP, dos cosas de las que el verbo no puede ocuparse:
+ *
+ * - `descartar` NO SE OFRECE, ni en el schema ni en la llamada. Cuando no puede guardar, el verbo
+ *   contesta "pedilo con `descartar: true`", y un modelo lo lee como la solucion: en el segundo
+ *   intento tira el trabajo sin guardar.
+ * - EL DISCO ANTES DEL CIERRE. Con el .prproj borrado, el guardado previo abre "Project Modified"
+ *   y el panel sigue latiendo. Se mira POR POSICION: el `existsSync` antes del
+ *   `enviar("cerrarProyecto"`, y entre los dos un `throw` o un `return`, porque mirar y seguir
+ *   igual no es mirar. Los strings se vacian antes de buscarlos: el mensaje del rechazo nombra
+ *   las mismas palabras.
+ */
+titulo("`premiere_cerrar_proyecto` mira el disco antes de cerrar y no descarta nunca");
+
+{
+  const limpiar = (t) => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const sinStrings = (t) => t.replace(/`(?:\\[\s\S]|[^`\\])*`|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'/g, '""');
+  const i0 = srcServidor.search(/registerTool\(\s*\n?\s*"premiere_cerrar_proyecto"/);
+  const resto = i0 === -1 ? "" : srcServidor.slice(i0 + "registerTool(".length);
+  const iSig = resto.search(/registerTool\(/);
+  const bloque = i0 === -1 ? null : limpiar(iSig === -1 ? resto : resto.slice(0, iSig));
+
+  /* Lo que hay entre la llave que abre en `desde` y la que la cierra. */
+  const llaves = (t, desde) => {
+    const abre = t.indexOf("{", desde);
+    if (abre === -1) return null;
+    for (let k = abre, n = 0; k < t.length; k++) {
+      if (t[k] === "{") n++;
+      else if (t[k] === "}" && --n === 0) return t.slice(abre + 1, k);
+    }
+    return null;
+  };
+
+  if (!bloque) {
+    mal("no existe la herramienta `premiere_cerrar_proyecto`",
+      "si se saco a proposito, `cerrarProyecto` vuelve a SIN_HERRAMIENTA_A_PROPOSITO con SU razon");
+  } else {
+    const schema = llaves(bloque, bloque.indexOf("inputSchema:"));
+    const iHandler = bloque.search(/\n  async \(/);
+    const handler = iHandler === -1 ? "" : bloque.slice(iHandler);
+    const iCerrar = handler.search(/enviar\(\s*"cerrarProyecto"\s*,/);
+    const iDisco = handler.search(/existsSync\(/);
+    const tras = iCerrar === -1 ? "" : handler.slice(iCerrar).replace(/^enviar\(\s*"cerrarProyecto"\s*,\s*/, "");
+    const objeto = tras.startsWith("{") ? llaves(tras, 0) : null;
+
+    if (schema === null || !handler) {
+      mal("no se pudo leer el schema o el handler de `premiere_cerrar_proyecto`",
+        "la guarda lee por estructura; si cambio la forma, hay que reescribirla");
+    } else if (/\bdescartar\s*:/.test(sinStrings(schema))) {
+      mal("`premiere_cerrar_proyecto` ofrece `descartar`",
+        "el verbo contesta \"pedilo con `descartar: true`\" cuando no puede guardar, y un modelo lo\n         " +
+        "lee como la solucion: en el segundo intento tira el trabajo sin guardar. Se cierra guardando o\n         " +
+        "lo cierra el editor.");
+    } else if (iCerrar === -1) {
+      mal("`premiere_cerrar_proyecto` no llama a `cerrarProyecto`");
+    } else if (objeto === null) {
+      mal("la llamada a `cerrarProyecto` no le pasa un objeto literal",
+        "asi no se puede comprobar que no viaje `descartar`: escribi las claves a la vista");
+    } else if (/\bdescartar\b/.test(sinStrings(objeto))) {
+      mal("`premiere_cerrar_proyecto` le pasa `descartar` al verbo",
+        "`close()` sin preguntar DESCARTA en silencio (medido el 2026-09-11): por la herramienta no se descarta nunca");
+    } else if (iDisco === -1 || iDisco > iCerrar) {
+      mal("`premiere_cerrar_proyecto` no mira el disco ANTES de pedir el cierre",
+        "con el .prproj borrado, el guardado previo abre \"Project Modified\" y el panel sigue latiendo.\n         " +
+        "El panel no ve el disco: lo tiene que mirar este lado, antes. " +
+        (iDisco === -1 ? "No hay `existsSync`." : "El `existsSync` esta en " + iDisco + " y el cierre en " + iCerrar + "."));
+    } else if (!/\b(throw|return)\b/.test(sinStrings(handler.slice(iDisco, iCerrar)))) {
+      mal("`premiere_cerrar_proyecto` mira el disco y sigue igual",
+        "entre el `existsSync` y el cierre no hay `throw` ni `return`: el rechazo no frena nada");
+    } else {
+      ok("`premiere_cerrar_proyecto` no ofrece `descartar`, no lo pasa, y mira el disco antes de cerrar");
+    }
   }
 }
 

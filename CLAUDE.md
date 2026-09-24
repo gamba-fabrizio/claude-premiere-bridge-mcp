@@ -1,7 +1,7 @@
 # Bridge Claude ↔ Premiere Pro — lo que costó medir
 
 Le da a un agente control de Premiere Pro: leer la secuencia, **mirar el frame**, navegar,
-animar, editar y armar timeline. **56 herramientas MCP sobre 73 verbos del panel** — la
+animar, editar y armar timeline. **57 herramientas MCP sobre 73 verbos del panel** — la
 diferencia importa, ver *Al escribir un verbo nuevo*.
 
 Esos dos números los chequea `test.js` contra el código. Escritos a mano envejecen: decían
