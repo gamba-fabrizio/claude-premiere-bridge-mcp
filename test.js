@@ -6305,6 +6305,293 @@ titulo("CLAUDE.md liviano: reglas acá, la bitácora en docs/bitacora/ y USO.md 
   else ok(`los ${bit.length} archivos de bitácora arrancan con su Vigente, y todos sus punteros existen`);
 }
 
+/*
+ * SUBTÍTULOS DE HABLA (2026-09-24): lo que se rompería en silencio, sobre un proyecto SINTÉTICO.
+ *
+ * La prueba de aceptación de `subtitular.py` fue reproducir idénticos los tres SRT de un trabajo
+ * real, y eso vive con aquel material: acá no puede ir ningún dato de un cliente. Lo que sí se sostiene
+ * acá es lo que el código genérico agregó y que fallaría sin avisar:
+ *   - los fps salen de la línea de tiempo: a 30, una palabra en 1,31 s entra en 1,300 (a 25, 1,280);
+ *   - hasta 2 líneas de 42, y ninguna termina en un artículo o una preposición sin puntuación;
+ *   - los `cambios` y la división `manual` de los ajustes se aplican;
+ *   - las `pegadas` del PROYECTO se suman a las del idioma: sin eso una marca se parte;
+ *   - una transcripción de otro motor que el que pide el proyecto rebota.
+ */
+titulo("`subtitular.py`: fps de la secuencia, 2 x 42, cambios, división a mano y pegadas del proyecto");
+
+{
+  const py = fs.existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3";
+  const { spawnSync } = require("child_process");
+  const herr = path.join(raiz, "herramientas", "subtitular.py");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "subtitulos-"));
+  const escribir = (n, o) => fs.writeFileSync(path.join(tmp, n), JSON.stringify(o));
+  /* Dos hablantes, uno por clip. La primera con un tartamudeo que los ajustes corrigen y una marca
+     de dos palabras; el segundo con su turno dividido a mano. */
+  const palabras = [];
+  const decir = (texto, desde, paso) => texto.split(" ").forEach((t, i) =>
+    palabras.push({ texto: t, desde: +(desde + i * paso).toFixed(3), dura: +(paso - 0.05).toFixed(3) }));
+  decir("Hola, soy Ana y todos los días uso el, el Nombre Marca porque me deja el pelo suave y brillante.", 1.31, 0.33);
+  decir("Yo lo probé una vez en casa. Después lo recomendé a toda mi familia.", 9.21, 0.4);
+  escribir("Prueba - audio.audio.json", { motor: "scribe", palabras });
+  escribir("Prueba - timeline.json", { secuencia: "PRUEBA", fin: 20, fps: 30,
+    A: { A1: [["ANA.mp4", 0, 8.5, 100], ["BETO.mp4", 8.5, 16.5, 50]] }, V: { V1: [[0, 8.5], [8.5, 16.5]] } });
+  escribir("Prueba - ajustes.json", { cambios: [[3.6, "el, el", "el", "tartamudeo"]], para_escuchar: [],
+    manual: [["Yo lo probé una vez en casa.", "Después lo recomendé / a toda mi familia."]] });
+  const proyecto = (motor) => escribir("subtitulos.proyecto.json", { pistas: { habla: ["A1"] }, motor, pegadas: [["nombre", "marca"]] });
+  proyecto("scribe");
+  const r = spawnSync(py, [herr, path.join(tmp, "subtitulos.proyecto.json"), "Prueba"], { encoding: "utf8" });
+  const srt = fs.existsSync(path.join(tmp, "Prueba - subtitulos.srt")) ? fs.readFileSync(path.join(tmp, "Prueba - subtitulos.srt"), "utf8") : "";
+  const bloques = srt.trim().split(/\n\n+/).map((b) => b.split("\n")).filter((b) => b.length >= 3)
+    .map((b) => ({ tc: b[1], lineas: b.slice(2) }));
+  const lineas = bloques.flatMap((b) => b.lineas);
+  const colgadas = lineas.filter((l) => /\b(el|la|los|las|un|una|de|del|al|en|con|por|para|que|y|no|me|se)$/i.test(l));
+  const textoTodo = lineas.join(" ");
+
+  /* Las pegadas se prueban en la función, que es donde se deciden: sumadas, «Nombre | Marca» cuesta
+     como una frase hecha; sin las del proyecto, no. Un fixture no garantiza que el corte natural caiga
+     justo ahí. */
+  const pr = spawnSync(py, ["-c",
+    "import importlib.util, sys\n" +
+    "e = importlib.util.spec_from_file_location('s', sys.argv[1]); m = importlib.util.module_from_spec(e); e.loader.exec_module(m)\n" +
+    "con = m.hacer_fuerza(m.PEGADAS_IDIOMA | {('nombre', 'marca')}); sin = m.hacer_fuerza(m.PEGADAS_IDIOMA)\n" +
+    "print(con({'t': 'Nombre'}, {'t': 'Marca'}), sin({'t': 'Nombre'}, {'t': 'Marca'}), con({'t': 'sin'}, {'t': 'embargo'}))",
+    herr], { encoding: "utf8" });
+  const fuerzas = (pr.stdout || "").trim().split(/\s+/).map(Number);
+
+  proyecto("whisper");
+  const otro = spawnSync(py, [herr, path.join(tmp, "subtitulos.proyecto.json"), "Prueba"], { encoding: "utf8" });
+  fs.rmSync(tmp, { recursive: true, force: true });
+
+  if (r.error || (r.status !== 0 && /No such file|not found/i.test(String(r.stderr)))) {
+    console.log("  NO CORRIÓ  no hay python3 para correr subtitular.py: " + String(r.error || r.stderr).split("\n")[0]);
+  } else if (r.status !== 0 || !bloques.length) {
+    mal("`subtitular.py` no armó el SRT del proyecto de prueba", String(r.stderr || r.stdout).trim().split("\n").slice(-2).join(" | "));
+  } else if (!bloques[0].tc.startsWith("00:00:01,300")) {
+    mal("`subtitular.py` no usa los fps de la línea de tiempo",
+      "a 30 fps la primera palabra, en 1,31 s, entra en 1,300; salió en " + bloques[0].tc.slice(0, 12) + ". Con los fps fijos, los cuadros caen corridos sin aviso");
+  } else if (bloques.some((b) => b.lineas.length > 2) || lineas.some((l) => l.length > 42)) {
+    mal("`subtitular.py` se pasa de 2 líneas de 42", bloques.filter((b) => b.lineas.length > 2 || b.lineas.some((l) => l.length > 42)).map((b) => b.lineas.join(" / ")).join(" · "));
+  } else if (colgadas.length) {
+    mal("hay líneas que terminan en un artículo, una preposición o un clítico", colgadas.join(" · "));
+  } else if (/\bel, el\b/.test(textoTodo) || !/uso el Nombre Marca/.test(textoTodo.replace(/\n/g, " "))) {
+    mal("`subtitular.py` no aplicó el cambio de los ajustes", textoTodo.slice(0, 120));
+  } else if (!srt.includes("Yo lo probé una vez en casa.\n") || !srt.includes("Después lo recomendé\na toda mi familia.")) {
+    mal("`subtitular.py` no aplicó la división a mano de los ajustes", srt.slice(-160).replace(/\n/g, " | "));
+  } else if (!(fuerzas[0] === -12 && fuerzas[1] > -12 && fuerzas[2] === -12) ||
+             !/fuerza\s*=\s*hacer_fuerza\(\s*PEGADAS_IDIOMA\s*\|\s*cfg\["pegadas"\]\s*\)/.test(
+               fs.readFileSync(herr, "utf8").replace(/"""[\s\S]*?"""/g, "").replace(/#[^\n]*/g, ""))) {
+    /* Y que `main` las SUME de verdad: probar la función con la unión a mano no prueba que el verbo la
+       arme, y la mutación que las deja afuera pasaba la mitad de arriba. */
+    mal("las `pegadas` del proyecto no se suman a las del idioma",
+      "«Nombre / Marca» con las del proyecto: " + fuerzas[0] + " (tiene que dar -12), sin ellas: " + fuerzas[1] + ", «sin / embargo»: " + fuerzas[2]);
+  } else if (otro.status === 0 || !/espera «whisper»/.test(String(otro.stderr) + String(otro.stdout))) {
+    mal("`subtitular.py` acepta una transcripción de otro motor que el que pide el proyecto", String(otro.stderr || "").trim().slice(0, 120));
+  } else {
+    ok(`\`subtitular.py\` arma ${bloques.length} subtítulos a 30 fps, en 2 x 42, con los cambios, la división a mano y las pegadas del proyecto`);
+  }
+}
+
+/*
+ * EL .PRPROJ (2026-09-24): `timeline_prproj.py`, sobre un proyecto SINTÉTICO escrito acá.
+ *
+ * La voz de los reels estaba adentro de un nested, y el lector que esto generaliza abría el nested sin
+ * RECORTARLO: cuando el editor le sacó la cabeza, metió un fragmento en -5,97 s y el script rebotó.
+ * Lo que se sostiene acá:
+ *   - lo de adentro de un nested sale recortado a lo que el nested deja ver, con la entrada corrida;
+ *   - los streams de un medio multicanal (el mismo clip en dos pistas del nested) salen UNA vez;
+ *   - una capa de ajuste no es un plano: tapando toda la secuencia, taparía todos los cortes;
+ *   - los títulos del proyecto salen aparte, y los bordes de adentro de un nested de video, en `internos`;
+ *   - un clip que no corre a 1x lleva su velocidad, y un clip desactivado no suena.
+ */
+titulo("`timeline_prproj.py`: los nested abiertos y RECORTADOS, sin capas de ajuste ni títulos");
+
+{
+  const py = fs.existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3";
+  const { spawnSync } = require("child_process");
+  const zlib = require("zlib");
+  const TPS = 254016000000;
+  const tk = (s) => String(Math.round(s * TPS));
+  const objetos = [];
+  let n = 0;
+  const id = () => String(++n);
+  const medio = (ruta) => { const u = "m" + id(); objetos.push(`<Media ObjectUID="${u}"><ActualMediaFilePath>${ruta}</ActualMediaFilePath></Media>`); return u; };
+  const fuente = (tipo, ruta) => { const i = id(); objetos.push(`<${tipo}MediaSource ObjectID="${i}"><MediaSource><Media ObjectURef="${medio(ruta)}"/></MediaSource></${tipo}MediaSource>`); return i; };
+  const deSecuencia = (tipo, u) => { const i = id(); objetos.push(`<${tipo}SequenceSource ObjectID="${i}"><SequenceSource><Sequence ObjectURef="${u}"/></SequenceSource></${tipo}SequenceSource>`); return i; };
+  /* un clip en una pista: [nombre, desde, hasta, entrada, src, {velocidad, apagado}] */
+  const item = (tipo, [nombre, desde, hasta, entrada, src, extra = {}]) => {
+    const c = id(), s = id(), t = id();
+    objetos.push(`<${tipo}Clip ObjectID="${c}"><Clip><Source ObjectRef="${src}"/><InPoint>${tk(entrada)}</InPoint>` +
+      (extra.velocidad ? `<PlaybackSpeed>${extra.velocidad}</PlaybackSpeed>` : "") + `</Clip></${tipo}Clip>`);
+    objetos.push(`<SubClip ObjectID="${s}"><Name>${nombre}</Name><Clip ObjectRef="${c}"/></SubClip>`);
+    objetos.push(`<${tipo}ClipTrackItem ObjectID="${t}"><ClipTrackItem><TrackItem>` + (desde ? `<Start>${tk(desde)}</Start>` : "") +
+      `<End>${tk(hasta)}</End></TrackItem><SubClip ObjectRef="${s}"/>` + (extra.apagado ? "<IsMuted>true</IsMuted>" : "") +
+      `</ClipTrackItem></${tipo}ClipTrackItem>`);
+    return t;
+  };
+  const grupo = (tipo, pistas, ticks) => {
+    const g = id();
+    const us = pistas.map((clips) => {
+      const u = "p" + id();
+      objetos.push(`<${tipo}ClipTrack ObjectUID="${u}"><ClipTrack><ClipItems><TrackItems>` +
+        clips.map((c) => `<TrackItem ObjectRef="${item(tipo, c)}"/>`).join("") + `</TrackItems></ClipItems></ClipTrack></${tipo}ClipTrack>`);
+      return u;
+    });
+    objetos.push(`<${tipo}TrackGroup ObjectID="${g}"><TrackGroup><Tracks>` + us.map((u) => `<Track ObjectURef="${u}"/>`).join("") +
+      `</Tracks><FrameRate>${ticks}</FrameRate></TrackGroup></${tipo}TrackGroup>`);
+    return g;
+  };
+  const secuencia = (nombre, video, audio) => {
+    const u = "s" + id(), gv = grupo("Video", video, TPS * 1001 / 30000), ga = grupo("Audio", audio, 5292000);
+    objetos.push(`<Sequence ObjectUID="${u}"><TrackGroups><TrackGroup><Second ObjectRef="${gv}"/></TrackGroup>` +
+      `<TrackGroup><Second ObjectRef="${ga}"/></TrackGroup></TrackGroups><Name>${nombre}</Name></Sequence>`);
+    return u;
+  };
+  /* La voz, anidada: dos tomas, y cada una en dos pistas (un medio de dos streams). */
+  const toma = fuente("Audio", "/medios/TOMA.mp4");
+  const voz = [["TOMA.mp4", 0, 4, 10, toma], ["TOMA.mp4", 4, 8, 50, toma]];
+  const nestVoz = secuencia("VOZ", [], [voz, voz]);
+  const plano = fuente("Video", "/medios/PLANO.mp4");
+  const nestPlanos = secuencia("PLANOS", [[["A.mp4", 0, 2.5, 0, plano], ["B.mp4", 2.5, 5, 0, plano]]], []);
+  /* La principal, a 29,97: el nested de la voz con la CABEZA recortada 3 s, así que la primera toma
+     queda asomando 1 s y con la entrada corrida a 13. */
+  secuencia("PRUEBA", [
+    [["PLANO.mp4", 0, 2, 0, plano], ["PLANO.mp4", 2, 5, 7, plano]],
+    [["Adjustment Layer", 0, 5, 0, plano]],
+    [["TIT algo", 1, 3, 0, plano]],
+    [["Nested Sequence 2", 0, 5, 0, deSecuencia("Video", nestPlanos)]],
+  ], [
+    [["Nested Sequence 1", 0, 5, 3, deSecuencia("Audio", nestVoz)]],
+    [["LENTO.wav", 0, 5, 0, fuente("Audio", "/medios/LENTO.wav"), { velocidad: 0.5 }]],
+    [["APAGADO.wav", 0, 5, 0, fuente("Audio", "/medios/APAGADO.wav"), { apagado: true }]],
+  ]);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "prproj-"));
+  fs.writeFileSync(path.join(tmp, "Prueba.prproj"), zlib.gzipSync(`<?xml version="1.0" encoding="UTF-8"?>\n<PremiereData Version="3">${objetos.join("")}</PremiereData>`));
+  fs.writeFileSync(path.join(tmp, "sub.proyecto.json"), JSON.stringify({
+    prproj: "Prueba.prproj", titulos: ["TIT "], videos: { Prueba: { secuencia: "PRUEBA" } } }));
+  const r = spawnSync(py, [path.join(raiz, "herramientas", "timeline_prproj.py"), path.join(tmp, "sub.proyecto.json"), "Prueba"], { encoding: "utf8" });
+  const salida = path.join(tmp, "Prueba - timeline.json");
+  const T = fs.existsSync(salida) ? JSON.parse(fs.readFileSync(salida, "utf8")) : null;
+  const otro = spawnSync(py, [path.join(raiz, "herramientas", "timeline_prproj.py"), path.join(tmp, "sub.proyecto.json"), "Otro"], { encoding: "utf8" });
+  fs.rmSync(tmp, { recursive: true, force: true });
+
+  const A1 = T && JSON.stringify(T.A.A1);
+  const esperado = JSON.stringify([["TOMA.mp4", 0, 1, 13], ["TOMA.mp4", 1, 5, 50]]);
+  if (r.error || (r.status !== 0 && /No such file|not found/i.test(String(r.stderr)))) {
+    console.log("  NO CORRIÓ  no hay python3 para correr timeline_prproj.py: " + String(r.error || r.stderr).split("\n")[0]);
+  } else if (r.status !== 0 || !T) {
+    mal("`timeline_prproj.py` no leyó el proyecto sintético", String(r.stderr || r.stdout).trim().split("\n").slice(-2).join(" | "));
+  } else if (Math.abs(T.fps - 30000 / 1001) > 1e-9) {
+    mal("`timeline_prproj.py` no lee los fps de la secuencia", `dio ${T.fps}; tenían que ser 29,97 (30000/1001)`);
+  } else if (A1 !== esperado) {
+    mal("`timeline_prproj.py` no recorta lo de adentro del nested a lo que el nested deja ver",
+      `A1 dio ${A1}, y tenía que dar ${esperado}: lo recortado de la cabeza no suena, y dos streams del mismo medio son un clip`);
+  } else if (!T.A.A2 || T.A.A2[0][4] !== 0.5) {
+    mal("`timeline_prproj.py` no marca el clip que no corre a 1x", JSON.stringify(T.A.A2));
+  } else if (T.A.A3) {
+    mal("`timeline_prproj.py` cuenta un clip de audio desactivado", JSON.stringify(T.A.A3));
+  } else if (T.V.V2 || !T.V.V1 || T.V.V1.length !== 2) {
+    mal("`timeline_prproj.py` cuenta la capa de ajuste como un plano", "V: " + JSON.stringify(T.V) + ". Una capa de ajuste encima tapa todos los cortes de abajo");
+  } else if (T.V.V3 || !T.titulos.length || T.titulos[0][0] !== "TIT algo") {
+    mal("`timeline_prproj.py` no deja aparte los títulos del proyecto", "titulos: " + JSON.stringify(T.titulos) + " · V: " + JSON.stringify(T.V));
+  } else if (JSON.stringify(T.internos) !== JSON.stringify([[2.5, "V4"]])) {
+    mal("`timeline_prproj.py` no deja los bordes de adentro del nested de video", "internos: " + JSON.stringify(T.internos));
+  } else if (T.rutas["TOMA.mp4"] !== "/medios/TOMA.mp4" || T.fin !== 5) {
+    mal("`timeline_prproj.py` no deja la ruta de cada medio o el fin de la secuencia", JSON.stringify({ rutas: T.rutas, fin: T.fin }));
+  } else if (otro.status === 0 || !/no está en `videos`/.test(String(otro.stderr))) {
+    mal("`timeline_prproj.py` sigue con un video que no está en `videos` del proyecto", String(otro.stderr || otro.stdout).trim().slice(0, 140));
+  } else {
+    ok("`timeline_prproj.py` abre el nested de la voz recortado a lo que se ve, junta los streams y deja afuera la capa de ajuste y el título");
+  }
+}
+
+/*
+ * EL REEL (2026-09-24): `subtitular.py` con las palabras de cada CLIP, una línea con tope en píxeles,
+ * el video entero dividido a mano y el modelo de tiempos «reel», a 29,97 y sin envolvente (que
+ * necesita el audio y scipy: esa quedó probada reproduciendo los dos reels que se entregaron).
+ *   - entra la palabra que ARRANCA en el corte, con 0,12 s de gracia, y no la de afuera ni la que
+ *     arranca en los últimos 30 ms;
+ *   - los cambios anclados a un segundo del CLIP y los agregados se aplican; el anclado a un momento
+ *     que el corte sacó avisa y sigue, pero uno mal escrito en un momento que sí está REBOTA;
+ *   - un bloque más ancho que el tope en píxeles rebota, en píxeles;
+ *   - los tiempos, calculados a mano: entra 40 ms antes (en el corte si cae cerca) y los ms caen
+ *     adentro del cuadro.
+ */
+titulo("`subtitular.py` para un reel: palabras por clip, una línea en píxeles, división entera a mano y tiempos «reel»");
+
+{
+  const py = fs.existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3";
+  const { spawnSync } = require("child_process");
+  const herr = path.join(raiz, "herramientas", "subtitular.py");
+  const fuente = ["/System/Library/Fonts/Supplemental/Arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"].find((f) => fs.existsSync(f));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "reel-"));
+  const escribir = (n, o) => { fs.mkdirSync(path.dirname(path.join(tmp, n)), { recursive: true }); fs.writeFileSync(path.join(tmp, n), JSON.stringify(o)); };
+  /* Una toma, dos cortes: 10–13 s del clip en 0–3 de la secuencia, y 50–53 en 3–6. */
+  escribir("Reel - timeline.json", { secuencia: "REEL", fin: 6, fps: 30000 / 1001,
+    A: { A1: [["TOMA.mp4", 0, 3, 10], ["TOMA.mp4", 3, 6, 50]] }, V: { V1: [[0, 3], [3, 6]] }, internos: [] });
+  const w = (texto, desde, dura) => ({ texto, desde, dura });
+  escribir("trans/TOMA.audio.json", { motor: "scribe", palabras: [
+    w("Afuera", 9.5, 0.3),                                                  // antes del corte y de la gracia
+    w("Hola,", 10.4, 0.3), w("soy", 10.8, 0.2), w("Ana.", 11.1, 0.4),
+    w("Vivo", 12.15, 0.3), w("acá.", 12.5, 0.3),                              // 0,65 s de pausa: queda pegado
+    w("cortada", 12.99, 0.3),                                               // arranca en los últimos 30 ms
+    w("Uso", 49.95, 0.3),                                                   // 0,05 s antes del corte: entra
+    w("el", 50.3, 0.15), w("Produto", 50.5, 0.25), w("todos", 50.95, 0.3), w("los", 51.3, 0.15), w("días.", 51.5, 0.4),
+    w("Afuera", 53.5, 0.3)] });
+  const ajustes = (extra) => escribir("Reel - ajustes.json", Object.assign({
+    cambios: [[["TOMA", 50.5], "Produto", "Producto", "lo que oyó mal"], [["TOMA", 80], "algo", "otra", "un momento que el corte sacó"]],
+    agregados: [["TOMA", 50.75, 50.9, "nuevo", "lo que suena y el motor no escribió"]],
+    bloques: ["Hola, soy Ana.", "Vivo acá.", "Uso el Producto nuevo", "todos los días."] }, extra || {}));
+  const proyecto = (px) => escribir("reel.proyecto.json", { transcripcion_por_clip: "trans/{medio}.audio.json", motor: "scribe",
+    lineas: 1, ancho: { fuente, cuerpo: 48, px }, tiempos: "reel", videos: { Reel: { pistas: { habla: ["A1"] } } } });
+  const correr = () => spawnSync(py, [herr, path.join(tmp, "reel.proyecto.json"), "Reel"], { encoding: "utf8" });
+  let r = null, srt = "", revisar = "", ancho = null, typo = null, otro = null;
+  if (fuente) {
+    ajustes(); proyecto(700); r = correr();
+    srt = fs.existsSync(path.join(tmp, "Reel - subtitulos.srt")) ? fs.readFileSync(path.join(tmp, "Reel - subtitulos.srt"), "utf8") : "";
+    revisar = fs.existsSync(path.join(tmp, "Reel - revisar.txt")) ? fs.readFileSync(path.join(tmp, "Reel - revisar.txt"), "utf8") : "";
+    proyecto(300); ancho = correr();
+    proyecto(700); ajustes({ cambios: [[["TOMA", 50.5], "Prodduto", "Producto", "mal escrito"]] }); typo = correr();
+    otro = spawnSync(py, [herr, path.join(tmp, "reel.proyecto.json"), "Otro"], { encoding: "utf8" });
+  }
+  fs.rmSync(tmp, { recursive: true, force: true });
+  /* A mano, y con el ms que cae ADENTRO de cada cuadro —redondee o trunque Premiere, lee el mismo—:
+     el cuadro 63 son 2102,1 ms, y redondeado al ms (2102) Premiere lo lee en el 62. «Hola,» en 0,40
+     entra en 0,36 → cuadro 10 → 334 ms. «Ana.» termina en 1,50 y «Vivo» arranca
+     en 2,15: 0,65 s de pausa, así que PEGADO a la entrada de «Vivo», 2,11 → cuadro 63 (sin la regla del
+     pegado se sostendría 0,35 s y saldría en el 56, con 7 cuadros vacíos). «Uso» en 2,95 → 2,91, y el
+     corte de 3,00 cae en la ventana → cuadro 90. «todos» pegado a «nuevo»: 3,95 → 3,91 → cuadro 117.
+     «días.» termina en 4,90 y se sostiene → 5,25 → cuadro 158. */
+  const esperado = "1\n00:00:00,334 --> 00:00:02,103\nHola, soy Ana.\n\n2\n00:00:02,103 --> 00:00:03,003\nVivo acá.\n\n" +
+    "3\n00:00:03,003 --> 00:00:03,904\nUso el Producto nuevo\n\n4\n00:00:03,904 --> 00:00:05,272\ntodos los días.\n\n";
+
+  if (!fuente) {
+    console.log("  NO CORRIÓ  no hay una fuente TrueType conocida para medir en píxeles");
+  } else if (r.error || (r.status !== 0 && /No such file|not found|Pillow/i.test(String(r.stderr)))) {
+    console.log("  NO CORRIÓ  sin python3 o sin Pillow: " + String(r.error || r.stderr).trim().split("\n").pop());
+  } else if (r.status !== 0 || !srt) {
+    mal("`subtitular.py` no armó el reel sintético", String(r.stderr || r.stdout).trim().split("\n").slice(-2).join(" | "));
+  } else if (/Afuera|cortada/.test(srt) || !/Uso el/.test(srt)) {
+    mal("`subtitular.py` no pasa bien las palabras del clip por el corte",
+      "entra la que ARRANCA adentro, con 0,12 s de gracia, y no la de afuera ni la del plano siguiente: " + srt.replace(/\n/g, " | ").slice(0, 200));
+  } else if (!/Producto nuevo/.test(srt)) {
+    mal("`subtitular.py` no aplicó el cambio anclado al clip o el agregado", srt.replace(/\n/g, " | ").slice(0, 200));
+  } else if (!/YA NO APLICAN[\s\S]*algo/.test(revisar)) {
+    mal("`subtitular.py` no avisa el cambio cuyo momento sacó el corte", revisar.slice(0, 200));
+  } else if (srt !== esperado) {
+    mal("`subtitular.py` no respeta el modelo de tiempos «reel»", "salió:\n" + srt + "tenía que salir:\n" + esperado);
+  } else if (ancho.status === 0 || !/px/.test(String(ancho.stderr))) {
+    mal("`subtitular.py` deja pasar un bloque más ancho que el tope en píxeles", String(ancho.stderr || ancho.stdout).trim().slice(0, 160));
+  } else if (typo.status === 0 || !/CAMBIO que no encontré/.test(String(typo.stderr))) {
+    mal("`subtitular.py` toma por obsoleto un cambio MAL ESCRITO en un momento que sí está en el corte",
+      "tiene que rebotar: " + String(typo.stderr || typo.stdout).trim().slice(0, 160));
+  } else if (otro.status === 0 || !/no está en `videos`/.test(String(otro.stderr))) {
+    mal("`subtitular.py` sigue con un video que no está en `videos` del proyecto",
+      "con lo general tomaría otras pistas sin avisar: " + String(otro.stderr || otro.stdout).trim().slice(0, 140));
+  } else {
+    ok("`subtitular.py` hace el reel: palabras por clip con su gracia, cambios anclados al clip, una línea en píxeles y los tiempos «reel» al cuadro");
+  }
+}
+
 if (fallos) {
   console.log(fallos === 1 ? "1 falla" : fallos + " fallas");
   process.exit(1);

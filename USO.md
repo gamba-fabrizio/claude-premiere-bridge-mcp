@@ -92,7 +92,8 @@ en `CLAUDE.md`.
 - Barrer o vaciar pistas: ver `borrar`, arriba.
 - Leer valores de efectos en volumen: tiró Premiere cuatro veces.
 - Replicar un look para retocarlo después: Cmd+C / Cmd+V, ver `copiarEfecto`.
-- Importar una transcripción o crear captions: el Import del panel Text, a mano.
+- Importar una transcripción: el Import del panel Text, a mano. Y los captions: un SRT entra con
+  `importar`, pero ponerlo en la secuencia —que crea la pista de captions— es a mano.
 - Cerrar un proyecto DESCARTANDO sus cambios, tampoco por el transporte directo: lo decide el
   editor, a mano.
 - Formatos de intercambio (AAF, FCPXML, OTIO): a mano, porque pierden cosas en silencio.
@@ -125,6 +126,10 @@ audio.js                 transcribe (`--motor premiere|scribe|whisper`). No pisa
                          motor: rebota antes de transcribir (`--pisar` la reemplaza)
 cotejar_transcripcion.js dónde discrepan dos transcripciones: la lista de lo que hay que oír
 fusionar_transcripcion.js un borrador fusionado, con la fuente de cada palabra
+timeline_subtitulos.js,  subtítulos de HABLA: la línea de tiempo —por el bridge, o del .prproj
+timeline_prproj.py,      guardado con los nested abiertos—, el cruce que lista qué revisar y el
+cruzar_subtitulos.py,    SRT dividido por sintaxis, también de UNA línea con tope en píxeles. El
+subtitular.py            método y los criterios, en `herramientas/SUBTITULOS.md`
 proxies.js               genera o adjunta proxies (`--perfil prores|h264`, `--proxies <carpeta>`)
 locucion.js, musica.js,  ElevenLabs. La key sale solo de $ELEVENLABS_API_KEY, y se consulta
 sonido.js                antes de gastar créditos

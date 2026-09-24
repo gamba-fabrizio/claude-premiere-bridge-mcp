@@ -385,6 +385,37 @@ el clip de prueba no tenía silencios reales con los que arbitrar. Donde sí se
 pudo medir, atravesando música, Premiere tenía razón y Whisper sin VAD estaba muy
 mal; con VAD quedaron a 70ms.
 
+## Subtítulos de habla — `herramientas/subtitular.py`
+
+Entrevistas, testimonios, locución y reels: un SRT que `premiere_importar` acepta —queda a mano
+arrastrarlo a la secuencia—, y Premiere hace un caption por bloque. La letra cantada va por otra
+vía —PNG colocados como clips—, y las dos están en `herramientas/SUBTITULOS.md` con los criterios
+que se validaron.
+
+```
+node herramientas/timeline_subtitulos.js subtitulos.proyecto.json "<video>" --secuencia "<nombre>"
+python3 herramientas/timeline_prproj.py subtitulos.proyecto.json "<video>"   # o del .prproj, con los nested
+python3 herramientas/cruzar_subtitulos.py subtitulos.proyecto.json "<video>" # la lista para revisar
+python3 herramientas/subtitular.py subtitulos.proyecto.json "<video>"        # el SRT y revisar.txt
+```
+
+La base es **Scribe sobre la MEZCLA exportada**: las transcripciones de Premiere y de Whisper de cada
+clip traen tiempos corridos y no dicen qué palabra quedó adentro de un corte. Si ya están las de
+**Scribe de cada clip**, que marcan tarde pero parejo, `transcripcion_por_clip` las pasa por los
+cortes y no se gasta en la mezcla. Encima van los cambios que se escriben a mano en los ajustes de
+cada video, anclados a un segundo de la secuencia o del clip. La división es por sintaxis: nunca
+después de un artículo o una preposición, ni adentro de una marca, en 2 líneas de 42 caracteres —o
+en UNA con tope en píxeles de la fuente real, para un reel—, en cuadros enteros y enganchada a los
+cortes de plano. **El cruce contra las otras transcripciones NO manda**: clip y Whisper salen del
+mismo medio y fallan juntos, así que su lista se revisa una por una. Todo lo del proyecto —rutas,
+pistas, la locución, las marcas, el estilo— va en un `subtitulos.proyecto.json` al lado del material,
+no en el código.
+
+Si la voz está adentro de un **nested**, el bridge ve un solo clip: `timeline_prproj.py` lee el
+`.prproj` guardado, abre los nested y recorta lo de adentro a lo que el nested deja ver. Y los
+tiempos tienen **dos modelos**, `"entrevista"` y `"reel"`, que no se reconciliaron: cada uno reproduce
+lo que se entregó con él.
+
 ## De los crudos al rough cut — las cinco `herramientas/`
 
 `audio.js` transcribe un clip. Las otras cinco son la cadena que va de una

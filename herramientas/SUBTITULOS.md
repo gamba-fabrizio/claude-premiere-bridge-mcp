@@ -1,19 +1,185 @@
-# Subtítulos: el proceso completo, con las cinco trampas que costaron
+# Subtítulos: dos vías, según qué se subtitula
 
-Hecho para un videoclip el 2026-08-21. **Ninguna parte de esto es obvia** y cada
-paso tiene un modo de fallar en silencio.
+| lo que se subtitula | la vía | cómo entra a Premiere |
+|---|---|---|
+| **HABLA**: entrevista, testimonio, locución, reel | Scribe sobre la MEZCLA exportada —o el de cada clip, si ya está— + `subtitular.py` | un **SRT** importado: un caption por bloque |
+| **CANCIÓN**: la letra de un videoclip | Whisper sobre el stem de voces, por sección | **PNG** transparentes colocados como clips |
 
-## Lo que NO se puede hacer, medido
-
-**Crear captions o gráficos de Essential Graphics por API: NO.** `Transcript.importFromJSON`
+**Ninguna de las dos crea captions por API, porque no se puede.** `Transcript.importFromJSON`
 devuelve un cascarón con el puntero interno en null, probado con el JSON que Premiere mismo
-exportó. Y el MCP de terceros que dice tenerlo hace una transacción que committea sobre la
-nada. Ver la sección correspondiente del `CLAUDE.md`.
+exportó, y el MCP de terceros que dice tenerlo hace una transacción que committea sobre la nada.
+Por eso la de habla deja un SRT —que `premiere_importar` sí acepta: lo que queda a mano es ponerlo
+en la secuencia— y la de canción, PNG que el bridge coloca.
 
-Así que la vía es **PNG transparentes colocados como clips**. Tiene una ventaja que no es
-menor: cada subtítulo queda como un clip suelto que el usuario puede correr o recortar.
+## Habla: entrevistas, testimonios, locución y reels (2026-09-24)
 
-## 1. El timing es el trabajo real, y hay DOS métodos: uno falla y otro anda
+Salió de subtitular tres videos de testimonios de cinco minutos, con locución y cortes del editor
+adentro de las frases. Del tercero, el editor dijo *"están perfectas las divisiones que hiciste y
+cómo interpretaste el material"*. Las herramientas genéricas reproducen idénticos los tres SRT
+entregados —108, 94 y 86 subtítulos— desde los ajustes de cada video. Y los dos reels verticales de
+un evento, a 29,97 y de una sola línea, que se habían hecho con un script del proyecto: idénticos
+también, 28 y 34 subtítulos, con las opciones de reel (ver abajo).
+
+### El flujo
+
+Todo se trabaja en una carpeta del PROYECTO, al lado del material, con un `subtitulos.proyecto.json`
+que dice dónde está cada cosa: ver la cabecera de `subtitular.py`. **No `subtitulos.json`**: en los
+reels, ése es un archivo que el script del proyecto ESCRIBE, y el de configuración lo pisaría.
+
+1. **Exportar el audio de la secuencia**: `premiere_exportar`, con el preset Waveform Audio 48 kHz, a
+   `<video> - audio.wav`. Con las palabras de cada clip (paso 3), no hace falta.
+2. **Leer la línea de tiempo**. Por el bridge, con la secuencia activa:
+   `node herramientas/timeline_subtitulos.js subtitulos.proyecto.json "<video>" --secuencia "<nombre>"`.
+   O del `.prproj` guardado, sin Premiere y **abriendo los nested**:
+   `python3 herramientas/timeline_prproj.py subtitulos.proyecto.json "<video>"`. Si la voz está
+   anidada, el bridge ve un solo clip con el nombre del nested, y hace falta el segundo. Los dos dejan
+   los clips de cada pista de audio, los cortes de plano y los fps de la secuencia.
+3. **Transcribir la MEZCLA**: `audio.js --motor scribe` sobre el wav. Scribe gasta créditos —unos 40
+   por minuto—, así que se consulta antes. Para el cruce, además `--motor premiere` con otro
+   `--destino` (por ejemplo `premiere/`): `audio.js` no pisa la de otro motor. **Si ya están las de
+   Scribe de cada clip entero**, no se transcribe nada: `transcripcion_por_clip` las pasa por los
+   cortes.
+4. **Cruzar**: `python3 herramientas/cruzar_subtitulos.py subtitulos.proyecto.json "<video>"` lista
+   dónde discrepan Scribe, la transcripción de Premiere del medio entero, la de Whisper y la de
+   Premiere sobre la mezcla. **Se revisa uno por uno** (ver abajo por qué). Es de la vía de la mezcla.
+5. **Escribir `<video> - ajustes.json`**, a mano: `cambios` (cada corrección al texto de Scribe, con
+   su motivo), `agregados` (lo que suena y Scribe no escribió), `para_escuchar`, `manual` (los turnos
+   que se dividen a mano) o `bloques` (el video entero), y `pausa_turno`.
+6. **Subtitular**: `python3 herramientas/subtitular.py subtitulos.proyecto.json "<video>"` escribe
+   `<video> - subtitulos.srt` y `<video> - revisar.txt`, con lo que hay que escuchar, cada cambio y
+   los avisos de tiempo. Con la `envolvente` del reel, con `~/.venvs/audio/bin/python`: necesita
+   numpy y scipy, y los medios montados.
+7. **Importar el SRT** con `premiere_importar`, que lo acepta: entra un caption por bloque, con el
+   texto y los tiempos exactos —verificado en el `.prproj`: el texto va en UTF-8, en base64, y los
+   tiempos al tick—. Lo que queda **a mano es arrastrarlo a la secuencia**, que es lo que crea la
+   pista de captions.
+
+### Por qué Scribe sobre la mezcla, y por qué el cruce no manda
+
+**Las transcripciones de Premiere y de Whisper de cada clip traen tiempos RUIDOSOS por palabra**:
+contra la mezcla, una mediana de +0,26 s y hasta 1,4 s entre palabras vecinas. No sirven para saber
+qué palabra quedó adentro de un corte. Con ésas hay que transcribir la MEZCLA, que es el audio ya
+editado.
+
+**Las de Scribe de cada clip, no**: en los reels arrancaban tarde de manera PAREJA —una mediana de
+40 ms—, y la voz rearmada desde esos cortes calzó contra el export con el mismo corrimiento en los 24
+fragmentos (+21,8 ms, que es el arranque del AAC, no un corte corrido). Es un trabajo, un hablante y
+un corbatero: si ya están pagas, se usan; si no, la mezcla sigue siendo la base.
+
+**Scribe sobre la mezcla es la mejor base**: resolvió solo marcas, nombres de productos y números
+que las otras transcripciones erraban, y puntúa y cita.
+
+**Y el voto clip + Whisper NO es independiente**: las dos salen del mismo medio y fallan JUNTAS. En un
+video de 21 lugares donde el cruce le cambiaba el texto a Scribe, unos diez eran errores del cruce:
+una frase entera oída distinto, un plural que no era, y palabras de la parte que el editor había
+sacado en un corte. **Si la frase de Scribe tiene sentido, gana Scribe.** Por eso `subtitular.py`
+parte de Scribe y no de lo que votó el cruce: lo que va a `cambios` es lo que Scribe erró de verdad y
+lo que se limpia. Y en la cabeza de cada clip el cruce suele meter la última palabra del clip anterior.
+
+**Lo que ninguna fuente corrige**, y va a mano: «echo» (de *echar*), que las cuatro escribieron
+«hecho»; «súper natural», que no es «supernatural»; el voseo («mirá»); las frases hechas («sí o sí»);
+y el nombre exacto de una marca o una entidad.
+
+### El texto
+
+- **Sin muletillas ni tartamudeos.** Las muletillas sueltas —«eh», «mm»— se sacan igual aunque no
+  estén en `cambios`, y el `revisar.txt` las lista.
+- **En cifras**: los tonos, los precios, los porcentajes y los volúmenes («la número 5», «6.0»,
+  «35%», «2x1»). **En letras**: las cantidades y los plazos («cada tres, cuatro meses», «veinte
+  días»).
+- **Raya para un segundo hablante**, en el mismo bloque que la respuesta.
+- **Entre comillas lo que dice un envase o un cartel.**
+- **«súper» va separado**, y el voseo como se habla.
+- **La locución lleva el texto EXACTO del guion**, con los tiempos que dejó `locucion.js`: no se
+  transcribe.
+
+### La división
+
+- **Nunca después** de un artículo, una preposición, un clítico, un «no» o un auxiliar, y **nunca
+  adentro** de una marca o de una frase hecha. Las frases hechas del idioma están en
+  `subtitular.py`; las de un cliente —una marca de dos palabras, un código de producto— van en
+  `pegadas` del proyecto, porque el código es de todos los proyectos.
+- **Hasta 2 líneas de 42 caracteres**, en cuadros enteros y enganchadas a los cortes de plano. O
+  las que diga el estilo, medidas en PÍXELES de la fuente real (`lineas` y `ancho`): ver el reel.
+- **El cambio de hablante corta siempre**; la pausa que parte un turno de un mismo hablante es de
+  1,5 a 2 s (`pausa_turno`).
+- **La velocidad no le gana a la sintaxis**: cerca de 17 caracteres por segundo es la meta, pero un
+  testimonio rápido se lee igual y manda la frase.
+- **El automático acierta ~85 %.** El resto se divide a mano, leyendo el borrador como un
+  subtitulador: en `manual`, cada lista es un turno entero y " / " es el salto de línea; en `bloques`,
+  el video entero. Si el texto no calza palabra por palabra, rebota nombrando la primera que no.
+
+### En Premiere
+
+- **Cada bloque del SRT es un subtítulo**, y Premiere no lo vuelve a partir.
+- **Si el estilo de la pista tiene la caja más angosta que el bloque más ancho**, Premiere mete un
+  salto de línea de más. Se ve al importar.
+- **Los títulos que van abajo, como los rótulos de un punto de venta, pueden pisarse con los
+  subtítulos.** Se resuelve con la posición del estilo de la pista. Esos títulos se declaran en
+  `titulos` del proyecto, por el prefijo de su nombre, para que no cuenten como cortes de plano.
+  Lo mismo un logo encima. Las capas de ajuste quedan afuera solas, por el nombre —«Adjustment
+  Layer» o «Capa de ajuste»—: una encima de todo taparía todos los cortes de abajo.
+
+### Un reel: una línea en píxeles, las palabras de cada clip y el `.prproj` (2026-09-24)
+
+Dos reels verticales de un evento, 1080×1920 a 29,97, con el estilo de un reel de la marca: UNA
+línea, Montserrat Medium 48 y un tope de 770 px, que es donde en la referencia arranca el ícono de
+compartir. Se hicieron con un script del proyecto porque a la herramienta le faltaba esto:
+
+```
+"lineas": 1,
+"ancho": {"fuente": "~/Library/Fonts/Montserrat-Medium.ttf", "cuerpo": 48, "px": 770},
+"transcripcion_por_clip": "transcripciones/scribe/{medio}.audio.json",
+"tiempos": "reel", "envolvente": true,
+"videos": {"<video>": {"secuencia": "<nombre>", "pistas": {"habla": ["A1"]}}}
+```
+
+- **El tope es en píxeles de la fuente real, no en caracteres**: un bloque de 29 caracteres midió
+  763 px y uno de 31, 707. Un bloque que se pasa rebota, con su ancho.
+- **La voz estaba adentro de un NESTED**, y en cada reel en una pista distinta: por eso `videos`
+  pisa las pistas por video. `timeline_prproj.py` abre el nested, y RECORTA lo de adentro a lo que el
+  nested deja ver.
+- **La división fue entera a mano**, en `bloques`, leyendo como un subtitulador. El automático con una
+  línea no se validó: sus costos se ajustaron para dos.
+- **Las correcciones van ancladas al CLIP**, `["TOMA", 105.27]` —el medio, o el principio de su
+  nombre, y un segundo del clip—: así sobreviven a que el editor recorte. Y lo que Scribe no
+  escribió —fundió una palabra repetida en una sola— va en `agregados`, también en tiempo del clip.
+
+**Y el editor recortó un reel DESPUÉS de la entrega**, que fue la prueba que faltaba. Sacó la
+primera frase, y el script del proyecto ya no pudo rehacerlo: abría el nested sin recortarlo y metía
+un fragmento en −5,97 s. Con las herramientas: la corrección de la frase que ya no estaba avisó que
+no aplicaba, la división rebotó en la primera palabra que ya no se oía, y sin los cuatro bloques de
+esa frase salieron 24, 22 de ellos iguales a los de antes corridos 6,807 s. Los otros dos se movieron 3 y 1 cuadros, por los cortes de plano que cambiaron.
+
+### Los tiempos: dos modelos, sin reconciliar
+
+Cada uno salió de un trabajo y reproduce el suyo. **No es un modelo con dos ajustes**: también cambian
+las reglas, y cambiar uno por el otro mueve lo que ya se entregó.
+
+| | `"entrevista"` (el de siempre) | `"reel"` |
+|---|---|---|
+| entra | en el cuadro de la primera palabra | 40 ms antes: Scribe marca tarde |
+| fin de la voz | el de la última palabra de Scribe | medido en la envolvente, si hay `envolvente`: Scribe estira la última palabra sobre la pausa |
+| sale | 0,30 s después, y dura al menos 0,8 s | con menos de 0,7 s de pausa, pegado al siguiente; si no, 0,35 s después |
+| engancha | a un corte hasta 0,32 s antes de entrar, o a 0,36 s de salir | al corte más cercano a la entrada (0,20 antes, 0,067 después), o al primero entre 0,05 y 0,7 s después de la voz |
+| cortes de plano | todos los bordes de V, menos el primero y el último | sin los que tapa una pista de arriba, con los de adentro de los nested, el cuadro 0 y el último |
+
+Medido: con la regla de cortes del reel, uno de los tres videos de la entrevista cambia una salida
+0,2 s. Por eso cada modelo conserva la suya. Para quedarse con uno hay que MIRARLOS sobre el mismo
+material; hasta entonces, el de entrevista es el que viene por defecto.
+
+**Y los dos escriben el milisegundo que cae ADENTRO de cada cuadro.** A 29,97 un cuadro no es un ms
+exacto, y la vía de habla redondeaba a centésimas: el cuadro 63 son 2102,1 ms, y en 2102 Premiere lo
+lee en el 62. Es la misma regla que la de la canción: los tiempos van en cuadros enteros de la
+secuencia. A 25 fps no cambia nada, porque ahí cada cuadro son 40 ms justos.
+
+## Canción: la letra de un videoclip (2026-08-21)
+
+Hecho para un videoclip. **Ninguna parte de esto es obvia** y cada paso tiene un modo de
+fallar en silencio. La vía es **PNG transparentes colocados como clips**, y tiene una ventaja que no
+es menor: cada subtítulo queda como un clip suelto que el usuario puede correr o recortar.
+
+### 1. El timing es el trabajo real, y hay DOS métodos: uno falla y otro anda
 
 **Lo que NO funciona: compuerta de energía sobre el stem de voces.** Se probó midiendo la
 envolvente del stem de Demucs y buscando huecos entre frases. Resultado: **una región de 21
@@ -44,7 +210,7 @@ La validación de que la alineación es real vino de afuera: *"extiende sus alas
 160,95–166,94 y el plano del cantante levantando los brazos está en 162. El usuario había marcado
 esa coincidencia como algo que le gustaba **antes** de que existieran los subtítulos.
 
-## 1.b Las PRIMERAS líneas de cada sección no estaban medidas (2026-08-21)
+### 1.b Las PRIMERAS líneas de cada sección no estaban medidas (2026-08-21)
 
 Y el JSON decía `medido: true` en las cinco. Es el modo de fallar nº1 del repo escrito en un
 campo de datos: **una afirmación de medición que no ocurrió.**
@@ -70,7 +236,7 @@ Medido contra el stem de voces, leyendo el perfil de energía a mano:
 Medio segundo en un subtítulo se ve. Las tres se corrigieron; la quinta se dejó como estaba y
 se le puso `medido: false` con la razón, que es lo único honesto que se puede hacer con ella.
 
-### Cuatro instrumentos que NO sirvieron, y por qué vale anotarlos
+#### Cuatro instrumentos que NO sirvieron, y por qué vale anotarlos
 
 Antes de llegar al perfil a mano se probaron cuatro métodos automáticos. **Los cuatro dieron
 números plausibles y los cuatro eran basura**, y cada uno se descartó por una prueba distinta:
@@ -104,7 +270,7 @@ El corolario de método, que es el que se repite en todo este repo: **antes de c
 medición, correrla dos veces con un parámetro distinto.** Si el resultado se mueve, el número
 no era del material: era del instrumento.
 
-## 1.c Un tiempo a MEDIO frame deja un parpadeo de un frame (2026-08-21)
+### 1.c Un tiempo a MEDIO frame deja un parpadeo de un frame (2026-08-21)
 
 `revisar` marcó un hueco de 1 frame en V3, entre `sub_11` y `sub_12`. Entre dos subtítulos
 consecutivos eso no es un detalle: **el texto desaparece un frame y se ve el parpadeo.**
@@ -128,7 +294,7 @@ Regla corta: **los tiempos de subtítulo van en frames enteros de la secuencia**
 posiciones de la sincro. El medio frame no existe en el timeline y lo único que produce es esta
 clase de hueco.
 
-## 2. La tipografía: un `.ttc` NO se puede pasar como archivo
+### 2. La tipografía: un `.ttc` NO se puede pasar como archivo
 
 El usuario pidió **Helvetica Medium Italic**. En macOS vive dentro de
 `/System/Library/Fonts/HelveticaNeue.ttc`, que es un *font collection* con **14 caras**.
@@ -151,7 +317,7 @@ Los índices hay que **listarlos**, no adivinarlos: van Regular 0, Bold 1, Itali
 
 `fonttools` va en el venv aislado `~/.venvs/vision`, no al sistema — igual que torch.
 
-## 3. Medir el ancho: `%[label:w]` devolvió CERO y el chequeo no chequeó nada
+### 3. Medir el ancho: `%[label:w]` devolvió CERO y el chequeo no chequeó nada
 
 La primera versión medía cada línea con `magick -format "%[label:w]" label:texto info:` para
 achicar las que se pasaran del área segura. **Devolvió 0 para las 23**, así que el `if` nunca
@@ -166,7 +332,7 @@ Eso no puede mentir: es el pixel más a la izquierda y el más a la derecha del 
 Medido así, la línea más ancha usó **2031 px de 3840, el 53%**, o sea que el cuerpo fijo de
 104 estaba bien. La guarda rota no causó daño esa vez; el punto es que no lo habría detectado.
 
-## 4. Un PNG fijo entra con `entrada 3600`, igual que los sintéticos
+### 4. Un PNG fijo entra con `entrada 3600`, igual que los sintéticos
 
 Verificado antes de hacer los 23, justamente porque un still no tiene in/out de material
 como un video y `editar salida` podía no funcionar:
@@ -178,7 +344,7 @@ Así que **`salida` es un punto de FUENTE**, no una duración: hay que leer la `
 del clip recién puesto y sumarle la duración. Pedir `salida: 6.44` cae antes del in-point,
 Premiere lo ignora en silencio y el still queda con sus 5 segundos por defecto.
 
-## 5. El orden de las pistas
+### 5. El orden de las pistas
 
     V1  el corte
     V2  la capa de ajuste del color
@@ -186,7 +352,7 @@ Premiere lo ignora en silencio y el still queda con sus 5 segundos por defecto.
 
 Si los subtítulos van DEBAJO de la capa de ajuste, el Lumetri les cambia el amarillo.
 
-## Receta corta
+### Receta corta
 
 1. Separar el stem de voces con Demucs (`htdemucs`).
 2. Whisper por sección sobre el stem, con `-ml 28 --split-on-word`.
