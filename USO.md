@@ -56,8 +56,8 @@ en `CLAUDE.md`.
   Premiere.
 - **`armarSecuencia` crea aunque el nombre exista**, no reemplaza. `fragmentos` son
   `{desde, hasta, medio}` en segundos de FUENTE; `capas`, `{en, dura, pista, medio, desde,
-  pistaAudio}`. Pone los fps pero NO el formato del reloj: con material de otra cadencia la regla
-  cuenta mal, y se arregla a mano en *Sequence Settings → Display Format*.
+  pistaAudio}`. Pone los fps y el formato del reloj que les toca, y lo relee: si no entra, lo
+  dice. Y Premiere corta el nombre después del último punto: `secuencia` trae el que quedó.
 - **`marcar` cuantiza al cuadro.** Con `clip`, el marcador va al MEDIO: `segundos` es tiempo de
   fuente y aparece en toda instancia de ese material.
 - **`transicion` es solo video** —el crossfade de audio va a mano— y no se puede releer: el conteo
@@ -110,8 +110,8 @@ parchear_corte.py        aplica correcciones a un plan sin replanificar lo que n
 revisar_medios.js        los defectos del material antes de armar: rotación, fps, resoluciones
 sincro.py                el offset de cada clip contra el tema, por audio
 grilla_angulos.js        qué muestra cada ángulo en cada instante del tema
-audio.js                 transcribe (`--motor premiere|scribe|whisper`). OJO: dos motores con el
-                         mismo `--destino` se pisan
+audio.js                 transcribe (`--motor premiere|scribe|whisper`). No pisa la de otro
+                         motor: rebota antes de transcribir (`--pisar` la reemplaza)
 cotejar_transcripcion.js dónde discrepan dos transcripciones: la lista de lo que hay que oír
 fusionar_transcripcion.js un borrador fusionado, con la fuente de cada palabra
 proxies.js               genera o adjunta proxies (`--perfil prores|h264`, `--proxies <carpeta>`)

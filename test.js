@@ -485,6 +485,35 @@ if (!fs.existsSync(rutaAudio)) {
     else if (!/ggml-silero/.test(srcReadme)) mal("el README no dice cómo bajar el modelo de VAD", "sin eso la herramienta no corre en otra máquina");
     else ok("`herramientas/audio.js` carga y está documentada");
   }
+
+  /*
+   * Y NO PISA la transcripcion de OTRO motor: en el evento, correr Premiere con el mismo
+   * `--destino` borro cinco de Scribe —pagas— sin aviso (2026-09-22). Por POSICION y sin
+   * comentarios: el `motor` del `.audio.json` que ya esta se lee ANTES de la primera
+   * transcripcion —despues, pisar ya costo creditos o minutos—, se compara contra el pedido, y
+   * `--pisar` es la unica forma de saltearlo. Verificado por mutacion, las cuatro.
+   */
+  const limpioA = fs.readFileSync(rutaAudio, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const mainA = limpioA.slice(Math.max(0, limpioA.indexOf("async function main(")));
+  const leePrevio = mainA.search(/JSON\.parse\(\s*fs\.readFileSync\(\s*destino\b[^)]*\)\s*\)\s*\.motor/);
+  const transcribe = mainA.search(/await\s+palabras(Premiere|Scribe)\s*\(|\btranscribir(PorTrozos)?\s*\(/);
+  if (leePrevio === -1) {
+    mal("`audio.js` no lee el motor de la transcripción que ya está en el destino",
+      "dos motores con el mismo --destino: el segundo borra al primero sin aviso");
+  } else if (transcribe !== -1 && leePrevio > transcribe) {
+    mal("`audio.js` lee el motor previo DESPUÉS de transcribir",
+      "para entonces pisar ya costó: Scribe gasta créditos y Premiere minutos");
+  /* La comparacion se busca ENTRE la lectura y el rebote, no en todo `main`: a secas la cumplia
+     `cfg.motor !== "whisper"` del aviso del glosario, y la guarda pasaba sin comparar nada. Lo
+     agarro la mutacion. Y `--pisar` tiene que estar ANTES de la lectura, en la condicion. */
+  } else if (!/!==\s*cfg\.motor|cfg\.motor\s*!==/.test(mainA.slice(leePrevio, mainA.indexOf("process.exit(1)", leePrevio)))) {
+    mal("`audio.js` no compara el motor previo contra el pedido",
+      "rebotar siempre rechaza volver a correr el mismo motor, que es uso correcto");
+  } else if (!/!\s*cfg\.pisar\b/.test(mainA.slice(0, leePrevio))) {
+    mal("`audio.js` no deja forzar con `--pisar`");
+  } else {
+    ok("`audio.js` no pisa la transcripción de otro motor, y lo decide antes de transcribir");
+  }
 }
 
 /*
@@ -5731,6 +5760,117 @@ titulo("Los cuatro defectos reportados por una sesion real (2026-09-21)");
     mal("`limpiarRangos` trata un fallo de lectura como 'no tenia marca'",
         "informar que ya estaba limpia sobre una secuencia que no se pudo mirar es el falso negativo de siempre");
   else ok("`limpiarRangos` existe, relee para el veredicto y no asume cuando no pudo leer");
+}
+
+/* ---------- los pendientes del plugin cerrados el 2026-09-23 ---------- */
+
+/*
+ * Tres arreglos que se midieron en vivo en el proyecto de prueba, con el antes y el despues:
+ *
+ *  - `frame` espera a que el PNG CIERRE (el chunk IEND), no a que exista. Con la espera vieja, un
+ *    cuadro de 1920 salio de 1,38 MB sobre 2,28 y sin IEND; con la nueva, cinco de cinco enteros, y
+ *    tres de ellos estaban a medio escribir en la primera lectura.
+ *  - `armarSecuencia` pone el FORMATO DEL RELOJ con los fps y lo relee. `setVideoDisplayFormat` con
+ *    el numero contesta la transaccion en `true` y no cambia nada; entra el objeto del getter con
+ *    `.type` cambiado. Y `estado` lee el reloj, que es lo que hubiera mostrado lo del evento.
+ *  - `armarSecuencia` informa el nombre que QUEDO: Premiere corta lo que va despues del ultimo punto
+ *    ("PRUEBA reloj 29.97" quedo "PRUEBA reloj 29"), y el resumen decia el pedido.
+ *
+ * Por POSICION y sin comentarios, cada uno verificado por mutacion.
+ */
+titulo("`frame` entero, el reloj con los fps y el nombre releído");
+{
+  const sinComentarios = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const cuerpoDe = (nombre) => {
+    const d = srcComandos.indexOf("async function " + nombre + "(");
+    return d === -1 ? "" : sinComentarios(srcComandos.slice(d, srcComandos.indexOf("\n}\n", d) + 2));
+  };
+
+  const fr = cuerpoDe("frame");
+  const iEspera = fr.search(/esperarArchivo\s*\(/);
+  const iLee = fr.search(/archivo\.read\s*\(/);
+  const iBucle = fr.lastIndexOf("while (", iLee);
+  const iCompletoAntesDeDevolver = fr.search(/if\s*\(\s*!\s*completo\s*\)/);
+  const iDevuelve = fr.search(/pngBase64\s*:/);
+  if (!/pngCompleto\s*\(\s*buffer\s*\)/.test(fr)) {
+    mal("`frame` no mira que el PNG haya CERRADO", "esperar a que el archivo exista lo lee a medio escribir");
+  } else if (iBucle === -1 || iBucle < iEspera) {
+    mal("`frame` lee el PNG una sola vez", "si en esa lectura no cerro, no hay segunda: devuelve medio cuadro");
+  } else if (iCompletoAntesDeDevolver === -1 || iCompletoAntesDeDevolver > iDevuelve) {
+    mal("`frame` devuelve el cuadro sin exigir que haya cerrado", "un PNG sin IEND tiene que ser un fallo dicho, no una imagen");
+  } else if (!/0x49[\s\S]{0,60}0x45[\s\S]{0,60}0x4E[\s\S]{0,60}0x44/.test(sinComentarios(srcComandos.slice(srcComandos.indexOf("function pngCompleto("), srcComandos.indexOf("function pngCompleto(") + 600)))) {
+    mal("`pngCompleto` no busca el chunk IEND");
+  } else {
+    ok("`frame` relee hasta que el PNG cierre, y no devuelve uno a medias");
+  }
+
+  const pa = cuerpoDe("ponerAjustes");
+  const iPone = pa.search(/setVideoDisplayFormat\s*\(/);
+  if (iPone === -1) {
+    mal("`ponerAjustes` no pone el formato del RELOJ", "los fps cambian y el reloj queda el del material: la regla cuenta mal");
+  } else if (!/leerReloj\s*\(/.test(pa.slice(iPone))) {
+    mal("`ponerAjustes` no relee el reloj después de ponerlo", "`setVideoDisplayFormat` con el número dice true y no cambia nada");
+  } else if (!/leerReloj\s*\(/.test(cuerpoDe("estado"))) {
+    mal("`estado` no lee el reloj", "\"@ 30fps\" era verdad en el evento: lo que estaba mal era lo que no decía");
+  } else {
+    ok("el reloj se pone con los fps, se relee, y `estado` lo informa");
+  }
+
+  const ar = cuerpoDe("armarSecuencia");
+  if (!/nueva\.name\b/.test(ar)) {
+    mal("`armarSecuencia` no relee el nombre de la secuencia", "Premiere corta lo que va después del último punto");
+  } else if (/secuencia\s*:\s*nombre\s*,/.test(ar)) {
+    mal("`armarSecuencia` devuelve el nombre PEDIDO en `secuencia`", "buscarla después por ese nombre no la encuentra");
+  } else {
+    ok("`armarSecuencia` informa el nombre que quedó, no el pedido");
+  }
+}
+
+/*
+ * Todo `docs/bitacora/<archivo>.md` que nombra el CODIGO existe, y si nombra una seccion «...», esa
+ * seccion es parte de un titulo del archivo. Un puntero roto manda a leer la nada, y en el codigo
+ * nadie lo mira: el 2026-09-23 el port llevo al publico cinco punteros a la bitacora PRIVADA —alla
+ * es otro documento, con otros archivos— y no lo vio ningun chequeo. Probado con ese caso real: en
+ * el publico daba 5 de 5 rotos; en el privado, 0 de 6.
+ */
+titulo("los punteros del código a la bitácora llevan a algo");
+{
+  const titulos = {};
+  const dirB = path.join(raiz, "docs", "bitacora");
+  if (fs.existsSync(dirB)) {
+    for (const a of fs.readdirSync(dirB)) {
+      if (a.endsWith(".md")) {
+        titulos[a] = fs.readFileSync(path.join(dirB, a), "utf8").split("\n")
+          .filter((l) => l.startsWith("#")).map((l) => l.replace(/^#+/, "").trim());
+      }
+    }
+  }
+  const archivos = [];
+  const recorrer = (d) => {
+    for (const n of fs.readdirSync(d)) {
+      const p = path.join(d, n);
+      if (n === "node_modules" || n.startsWith(".")) continue;
+      if (fs.statSync(p).isDirectory()) recorrer(p);
+      else if (/\.(js|py|sh)$/.test(n)) archivos.push(p);
+    }
+  };
+  for (const d of ["plugin", "server", "herramientas"]) if (fs.existsSync(path.join(raiz, d))) recorrer(path.join(raiz, d));
+  const rotos = [];
+  let n = 0;
+  for (const p of archivos) {
+    const src = fs.readFileSync(p, "utf8");
+    for (const m of src.matchAll(/docs\/bitacora\/([a-z0-9-]+\.md)(?:,[ \t]*(?:\n[ \t]*\*[ \t]*)?«([^»]*)»)?/g)) {
+      n++;
+      const donde = path.relative(raiz, p);
+      if (!titulos[m[1]]) { rotos.push(`${donde} → ${m[1]} no existe`); continue; }
+      if (m[2] !== undefined) {
+        const frag = m[2].replace(/\s*\n[ \t]*\*[ \t]*/g, " ").trim();
+        if (!titulos[m[1]].some((t) => t.includes(frag))) rotos.push(`${donde} → ${m[1]}, «${frag}» no es parte de ningún título`);
+      }
+    }
+  }
+  if (rotos.length) mal(`${rotos.length} puntero(s) del código a la bitácora no llevan a nada`, rotos.join(" | "));
+  else ok(`los ${n} punteros del código a la bitácora llevan a un archivo y a una sección que existen`);
 }
 
 /* ---------- el CLAUDE.md liviano: reglas acá, la bitácora en docs/bitacora/ ---------- */

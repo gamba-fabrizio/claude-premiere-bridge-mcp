@@ -2647,11 +2647,27 @@ async function armarSecuencia(params) {
   const porMedio = {};
   for (const p of puestos) porMedio[p.medio] = (porMedio[p.medio] || 0) + 1;
 
+  /*
+   * El nombre se RELEE: Premiere no siempre respeta el pedido. Medido el 2026-09-23 en el proyecto
+   * de prueba: "PRUEBA reloj 29.97" quedo "PRUEBA reloj 29", sin lo que iba despues del ultimo
+   * punto, y el resumen informaba el pedido. Con eso, buscarla despues por el nombre pedido no la
+   * encuentra.
+   */
+  const nombreReal = String(nueva.name || nombre);
+  const cortoPunto = nombre.lastIndexOf(".") !== -1 && nombreReal === nombre.slice(0, nombre.lastIndexOf("."));
+
   return {
     resumen:
-      `Secuencia "${nombre}"` +
+      `Secuencia "${nombreReal}"` +
+      (nombreReal !== nombre
+        ? ` (OJO: se pidió "${nombre}" y Premiere la nombró "${nombreReal}"` +
+          (cortoPunto ? ": cortó lo que iba después del último punto" : "") + ")"
+        : "") +
       (ajustes
         ? ` (${ajustes.ancho}x${ajustes.alto} @ ${ajustes.fps}fps, ` +
+          /* El reloj va al lado de los fps: es la mitad del dato que el resumen viejo callaba. */
+          (reajuste && reajuste.reloj && reajuste.reloj.entro && reajuste.reloj.pedido !== null
+            ? `reloj ${reajuste.reloj.despues}, ` : "") +
           (params.preset
             ? `del preset · vía ${viaCreacion}`
             : reajuste && reajuste.cambio
@@ -2670,8 +2686,13 @@ async function armarSecuencia(params) {
       (inOutLimpiados === null ? "" :
         inOutLimpiados ? ` · in/out devueltos en ${inOutLimpiados} medio(s)` :
         " · OJO: NO se pudieron devolver los in/out de los medios, quedaron recortados en el panel") +
+      (reajuste && reajuste.reloj && !reajuste.reloj.entro
+        ? ` · OJO: el RELOJ quedó en ${reajuste.reloj.despues} y la secuencia es de ${ajustes ? ajustes.fps : "?"}fps: ` +
+          `la regla va a contar mal. A mano: Sequence → Sequence Settings → Display Format → ${nombreReloj(reajuste.reloj.pedido)}`
+        : "") +
       " · " + Object.entries(porMedio).map(([k, v]) => `${k}: ${v}`).join(", "),
-    secuencia: nombre,
+    secuencia: nombreReal,
+    nombrePedido: nombre,
     ajustes: ajustes,
     reajuste: reajuste,
     inOutLimpiados: inOutLimpiados,
@@ -4281,12 +4302,17 @@ async function estado() {
   const settings = await sequence.getSettings();
   const rect = await settings.getVideoFrameRect();
   const fps = await settings.getVideoFrameRate();
+  /* Y el RELOJ. "@ 30fps" era verdad en el evento; lo que estaba mal era lo que no decia: un reloj
+     de 59,94 DF que hacia leer la mitad de la duracion. */
+  const relojCodigo = await leerReloj(settings);
 
   const info = {
     secuencia: sequence.name,
     ancho: rect.width,
     alto: rect.height,
     fps: fps && fps.value ? fps.value : null,
+    reloj: nombreReloj(relojCodigo),
+    relojCodigo: relojCodigo,
     pistasDeVideo: await sequence.getVideoTrackCount(),
     // El audio también: informar solo las pistas de video es mentir por omisión
     // sobre qué hay abierto, y fue parte de por qué el bridge lo ignoraba.
@@ -4348,6 +4374,10 @@ async function estado() {
      * es el nombre. La ruta completa sigue en `info.proyecto`. */
     resumen:
       `[${info.proyectoNombre || "proyecto ?"}] ${info.secuencia} · ${info.ancho}x${info.alto} @ ${info.fps || "?"}fps · ` +
+      (relojDesparejo(info.relojCodigo, info.fps)
+        ? `OJO: el RELOJ cuenta en ${info.reloj} y la secuencia es de ${info.fps}fps: la regla muestra otros ` +
+          `números (Sequence → Sequence Settings → Display Format) · `
+        : "") +
       `${info.pistasDeVideo} pistas de video y ${info.pistasDeAudio} de audio · ` +
       (info.clipSeleccionado
         ? `seleccionado: "${info.clipSeleccionado}"` +
@@ -5086,6 +5116,19 @@ async function esperarArchivo(rutas, msMax) {
   return null;
 }
 
+/*
+ * Un PNG esta COMPLETO cuando cierra con el chunk IEND: los ultimos 12 bytes son el largo (0), el
+ * tipo "IEND" y su CRC, que es fijo (AE 42 60 82). Es la prueba que no depende del tiempo: un
+ * tamaño que no cambia entre dos lecturas se puede enganar con una pausa de la escritura, el
+ * cierre no.
+ */
+function pngCompleto(buffer) {
+  const b = new Uint8Array(buffer);
+  const n = b.length;
+  return n >= 12 && b[n - 8] === 0x49 && b[n - 7] === 0x45 && b[n - 6] === 0x4E && b[n - 5] === 0x44 &&
+    b[n - 4] === 0xAE && b[n - 3] === 0x42 && b[n - 2] === 0x60 && b[n - 1] === 0x82;
+}
+
 /** UXP no tiene btoa ni Buffer: el base64 se arma a mano. */
 function aBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -5139,22 +5182,46 @@ async function frame(params) {
     }
 
     const archivo = await esperarArchivo(candidatos, 5000);
-    intentos.push(`${carpetas[i].via}: devolvió ${devolvio}` + (archivo ? " OK" : " sin archivo tras 5s"));
-    if (archivo) {
-      const buffer = await archivo.read({ format: uxp.storage.formats.binary });
-      /*
-       * Y se BORRA. El PNG existe solo para pasar los bytes; dejarlo acumula
-       * basura en el temp del sistema —34 archivos y 3,4 MB en una tarde— y, si
-       * alguna vez cae en la carpeta candidata del proyecto, se los deja al lado
-       * del .prproj del usuario.
-       */
-      try { if (typeof archivo.delete === "function") await archivo.delete(); }
-      catch (e) { /* si no se puede, no es motivo para fallar */ }
-      return {
-        resumen: `Frame de "${sequence.name}" en el playhead, ${ancho}x${alto} (vía ${carpetas[i].via}).`,
-        pngBase64: aBase64(buffer)
-      };
+    if (!archivo) {
+      intentos.push(`${carpetas[i].via}: devolvió ${devolvio} sin archivo tras 5s`);
+      continue;
     }
+    /*
+     * Y se espera a que TERMINE de escribirse, no a que exista. Premiere crea el archivo y lo sigue
+     * volcando: la espera vieja lo encontraba en la primera vuelta, lo leia a medias y lo borraba.
+     * Medido el 2026-09-21 con un cuadro de 960x1707: 1,3 MB, la cabecera buena y sin IEND. Se
+     * relee hasta que el PNG cierre, y si no cierra se dice, en vez de devolver medio cuadro.
+     */
+    let buffer = null, completo = false, lecturas = 0;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 10000) {
+      buffer = await archivo.read({ format: uxp.storage.formats.binary });
+      lecturas++;
+      if (pngCompleto(buffer)) { completo = true; break; }
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    /*
+     * Y se BORRA. El PNG existe solo para pasar los bytes; dejarlo acumula
+     * basura en el temp del sistema —34 archivos y 3,4 MB en una tarde— y, si
+     * alguna vez cae en la carpeta candidata del proyecto, se los deja al lado
+     * del .prproj del usuario.
+     */
+    try { if (typeof archivo.delete === "function") await archivo.delete(); }
+    catch (e) { /* si no se puede, no es motivo para fallar */ }
+    if (!completo) {
+      intentos.push(`${carpetas[i].via}: devolvió ${devolvio}, y el PNG quedó A MEDIAS tras 10s ` +
+        `(${buffer ? buffer.byteLength : 0} bytes, sin el cierre IEND)`);
+      continue;
+    }
+    intentos.push(`${carpetas[i].via}: devolvió ${devolvio} OK`);
+    return {
+      resumen: `Frame de "${sequence.name}" en el playhead, ${ancho}x${alto} (vía ${carpetas[i].via}), ` +
+        `PNG completo de ${Math.round(buffer.byteLength / 1024)} KB` +
+        (lecturas > 1 ? ` —estaba a medio escribir: cerró en la lectura ${lecturas}—` : "") + ".",
+      pngBase64: aBase64(buffer),
+      bytes: buffer.byteLength,
+      lecturas: lecturas
+    };
   }
 
   throw new Error("No se pudo exportar el frame. Intentos: " + intentos.join(" | "));
@@ -6323,6 +6390,33 @@ async function cerrarHuecos(params) {
  * está medido y son ticks por frame. Si discrepan, es que el setter escribió los
  * ajustes sin que la secuencia los tomara — y eso hay que verlo, no promediarlo.
  */
+/*
+ * EL FORMATO DEL RELOJ de una secuencia, por fps. El codigo es el que usa la mayoria de los presets
+ * de fabrica de Premiere para esos fps —medido el 2026-09-23 sobre los 428 .sqpreset del bundle— y,
+ * donde `SequenceSettings` expone constante (VIDEO_DISPLAY_FORMAT_23976, _25, _2997), coincide.
+ */
+const RELOJ_POR_FPS = [[23.976, 110], [24, 100], [25, 101], [29.97, 102], [30, 104], [48, 113], [50, 105], [59.94, 106], [60, 108]];
+const FPS_DEL_RELOJ = { 100: 24, 101: 25, 102: 29.97, 103: 29.97, 104: 30, 105: 50, 106: 59.94, 108: 60, 110: 23.976, 113: 48 };
+const NOMBRE_RELOJ = { 100: "24 fps", 101: "25 fps", 102: "29,97 DF", 103: "29,97 NDF", 104: "30 fps", 105: "50 fps",
+  106: "59,94 DF", 108: "60 fps", 109: "cuadros", 110: "23,976 fps", 111: "16mm", 112: "35mm", 113: "48 fps" };
+const nombreReloj = (c) => (c === null || c === undefined ? "?" : NOMBRE_RELOJ[c] || String(c));
+/* El getter puede devolver el numero o un objeto con `.type` —`getSequenceVideoTimeDisplayFormat`
+   devuelve el objeto—: se aceptan los dos, y `null` es "no se pudo leer", no un formato. */
+async function leerReloj(st) {
+  try {
+    const v = await st.getVideoDisplayFormat();
+    if (typeof v === "number") return v;
+    if (v && typeof v.type === "number") return v.type;
+  } catch (e) { /* null */ }
+  return null;
+}
+/* Si el reloj cuenta a OTROS fps que la secuencia. `null` si no se sabe: ni un formato que no es de
+   fps (cuadros, pies de pelicula) ni uno que no se pudo leer se informan como desparejos. */
+function relojDesparejo(codigo, fps) {
+  if (codigo === null || fps === null || !(codigo in FPS_DEL_RELOJ)) return null;
+  return Math.abs(FPS_DEL_RELOJ[codigo] - fps) > 0.01;
+}
+
 async function leerAjustes(sequence) {
   const st = await sequence.getSettings();
   const rect = await st.getVideoFrameRect();
@@ -6469,6 +6563,53 @@ async function ponerAjustes(project, sequence, params) {
     }
   }
 
+  /*
+   * Y EL FORMATO DEL RELOJ, que NO viene con los fps: `setVideoFrameRate` los cambia y deja el
+   * formato de display heredado del material. En el evento cuatro secuencias a 30 sobre material de
+   * 59,94 quedaron contando en 59,94 DF, y la regla mostraba la MITAD: una de 41 s terminaba en
+   * 00;00;20;30 (2026-09-22). Se pone sólo si el que hay cuenta a OTROS fps —uno de la misma
+   * familia, como 29,97 sin drop-frame, es una eleccion y se respeta— y se RELEE para el veredicto,
+   * como los fps.
+   */
+  let reloj = null;
+  if (fps !== null) {
+    const pedido = (RELOJ_POR_FPS.find(([v]) => Math.abs(v - fps) < 0.01) || [])[1] || null;
+    const relojAntes = await leerReloj((await leerAjustes(sequence)).st);
+    reloj = { antes: relojAntes, despues: relojAntes, pedido: pedido, via: null };
+    if (pedido === null) {
+      reloj.via = `no hay formato conocido para ${fps}fps: no se toca`;
+    } else if (relojDesparejo(relojAntes, fps) === false) {
+      reloj.via = "ya estaba";
+    } else {
+      const formas = [
+        ["número", () => pedido],
+        ["el objeto del getter con .type cambiado", async () => {
+          const v = await (await leerAjustes(sequence)).st.getVideoDisplayFormat();
+          if (!v || typeof v !== "object" || typeof v.type !== "number") return null;
+          v.type = pedido;
+          return v;
+        }]
+      ];
+      for (let i = 0; i < formas.length && !reloj.via; i++) {
+        try {
+          const valor = await formas[i][1]();
+          if (valor === null) { intentos.push("reloj " + formas[i][0] + ": no se pudo armar el valor"); continue; }
+          const st = (await leerAjustes(sequence)).st;
+          st.setVideoDisplayFormat(valor);
+          let ok = false;
+          project.lockedAccess(() => {
+            ok = project.executeTransaction((a) => { a.addAction(sequence.createSetSettingsAction(st)); },
+              "formato del reloj de la secuencia");
+          });
+          const ahora = await leerReloj((await leerAjustes(sequence)).st);
+          reloj.despues = ahora;
+          if (ahora === pedido) { reloj.via = formas[i][0]; break; }
+          intentos.push(`reloj ${formas[i][0]}: transacción ${ok}, quedó ${nombreReloj(ahora)}`);
+        } catch (e) { intentos.push("reloj " + formas[i][0] + ": " + (e && e.message ? e.message : e)); }
+      }
+    }
+  }
+
   const despues = await leerAjustes(sequence);
   const fallo = [];
   if (quiereRect && (despues.ancho !== ancho || despues.alto !== alto)) {
@@ -6496,12 +6637,24 @@ async function ponerAjustes(project, sequence, params) {
   const avisos = [];
   if (viaRect && viaRect !== "ya estaba") avisos.push("los clips NO se reescalaron: se ve el centro del cuadro, hay que escalarlos aparte");
   if (viaFps && viaFps !== "ya estaba") avisos.push("cambiar los fps con clips ya puestos puede dejar cortes ENTRE frames: corré `revisar`");
+  /* El reloj que no entro NO frena: el contenido esta bien, son los numeros de la regla. Pero se
+     dice, con el arreglo a mano, porque callarlo es lo que hizo leer "dura 20 segs" en el evento. */
+  const relojMal = reloj && reloj.pedido !== null && reloj.via !== "ya estaba" && reloj.despues !== reloj.pedido;
+  if (relojMal) {
+    avisos.push(`el RELOJ quedó en ${nombreReloj(reloj.despues)} y la secuencia es de ${despues.fps}fps: la regla va a ` +
+      `contar mal. A mano: Sequence → Sequence Settings → Display Format → ${nombreReloj(reloj.pedido)}`);
+  }
 
   return {
     resumen:
       `"${sequence.name}": ${antes.ancho}x${antes.alto} @ ${antes.fps}fps → ` +
       `${despues.ancho}x${despues.alto} @ ${despues.fps}fps` +
       (viaRect ? ` · tamaño vía ${viaRect}` : "") + (viaFps ? ` · fps vía ${viaFps}` : "") +
+      (reloj && !relojMal
+        ? (reloj.via === "ya estaba" || reloj.pedido === null
+          ? ` · reloj ${nombreReloj(reloj.despues)}` + (reloj.pedido === null ? ` (${reloj.via})` : "")
+          : ` · reloj ${nombreReloj(reloj.antes)} → ${nombreReloj(reloj.despues)}`)
+        : "") +
       (despues.fpsSecuencia !== null && despues.fps !== null && Math.abs(despues.fpsSecuencia - despues.fps) > 0.01
         ? ` · OJO: getTimebase() dice ${despues.fpsSecuencia}fps y los ajustes ${despues.fps}fps` : "") +
       (avisos.length ? " · " + avisos.join(" · ") : "") + " · se deshace con Cmd+Z",
@@ -6509,6 +6662,9 @@ async function ponerAjustes(project, sequence, params) {
     despues: { ancho: despues.ancho, alto: despues.alto, fps: despues.fps },
     fpsSegunGetTimebase: despues.fpsSecuencia,
     cambio: (viaRect && viaRect !== "ya estaba") || (viaFps && viaFps !== "ya estaba"),
+    reloj: reloj ? { antes: nombreReloj(reloj.antes), despues: nombreReloj(reloj.despues),
+                     codigoAntes: reloj.antes, codigoDespues: reloj.despues, pedido: reloj.pedido,
+                     via: reloj.via, entro: !relojMal } : null,
     viaRect: viaRect, viaFps: viaFps, intentos: intentos
   };
 }

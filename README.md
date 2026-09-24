@@ -250,6 +250,10 @@ Sin `--destino` escribe al lado del material, y en una tanda de 147 clips eso so
 cientos de archivos nuevos entre los crudos. Los clips **sin palabras** solo
 dejan el `.audio.json`: el `.srt` y el `.premiere.json` estarían vacíos.
 
+Y **no pisa la transcripción de otro motor**: si en el destino ya hay una de otro, rebota
+antes de transcribir —cuando pisar todavía no costó créditos ni minutos—, y `--pisar` la
+reemplaza.
+
 Deja tres archivos al lado del original, todos en segundos de la **fuente**:
 
 | | |

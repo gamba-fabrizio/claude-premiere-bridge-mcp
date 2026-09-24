@@ -79,6 +79,7 @@
  *   node herramientas/audio.js <archivo> [--motor premiere|scribe|whisper]
  *                                        [--glosario "..."] [--margen 8]
  *                                        [--modelo ruta] [--salida ruta.json]
+ *                                        [--destino carpeta] [--pisar]
  *
  * Requiere `ffmpeg` y `whisper-cli` (brew install whisper-cpp), más dos modelos
  * en ~/Library/Application Support/whisper-cpp/models/:
@@ -104,7 +105,7 @@ const MOTORES = ["premiere", "scribe", "whisper"];
 const UMBRAL_CONFIANZA = 0.7;
 
 function medido(args) {
-  const out = { archivo: null, motor: "premiere", idioma: "es-es", glosario: "", margen: 8, destino: null, modelo: path.join(MODELOS, "ggml-large-v3-turbo.bin"), vad: path.join(MODELOS, "ggml-silero-v5.1.2.bin"), salida: null, trozos: 0, sinContexto: false };
+  const out = { archivo: null, motor: "premiere", idioma: "es-es", glosario: "", margen: 8, destino: null, modelo: path.join(MODELOS, "ggml-large-v3-turbo.bin"), vad: path.join(MODELOS, "ggml-silero-v5.1.2.bin"), salida: null, trozos: 0, sinContexto: false, pisar: false };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--glosario") {
@@ -166,6 +167,9 @@ function medido(args) {
      * 147 clips eso son 441 archivos nuevos metidos entre los crudos.
      */
     else if (a === "--destino") out.destino = args[++i];
+    /* `--pisar` reemplaza una transcripcion de OTRO motor que ya este en el destino. Sin el, se
+       rebota: ver la nota de `main`. */
+    else if (a === "--pisar") out.pisar = true;
     else if (!out.archivo) out.archivo = a;
   }
   return out;
@@ -617,7 +621,7 @@ const ACHAQUES = {
 async function main() {
   const cfg = medido(process.argv.slice(2));
   if (!cfg.archivo) {
-    console.error("Falta el archivo. Uso: node herramientas/audio.js <archivo> [--motor premiere|scribe|whisper] [--glosario \"...\"] [--margen 8]");
+    console.error("Falta el archivo. Uso: node herramientas/audio.js <archivo> [--motor premiere|scribe|whisper] [--glosario \"...\"] [--margen 8] [--destino carpeta] [--pisar]");
     process.exit(1);
   }
   if (!fs.existsSync(cfg.archivo)) {
@@ -640,6 +644,31 @@ async function main() {
   }
   if (cfg.glosario && cfg.motor !== "whisper") {
     console.error(`OJO: \`--glosario\` lo toma SOLO whisper, y pediste \`${cfg.motor}\`. Se va a ignorar, o corré con --motor whisper.`);
+  }
+
+  /*
+   * NO PISA LA TRANSCRIPCION DE OTRO MOTOR. Las tres salidas se nombran por el medio y no por el
+   * motor, asi que correr dos motores con el mismo `--destino` hacia que el segundo borrara al
+   * primero sin aviso: en el evento cinco de Scribe —pagas— quedaron abajo de las de Premiere, y se
+   * noto recien porque el cotejo dio identico. Renombrar las salidas rompia a quien ya lee
+   * `.audio.json`; se lee el campo `motor` del que esta, y se rebota ANTES de transcribir, que es
+   * cuando pisar todavia no costo nada. Uno que no se puede leer tambien rebota: no saber de quien
+   * es no autoriza a borrarlo. `--pisar` lo fuerza.
+   */
+  const base = cfg.destino
+    ? path.join(cfg.destino, path.basename(cfg.archivo).replace(/\.[^.]+$/, ""))
+    : cfg.archivo.replace(/\.[^.]+$/, "");
+  const destino = cfg.salida || base + ".audio.json";
+  if (fs.existsSync(destino) && !cfg.pisar) {
+    let previo = null;
+    try { previo = JSON.parse(fs.readFileSync(destino, "utf8")).motor || null; } catch (e) { previo = null; }
+    if (previo !== cfg.motor) {
+      console.error(previo
+        ? `Ya hay una transcripcion de \`${previo}\` en ${destino}, y pediste \`${cfg.motor}\`: la pisaria, con su .premiere.json y su .srt.`
+        : `Ya hay un ${path.basename(destino)} en ${destino} y no puedo leer de que motor es: pisarlo podria borrar otra transcripcion.`);
+      console.error("Usa otro --destino, uno por motor, o --pisar si queres reemplazarla.");
+      process.exit(1);
+    }
   }
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "audio-"));
@@ -671,11 +700,7 @@ async function main() {
       palabras: palabras,
       tramos: m.tramos
     };
-    const base = cfg.destino
-      ? path.join(cfg.destino, path.basename(cfg.archivo).replace(/\.[^.]+$/, ""))
-      : cfg.archivo.replace(/\.[^.]+$/, "");
     if (cfg.destino) fs.mkdirSync(cfg.destino, { recursive: true });
-    const destino = cfg.salida || base + ".audio.json";
     fs.writeFileSync(destino, JSON.stringify(salida, null, 1));
 
     /*

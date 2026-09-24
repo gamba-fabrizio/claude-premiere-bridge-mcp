@@ -321,8 +321,7 @@ function cuadricular(offset, desde, hasta, durClip) {
               necV + " y A" + necA + " · hay V" + hayV + " y A" + hayA + "\n");
   /* Se corta aunque falten SOLO de audio. `insertar` rebota una pista de video que no existe, y una
    * de audio la crea, pero de a una y al final: pidiendo A9 con seis, el audio cae en A7, y cada tramo
-   * tiene que quedar con su audio en SU pista. → docs/bitacora/insertar-y-armado.md, «Pedir una
-   * pista de audio que NO EXISTE» */
+   * tiene que quedar con su audio en SU pista. */
   if (necV > hayV || necA > hayA) {
     console.error("Faltan pistas, y tienen que existir ANTES de colocar: `insertar` no crea las de video,");
     console.error("y las de audio las crea de a una y al final —pidiendo A9 con seis, el audio cae en A7—,");
