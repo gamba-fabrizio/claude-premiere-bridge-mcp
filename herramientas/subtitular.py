@@ -27,8 +27,8 @@ DIVISIÓN. Por oración y por contenido. Cada bloque se elige minimizando un cos
   - hasta 2 líneas de 42 caracteres —o las que diga el proyecto, medidas en píxeles de la fuente
     real—, entre ~1 y 7 s, cerca de 17 caracteres por segundo, y la velocidad NO le gana a la
     sintaxis: un testimonio rápido se lee igual, manda la frase.
-Lo que el automático no resuelve —acierta ~85 %— se divide a mano: un turno en `manual`, o el
-video entero en `bloques`.
+Lo que el automático no resuelve —acierta ~85 % en dos líneas, y 87 % en una contra dos reels
+divididos a mano— se divide a mano: un turno en `manual`, o el video entero en `bloques`.
 
 TIEMPOS. En cuadros enteros de la secuencia, enganchados a los cortes de plano. Hay DOS modelos, y
 salieron de dos trabajos (ver `SUBTITULOS.md`):
@@ -131,12 +131,15 @@ def cargar_proyecto(ruta, video):
 # palabras que NO pueden quedar al final de una línea o de un bloque: piden lo que viene después
 CONJ = set("y o u e pero porque que cuando aunque si como mientras entonces donde ni".split())
 NO_FINAL = set("""el la los las lo le les un una unos unas de del a al en con por para sin sobre entre hasta desde
-    me te se nos mi mis tu tus su sus muy tan más mas cada este esta estos estas ese esa esos esas
+    me te se nos mi mis tu tus su sus nuestro nuestra nuestros nuestras vuestro vuestra vuestros vuestras
+    muy tan más mas cada este esta estos estas ese esa esos esas
     aquel aquella no es son era fue sea ser está están estaba estar voy va vas vamos tengo tiene tenés tenía hay he
     ha has había hace hacer algún alguna algunos algunas otro otra otros otras todo toda todos todas propia propio
-    mismo misma según""".split()) | CONJ
+    varios varias muchos muchas pocos pocas distintos distintas diferentes diversos diversas ciertos ciertas
+    ambos ambas mismo misma según""".split()) | CONJ
 PREP = set("a en con por para sin sobre entre hasta desde según".split())   # «de» va aparte: se pega al sustantivo
-DET = set("el la los las un una unos unas este esta estos estas ese esa mi mis su sus tu tus".split())
+DET = set("""el la los las un una unos unas este esta estos estas ese esa mi mis su sus tu tus
+    nuestro nuestra nuestros nuestras vuestro vuestra vuestros vuestras""".split())
 CLITICO = set("me te se nos lo la le les".split())
 COPULA = set("es son está están era fue".split())
 # expresiones que no se parten nunca, ni con coma en el medio. Las de una MARCA o un PRODUCTO no van
@@ -335,6 +338,13 @@ def main():
         ancho, TOPE, UNIDAD = fuente_px.getlength, float(A_["px"]), "px"
     else:
         ancho, TOPE, UNIDAD = len, MAXL, "caracteres"
+    # Los costos de largo se calibraron para bloques de 2 x 42 caracteres. Con UNA línea el bloque entra
+    # en un tercio de eso, y el umbral del bloque corto (20 caracteres) castigaba la división que haría un
+    # subtitulador: contra dos reels divididos a mano, prefería cortar después de un «que» antes que
+    # hacer tres bloques de 17. Se escala a lo que entra; con 2 x 42 queda en 20, como siempre.
+    MUESTRA = "el nombre de la persona que habla en el video"
+    POR_BLOQUE = TOPE * min(LINEAS, 2) / (ancho(MUESTRA) / len(MUESTRA))    # caracteres que entran
+    CORTO = 20 * POR_BLOQUE / (2 * MAXL)
 
     # ---------------- el texto ----------------
     tramos = tramos_de(T, cfg)
@@ -511,11 +521,18 @@ def main():
         if cps > 20: c += (cps - 20) * 1.2             # un testimonio rápido se lee igual: manda la frase
         if cps > 26: c += 10
         completo = (i == 0 or fuerza(ws[i - 1], ws[i]) >= 6) and (j == n or fuerza(ws[j - 1], ws[j]) >= 6)
-        if len(txt) < 20 and not completo: c += 8
+        if len(txt) < CORTO and not completo: c += 8
         # una oración que ARRANCA adentro del bloque y sigue en el próximo: el bloque mezcla dos oraciones
         internos = [x for x in range(i, j - 1) if re.search(r"[.?!…][”»]?$", ws[x]["t"])]
         if internos and j < n and not re.search(r"[.?!…][”»]?$", ws[j - 1]["t"]):
             c += 14
+        # Con UNA línea, lo que arranca después de una coma de CLÁUSULA y sigue en el bloque próximo queda
+        # colgado al final de la línea —«en la planta, localizada / en la ciudad»—: es un corte en medio de
+        # una frase, y cuesta lo mismo, (10 - 0) x 2,5. La coma de una enumeración no cuenta.
+        if LINEAS == 1 and j < n and not re.search(r"[.,;:?!…][”»]?$", ws[j - 1]["t"]):
+            if any(re.search(r"[,;:][”»]?$", ws[x]["t"]) and fuerza(ws[x], ws[x + 1], sig=ws[x + 2:]) >= 6
+                   for x in range(i, j - 1)):
+                c += 25.0
         c += costo_corte(ws, j)
         return c, lineas
 

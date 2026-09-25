@@ -39,6 +39,24 @@
  *   un overlay sí, y entonces el ProRes va 4444.
  * - Chrome y puppeteer-core salen de la caché de HyperFrames y de npx: no se instala nada.
  *
+ * ## El color: BT.709 y etiquetado, o Premiere corre los saturados (2026-09-25)
+ *
+ * Hasta el 2026-09-25 el ProRes salía con la matriz **BT.601** —lo que hace ffmpeg al pasar PNG RGB
+ * a YUV sin que se le diga nada— y **sin etiquetar** (primaries, transfer y matriz en `unknown`).
+ * Premiere lee un HD sin etiqueta como 709, y los colores saturados se corrían. Medido con un parche
+ * por los mismos argumentos, leído como 709:
+ *
+ *     #1d4fa8 → #184fac     #ff0032 → #ff1c30     #00ff00 → #00d700     blanco y gris, iguales
+ *
+ * Leído como 601 volvía exacto: el error era la matriz, no la captura. Lo que se exportó antes con
+ * esta herramienta tiene ese corrimiento, y en lo que ya pasó por Premiere quedó horneado.
+ *
+ * Ahora la conversión va explícita (`scale=out_color_matrix=bt709:out_range=tv`) y `setparams`
+ * escribe las etiquetas: con solo las banderas `-color_*`, primaries y transfer quedaban en
+ * `unknown`. Y no se da por bueno: antes de exportar, `probarColor` pasa un parche de seis colores
+ * por los MISMOS argumentos y exige que vuelva exacto leído como 709; después, el archivo se mide
+ * con ffprobe y tiene que decir bt709.
+ *
  * Uso:
  *   node exportar_dc.js --html "Intro.dc.html" --dir <carpeta del zip> --salida intro.mov
  *   node exportar_dc.js --dir <carpeta> --verificar          # sólo comprueba el seek
@@ -66,6 +84,17 @@ const ALFA = flag("alfa");
  * sobre ROJO SATURADO — justo donde el submuestreo se ve, como borde sucio en las letras. 4444 es
  * 4:4:4: un valor de color por píxel. Con `--prores 422` se puede pedir el más liviano. */
 const PERFIL = opt("prores", "4444");
+/* ProRes 4444 si hay alfa, 422 HQ si no. -c:v prores_ks es el encoder con perfiles. */
+const PERFILES = { "422": ["3", "yuv422p10le"], "4444": ["4444", ALFA ? "yuva444p10le" : "yuv444p10le"] };
+const [PROF, PIX] = PERFILES[PERFIL] || PERFILES["4444"];
+/* LA CONVERSIÓN Y LAS ETIQUETAS, en un solo lugar: las usan el export y `probarColor`, así que lo
+ * que se prueba es exactamente lo que se exporta. Ver "El color" arriba. */
+const ARGS_COLOR = [
+  "-vf", "scale=out_color_matrix=bt709:out_range=tv:flags=accurate_rnd+full_chroma_int,format=" + PIX + "," +
+    "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv",
+  "-c:v", "prores_ks", "-profile:v", PROF, "-vendor", "apl0",
+  "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
+];
 const VERIFICAR = flag("verificar");
 const CSS = opt("css", null);
 /* LOS TEXTOS NO VIENEN EN EL EXPORT, y hay que inyectarlos.
@@ -156,6 +185,39 @@ function inyectar(html, props) {
   return html.replace(/data-props="[^"]*"/, 'data-props="' + esc(JSON.stringify(j)) + '"');
 }
 
+/* EL PARCHE DE COLOR: seis bloques por los MISMOS `ARGS_COLOR` del export, releídos como los lee
+ * Premiere (709, rango tv). Con la matriz 601 de antes el azul volvía 5 niveles corrido y el verde
+ * 40; blanco y gris vuelven iguales con cualquier matriz, así que solos no probarían nada. Se mira
+ * el CENTRO de cada bloque: en 422 el croma se comparte entre vecinos y el borde no vuelve exacto. */
+function probarColor() {
+  const COL = [[0x1d, 0x4f, 0xa8], [0xff, 0x00, 0x32], [0x00, 0xff, 0x00], [0x00, 0x00, 0xff], [0xff, 0xff, 0xff], [0x80, 0x80, 0x80]];
+  const B = 16, W = B * COL.length, H = B, px = Buffer.alloc(W * H * 4);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const c = COL[Math.floor(x / B)], i = (y * W + x) * 4;
+    px[i] = c[0]; px[i + 1] = c[1]; px[i + 2] = c[2]; px[i + 3] = 255;
+  }
+  const dir = fs.mkdtempSync(path.join(require("os").tmpdir(), "dccolor-"));
+  try {
+    const mov = path.join(dir, "parche.mov");
+    execFileSync("ffmpeg", ["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", `${W}x${H}`,
+      "-framerate", String(FPS), "-i", "-", ...ARGS_COLOR, mov], { input: px });
+    const raw = execFileSync("ffmpeg", ["-v", "error", "-i", mov, "-vf",
+      "scale=in_color_matrix=bt709:in_range=tv:flags=accurate_rnd+full_chroma_int,format=rgba",
+      "-frames:v", "1", "-f", "rawvideo", "-"], { maxBuffer: 1 << 24 });
+    const hex = (p) => "#" + p.map((v) => v.toString(16).padStart(2, "0")).join("");
+    const vistos = COL.map((c, k) => { const i = ((B >> 1) * W + k * B + (B >> 1)) * 4; return [raw[i], raw[i + 1], raw[i + 2]]; });
+    const error = Math.max(...vistos.map((v, k) => Math.max(...v.map((x, j) => Math.abs(x - COL[k][j])))));
+    return { error, pedidos: COL.map(hex).join(" "), vistos: vistos.map(hex).join(" "), etiquetas: etiquetasDe(mov) };
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+/* Matriz/primaries/transfer/rango, LEÍDOS del archivo. */
+function etiquetasDe(archivo) {
+  const s = JSON.parse(execFileSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries",
+    "stream=color_space,color_primaries,color_transfer,color_range", "-of", "json", archivo], { encoding: "utf8" })).streams[0] || {};
+  return `${s.color_space}/${s.color_primaries}/${s.color_transfer}/${s.color_range}`;
+}
+const ETIQUETAS_709 = "bt709/bt709/bt709/tv";
+
 /* La firma de un render: lo que hay que comparar para saber si el seek es determinista. */
 const FIRMA = `(() => {
   const ex = document.querySelector('[data-om-exportable-video-with-duration-secs]');
@@ -173,6 +235,18 @@ const SEEK = (t) => `(() => {
 })()`;
 
 (async () => {
+  /* El color se prueba ANTES de gastar un minuto en cuadros: si los argumentos no devuelven el
+     parche exacto, todo lo que salga va a tener los saturados corridos en Premiere. */
+  if (SALIDA && !VERIFICAR) {
+    const c = probarColor();
+    if (c.error > 2 || c.etiquetas !== ETIQUETAS_709) {
+      console.error(`el parche de color NO sale bien: error máx ${c.error} leído como 709, etiquetas ${c.etiquetas}`);
+      console.error(`  pedido ${c.pedidos}\n  volvió ${c.vistos}`);
+      console.error("no exporto: Premiere mostraría los colores saturados corridos");
+      process.exit(1);
+    }
+    console.log(`color:      parche de 6 colores exacto leído como 709 (error máx ${c.error}), ${c.etiquetas} ✓`);
+  }
   const pupDir = hallarPuppeteer();
   if (!pupDir) { console.error("no encontré puppeteer-core en ~/.npm/_npx"); process.exit(1); }
   const puppeteer = require(pupDir);
@@ -321,12 +395,8 @@ const SEEK = (t) => `(() => {
 
     const salida = htmls.length === 1 ? SALIDA
       : path.join(path.dirname(SALIDA), h.replace(/\.dc\.html$/, "") + path.extname(SALIDA));
-    /* ProRes 4444 si hay alfa, 422 HQ si no. -c:v prores_ks es el encoder con perfiles. */
-    const perfiles = { "422": ["3", "yuv422p10le"], "4444": ["4444", ALFA ? "yuva444p10le" : "yuv444p10le"] };
-    const [prof, pix] = perfiles[PERFIL] || perfiles["4444"];
     execFileSync("ffmpeg", ["-v", "error", "-framerate", String(FPS), "-i", path.join(tmp, "%05d.png"),
-      "-c:v", "prores_ks", "-profile:v", prof, "-pix_fmt", pix, "-vendor", "apl0",
-      "-r", String(FPS), salida, "-y"]);
+      ...ARGS_COLOR, "-r", String(FPS), salida, "-y"]);
     fs.rmSync(tmp, { recursive: true, force: true });
 
     const dur = execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration",
@@ -334,6 +404,14 @@ const SEEK = (t) => `(() => {
     const info = execFileSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries",
       "stream=codec_name,profile,pix_fmt,width,height,nb_frames", "-of", "csv=p=0", salida], { encoding: "utf8" }).trim();
     console.log(`   ${path.basename(salida)}  ${(fs.statSync(salida).size / 1048576).toFixed(1)} MB  ${dur}s  ${info}`);
+    /* Las ETIQUETAS se leen del archivo, no se suponen de los argumentos: con solo las banderas
+       `-color_*`, primaries y transfer quedaban en unknown. */
+    const etiquetas = etiquetasDe(salida);
+    if (etiquetas === ETIQUETAS_709) console.log(`   color ${etiquetas} ✓`);
+    else {
+      console.error(`   OJO: el archivo quedó etiquetado ${etiquetas} y no ${ETIQUETAS_709}: Premiere puede leerlo con otra matriz`);
+      process.exitCode = 1;
+    }
     await pag.close();
   }
 

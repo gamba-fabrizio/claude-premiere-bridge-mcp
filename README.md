@@ -2,7 +2,7 @@
 
 Un bridge que le da a Claude acceso de lectura y escritura a Premiere Pro: leer la
 secuencia, **mirar el frame** bajo el playhead, animar, editar y armar timeline.
-**57 herramientas MCP sobre 73 verbos del panel.**
+**58 herramientas MCP sobre 74 verbos del panel.**
 
 > **Esto salió de un flujo de trabajo real, no de un ejercicio.** Se usó para armar
 > cortes de videoclips, cursos e institucionales, y casi todo lo que hay acá se pagó
@@ -143,6 +143,7 @@ claude mcp add premiere-bridge --scope user -- node /RUTA/A/TU/COPIA/premiere-br
 | `premiere_cortes_de_escena` | Detecta cambios de plano en un clip; `marcar` no toca el timeline, `cortar` lo parte, `subclips` los crea |
 | `premiere_etiquetar` | Etiquetas de color en el panel de proyecto; sin `color` sólo lee |
 | `premiere_interpretar` | Lee o cambia los fps con que Premiere lee un medio; sin `fps` sólo lee |
+| `premiere_in_out_medio` | Lee o pone los in/out de un MEDIO del panel —no de un clip—; cura un still que quedó en doce horas. El nombre va exacto y único |
 | `premiere_proxy` | Lee o adjunta el proxy de un medio; sin `archivo` sólo lee |
 | `premiere_relink` | Repunta un medio a otro archivo; el archivo tiene que existir y NO hay Cmd+Z |
 | `premiere_transicion` | Pone un fundido en un corte. Default Cross Dissolve moderno; el AUDIO no lo toca |

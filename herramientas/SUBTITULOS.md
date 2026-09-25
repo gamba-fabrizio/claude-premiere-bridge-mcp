@@ -108,6 +108,19 @@ y el nombre exacto de una marca o una entidad.
 - **El automático acierta ~85 %.** El resto se divide a mano, leyendo el borrador como un
   subtitulador: en `manual`, cada lista es un turno entero y " / " es el salto de línea; en `bloques`,
   el video entero. Si el texto no calza palabra por palabra, rebota nombrando la primera que no.
+- **Con UNA línea, 87 %** de los bloques de dos reels divididos a mano, que al principio eran 61 %. Lo
+  que lo movió:
+  - los **posesivos y los cuantificadores** —«nuestro», «distintos», «varios»— no pueden cerrar una
+    línea: faltaban en la lista, y eso vale también para dos líneas (en la entrevista no había pasado);
+  - el **umbral del bloque corto** se escala a lo que entra en el bloque: pensado para 2 x 42, con una
+    línea hacía preferir «Destacamos también que /» a tres bloques de 17 caracteres;
+  - lo que **arranca después de una coma de cláusula** y sigue en el bloque próximo cuesta como un
+    corte en medio de una frase («en la planta, localizada / en la ciudad»). La coma de una
+    enumeración no cuenta; ésa es la regla con menos respaldo: la sostiene un caso real, y en una frase
+    de prueba el resultado sin ella salía mejor.
+- **Lo que el automático no sabe**: un sustantivo de un adjetivo —puede partir «la carpintería /
+  nueva»— y las frases hechas que no están en la lista. Y el 87 % es de un solo hablante: con otro
+  material, a leerlo igual.
 
 ### En Premiere
 
@@ -139,8 +152,9 @@ compartir. Se hicieron con un script del proyecto porque a la herramienta le fal
 - **La voz estaba adentro de un NESTED**, y en cada reel en una pista distinta: por eso `videos`
   pisa las pistas por video. `timeline_prproj.py` abre el nested, y RECORTA lo de adentro a lo que el
   nested deja ver.
-- **La división fue entera a mano**, en `bloques`, leyendo como un subtitulador. El automático con una
-  línea no se validó: sus costos se ajustaron para dos.
+- **La división fue entera a mano**, en `bloques`, leyendo como un subtitulador. **El automático de una
+  línea, medido contra esas dos divisiones**, acertaba 61 % de los bloques; ahora 87 % (54 de 62) y
+  93 % de los cortes. Ver *La división*.
 - **Las correcciones van ancladas al CLIP**, `["TOMA", 105.27]` —el medio, o el principio de su
   nombre, y un segundo del clip—: así sobreviven a que el editor recorte. Y lo que Scribe no
   escribió —fundió una palabra repetida en una sola— va en `agregados`, también en tiempo del clip.

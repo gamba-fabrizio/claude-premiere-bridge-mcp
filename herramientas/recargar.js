@@ -22,6 +22,27 @@ const fs = require("fs"), path = require("path"), { execFile } = require("child_
 const RAIZ = path.join(__dirname, "..");
 const LATIDO = path.join(RAIZ, "intercambio", "latido.json");
 const args = process.argv.slice(2);
+/*
+ * UN FLAG QUE NO CONOCE NO ES UN MACRO (2026-09-24). Todo lo que no fuera `--mirar`,
+ * `--reiniciar` o `--destrabar` se tomaba como el nombre del macro: `--help` abrió UDT, lo trajo al
+ * frente y quiso disparar un macro "--help", con el editor trabajando en Premiere. Y un
+ * `--reinicar` mal tipeado haría lo mismo en vez de reiniciar. Rebota ACÁ, antes de tocar nada; un
+ * nombre sin guiones sigue siendo el macro.
+ */
+const CONOCIDOS = ["--mirar", "--reiniciar", "--destrabar"];
+const USO = [
+  "uso: node herramientas/recargar.js                dispara el Reload del panel y comprueba que entró",
+  "     node herramientas/recargar.js --mirar        SOLO mira si el panel está al día",
+  "     node herramientas/recargar.js --reiniciar    guarda, cierra Premiere con el macro y exige que el panel vuelva",
+  "     node herramientas/recargar.js --destrabar    libera el transporte que dejó trabado un reinicio",
+  "     node herramientas/recargar.js \"Otro macro\"   dispara ese macro de Keyboard Maestro",
+].join("\n");
+if (args.includes("--help") || args.includes("-h")) { console.log(USO); process.exit(0); }
+const desconocidos = args.filter((a) => a.startsWith("-") && !CONOCIDOS.includes(a));
+if (desconocidos.length) {
+  console.error(`recargar.js no conoce ${desconocidos.join(", ")} y NO hizo nada.\n${USO}`);
+  process.exit(1);
+}
 const SOLO_MIRAR = args.indexOf("--mirar") !== -1;
 /*
  * `--reiniciar`: la unica forma de recargar el plugin cuando esta INSTALADO.
@@ -99,6 +120,84 @@ function corriendo(patron) {
 }
 
 /*
+ * PREMIERE SE RECONOCE POR SU EJECUTABLE, NO POR SUS ARGUMENTOS (2026-09-25, reportado desde la
+ * sesión de otro plugin y medido acá).
+ *
+ * Era `corriendo("MacOS/Adobe Premiere Pro")`, o sea `pgrep -f`, que busca en los ARGUMENTOS. Y
+ * ahí Premiere aparece en un proceso que no es Premiere y que sobrevive a su cierre:
+ *
+ *   626  …/IPCBox/AdobeIPCBroker.app/Contents/MacOS/AdobeIPCBroker -launchedbyvulcan
+ *        /Applications/Adobe Premiere Pro 2026/Adobe Premiere Pro 2026.app/Contents/MacOS/Adobe Premiere Pro 2026
+ *
+ * El broker de IPC de Adobe lleva la ruta de la app que lo lanzó. Este lo lanzó el Premiere que se
+ * abrió solo al arrancar la máquina (04:50), y seguía vivo después de cerrarlo: el cierre "no
+ * terminaba nunca", el reinicio informó "SIGUE ABIERTO tras 180s" con Premiere ya cerrado, trabó el
+ * transporte y no reabrió. El reporte lo atribuyó a Adobe Media Encoder, que estaba exportando; no
+ * era eso: sin AME, con el broker de las 04:50 vivo, el patrón viejo engancha igual.
+ *
+ * `comm` de `ps` es la ruta del EJECUTABLE: la del broker no tiene nada de Premiere. Y la salida
+ * se puede inyectar, como en `sesionRemotaJump`, para probar las dos direcciones sin depender de
+ * qué esté corriendo en la máquina del test.
+ */
+const ES_PREMIERE = /\/Contents\/MacOS\/Adobe Premiere Pro[^/]*$/;
+const DEL_BUNDLE = /\/Adobe Premiere Pro[^/]*\.app\/Contents\//;
+function segundosDeEtime(e) {
+  /* `etime` de ps: [[dd-]hh:]mm:ss */
+  const [d, resto] = e.indexOf("-") !== -1 ? e.split("-") : ["0", e];
+  const p = resto.split(":").map(Number);
+  while (p.length < 3) p.unshift(0);
+  return Number(d) * 86400 + p[0] * 3600 + p[1] * 60 + p[2];
+}
+function procesos(salidaPs) {
+  const o = salidaPs !== undefined ? salidaPs
+    : require("child_process").execFileSync("ps", ["-axo", "pid=,etime=,comm="], { encoding: "utf8", timeout: 5000 });
+  return o.split("\n").map((l) => l.match(/^\s*(\d+)\s+(\S+)\s+(.+?)\s*$/)).filter(Boolean)
+    .map((m) => ({ pid: Number(m[1]), vida: segundosDeEtime(m[2]), comm: m[3] }));
+}
+/* `null` si no se pudo mirar, y quien llama lo distingue de `false`: dar a Premiere por cerrado
+   porque `ps` no contestó es reabrir encima de uno vivo. */
+function premiereAbierto(salidaPs) {
+  try { return procesos(salidaPs).some((p) => ES_PREMIERE.test(p.comm)); }
+  catch (e) { return null; }
+}
+/*
+ * LOS AUXILIARES DE ESTE PREMIERE, contados ANTES del Cmd+Q.
+ *
+ * La espera de auxiliares (ver más abajo) era `corriendo("Adobe Premiere Pro")`, y ese patrón
+ * engancha, además del broker, un proceso que vive ADENTRO del bundle y puede quedar colgado:
+ *
+ *   623  /Applications/Adobe Premiere Pro 2026/…/MacOS/crashpad_handler --database=…/SentryIO-db
+ *
+ * El crashpad de Sentry se desprende al arrancar (ppid 1) y a veces sobrevive a su Premiere: el de
+ * las 04:50 seguía vivo más de una hora después de cerrado el suyo, y el de la sesión siguiente se
+ * fue con el suyo a los ~10s. Con uno colgado, o con el broker, la espera no esperaba a nadie: se
+ * vencía a los 45s —"quedaban procesos de Premiere tras 45s; reabro igual" salió en casi todos los
+ * reinicios del 2026-09-24, sin que quedara anotado qué seguía vivo— y lo que protegía del modal
+ * de SelectionFoundation eran esos 45s fijos, no la detección.
+ *
+ * Ahora se anotan los de ESTA sesión: ejecutable adentro del bundle, arrancados después que el
+ * principal (vida menor o igual), y sin el crashpad, que es el que puede quedar colgado. Medido
+ * dos veces el 2026-09-25: los ocho de la sesión cerraron a los 10s, y la reapertura no sacó
+ * ningún cartel. `null` si no se pudo separar: ahí se espera el tope entero, que es lo que hacía
+ * la versión vieja en la práctica.
+ */
+function auxiliaresDeEstaSesion(salidaPs) {
+  let ps;
+  try { ps = procesos(salidaPs); } catch (e) { return null; }
+  const principal = ps.filter((p) => ES_PREMIERE.test(p.comm));
+  if (principal.length !== 1) return null;
+  return ps.filter((p) => p.pid !== principal[0].pid && DEL_BUNDLE.test(p.comm) &&
+    !/\/crashpad_handler$/.test(p.comm) && p.vida <= principal[0].vida + 2)
+    .map((p) => ({ pid: p.pid, comm: p.comm, nombre: path.basename(p.comm) }));
+}
+/* Cuáles de esos siguen vivos: mismo pid Y mismo ejecutable, por si el pid se reusó. */
+function siguenVivos(aux, salidaPs) {
+  let ps;
+  try { ps = procesos(salidaPs); } catch (e) { return aux; }
+  return aux.filter((a) => ps.some((p) => p.pid === a.pid && p.comm === a.comm));
+}
+
+/*
  * EL FLUJO EN FRIO, MEDIDO EL 2026-09-03 CON TODO CERRADO.
  *
  * La causa de que "Load Bridge" no anduviera NO era el macro ni el tiempo de arranque de UDT:
@@ -121,7 +220,9 @@ function corriendo(patron) {
 const ESPERA_UDT_MS = 9000;
 
 function exigirPremiere() {
-  if (corriendo("Adobe Premiere Pro")) return true;
+  /* `!== false`: si `ps` no contestó no se sabe, y una guarda que frena porque no pudo mirar
+     rechaza uso correcto. */
+  if (premiereAbierto() !== false) return true;
   console.error("  PREMIERE NO ESTA ABIERTO. El panel del bridge corre ADENTRO de Premiere:\n" +
     "  sin host no hay nada que cargar, y el macro clickearia al vacio.\n" +
     "  Abri Premiere CON UN PROYECTO y volve a correr esto.");
@@ -198,9 +299,29 @@ function pantallaBloqueada() {
   } catch (e) { return false; }
 }
 
-function exigirPantallaDesbloqueada(paraQue) {
+/*
+ * EL PROTECTOR DE PANTALLA TAMBIÉN MARCA LA SESIÓN BLOQUEADA (2026-09-25).
+ *
+ * Un `--reiniciar` frenó con "LA PANTALLA ESTA BLOQUEADA" y no lo estaba: corría el protector, que
+ * acá arranca a los 30 min y recién pide contraseña a las 4 h (`sysadminctl -screenLock status`:
+ * "delay is 14400 seconds"). Medido a propósito: con el protector SIN contraseña
+ * `CGSSessionScreenIsLocked` da Yes, igual que con el bloqueo de verdad.
+ *
+ * Así que antes de frenar se SACA el protector y se vuelve a mirar: si la clave se fue, era él; si
+ * queda, hay una contraseña de por medio y ahí sí no llega ningún macro. Se saca con el `stop` de
+ * System Events: `pkill` al ScreenSaverEngine NO sirve, el módulo del protector sigue vivo y la
+ * clave queda en Yes.
+ */
+async function exigirPantallaDesbloqueada(paraQue) {
   if (!pantallaBloqueada()) return true;
+  osa('tell application "System Events" to stop current screen saver', 8000);
+  for (let i = 0; i < 10 && pantallaBloqueada(); i++) await dormir(500);
+  if (!pantallaBloqueada()) {
+    console.log("  había un PROTECTOR DE PANTALLA marcando la sesión como bloqueada: lo saqué y sigo.");
+    return true;
+  }
   console.error(`  LA PANTALLA ESTA BLOQUEADA, asi que ${paraQue} no va a llegar.`);
+  console.error("  Saqué el protector de pantalla y la sesión sigue bloqueada: hay una contraseña de por medio.");
   console.error("  Keyboard Maestro no puede inyectar teclas con el login screen puesto: el macro");
   console.error("  corre, KM no tira error, y la app no se entera. NO disparo nada.");
   console.error("  Desbloquea la pantalla y volve a correr esto.");
@@ -336,8 +457,9 @@ function porQueNoAndubo() {
            "con una sesion remota. Probá desde la máquina.";
   }
   if (pantallaBloqueada()) {
-    return "y LA PANTALLA ESTA BLOQUEADA: con el login screen puesto Keyboard Maestro no puede " +
-           "inyectar teclas en ninguna app. Desbloquea y reintenta.";
+    return "y LA SESION FIGURA BLOQUEADA —pantalla bloqueada, o el protector de pantalla, que la marca " +
+           "igual aunque no tenga contraseña—. Con el login screen puesto Keyboard Maestro no inyecta " +
+           "teclas (medido); con el protector, no está medido. Desbloqueá o sacá el protector y reintentá.";
   }
   const udt = corriendo("UXP Developer");
   const f = alFrente();
@@ -468,19 +590,19 @@ async function reiniciarPremiere() {
     return false;
   }
 
-  if (!exigirPantallaDesbloqueada("el Cmd+Q")) return false;
+  if (!(await exigirPantallaDesbloqueada("el Cmd+Q"))) return false;
 
+  /* ANTES del Cmd+Q, que es cuando todavía se sabe cuáles son de esta sesión. */
+  const auxiliares = auxiliaresDeEstaSesion();
   const marca = Date.now();
-  if (!osa(`tell application "Keyboard Maestro Engine" to do script "${MACRO_CERRAR}"`, 20000) &&
-      corriendo("MacOS/Adobe Premiere Pro")) {
-    /* `do script` devuelve "missing value" cuando anda, asi que no se juzga por el retorno: se
-     * juzga por si el proceso se fue. Lo de siempre en este repo. */
-  }
+  /* `do script` devuelve "missing value" cuando anda, asi que no se juzga por el retorno: se
+   * juzga por si el proceso se fue. Lo de siempre en este repo. */
+  osa(`tell application "Keyboard Maestro Engine" to do script "${MACRO_CERRAR}"`, 20000);
   console.log(`  macro "${MACRO_CERRAR}" disparado, esperando a que Premiere cierre…`);
   let cerro = false;
   let mtimeVisto = haceCuantoCambio(ruta);
   for (let i = 0; i < TOPE_CIERRE_S; i++) {
-    if (!corriendo("MacOS/Adobe Premiere Pro")) { cerro = true; console.log(`  cerró a los ${i}s`); break; }
+    if (premiereAbierto() === false) { cerro = true; console.log(`  cerró a los ${i}s`); break; }
     /* Se informa cada vez que el .prproj cambia: eso es Premiere guardando, y verlo en vivo
        es lo que evita creer que esta colgado cuando esta trabajando. */
     const h = haceCuantoCambio(ruta);
@@ -583,13 +705,25 @@ async function reiniciarPremiere() {
    * A mano nunca se veia porque entre cerrar y reabrir pasan varios segundos.
    */
   const t0 = Date.now();
-  while (Date.now() - t0 < 45000) {
-    if (!corriendo("Adobe Premiere Pro")) break;       /* incluye los auxiliares */
-    await dormir(1000);
+  let quedan = auxiliares || [];
+  if (auxiliares === null) {
+    console.log("  no pude separar los auxiliares de ESTE Premiere: espero los 45s enteros");
+    await dormir(45000);
+  } else {
+    while (Date.now() - t0 < 45000) {
+      quedan = siguenVivos(auxiliares);
+      if (!quedan.length) break;
+      await dormir(1000);
+    }
+    if (!quedan.length) {
+      console.log(`  los ${auxiliares.length} auxiliares de esta sesión cerraron a los ${Math.round((Date.now() - t0) / 1000)}s`);
+    }
   }
-  const quedan = corriendo("Adobe Premiere Pro");
   await dormir(8000);                                   /* margen de asentado */
-  if (quedan) console.log("  OJO: quedaban procesos de Premiere tras 45s; reabro igual");
+  if (quedan.length) {
+    console.log(`  OJO: tras 45s seguían ${quedan.length} auxiliar(es) de este Premiere ` +
+      `(${Array.from(new Set(quedan.map((a) => a.nombre))).join(", ")}); reabro igual`);
+  }
   /* SIN PROYECTO se reabre PREMIERE, no un archivo. `open` con `ruta` nula tiraria, y
    * abrir un proyecto que no habia seria peor: la sesion volveria con algo que nadie pidio. */
   console.log(ruta ? `  reabriendo ${path.basename(ruta)}…` : "  reabriendo Premiere (no había proyecto)…");
@@ -608,11 +742,48 @@ async function reiniciarPremiere() {
     const l = leerLatido();
     if (l && l.cargadoEn > marca) {
       console.log(`  panel NUEVO cargado a los ${i * 2}s (${new Date(l.cargadoEn).toLocaleTimeString()})`);
+      /* Y SE MIRA SI QUEDÓ UN CARTEL (2026-09-25). `open <ruta>` abre con los diálogos de Premiere
+         puestos: un proyecto con medios offline saca Link Media, el panel late y contesta igual,
+         y el reinicio SIGUIENTE se cuelga en el Cmd+Q. Pasó con Prueba 2 y dos medios de un
+         scratchpad que el arranque de la máquina había borrado. Solo con proyecto: sin él lo que
+         está al frente es la pantalla de inicio, y eso no es un cartel. */
+      if (ruta) {
+        const v = await ventanaTrasReabrir();
+        if (v.miro && !v.esProyecto) {
+          console.error(`  HAY UN CARTEL al reabrir: al frente de Premiere esta "${v.titulo}", no el proyecto.`);
+          console.error("  Resolvelo en pantalla —puede estar en OTRO MONITOR—: con eso puesto el próximo Cmd+Q se traba.");
+          const puesta = ponerTraba(`Premiere se reabrió con un CARTEL al frente: "${v.titulo}" — resolvelo en pantalla. ` +
+            `Proyecto reabierto: ${ruta}`);
+          console.error(puesta
+            ? "  TRANSPORTE TRABADO hasta que lo resuelvas y corras:  node herramientas/recargar.js --destrabar"
+            : "  (no se pudo dejar la marca de traba, ojo)");
+          return false;
+        }
+        if (!v.miro) console.log(`  OJO: no pude mirar si quedó un cartel al reabrir: ${v.porque}.`);
+      }
+      /* El ciclo cerro entero: si habia una traba de un intento anterior, ya no corresponde. */
+      if (sacarTraba()) console.log("  (se levanto la traba del transporte que habia quedado)");
       return true;
     }
   }
   console.error("  Premiere reabrió pero el panel no cargó en 180s.");
+  /* Sin panel el cartel es la primera sospecha, y se nombra si se ve. */
+  const v = ruta ? ventanaDePremiere() : null;
+  if (v && v.miro && !v.esProyecto) console.error(`  Y al frente de Premiere esta "${v.titulo}": resolvelo en pantalla.`);
   return false;
+}
+
+/* Lo que queda al frente de Premiere después de reabrir. Se mira hasta cinco veces: el panel puede
+   latir antes de que el proyecto termine de abrir, y en ese rato al frente hay otra cosa que no es
+   un cartel. Basta con ver el proyecto UNA vez. */
+async function ventanaTrasReabrir() {
+  let v = null;
+  for (let k = 0; k < 5; k++) {
+    await dormir(2000);
+    v = ventanaDePremiere();
+    if (v.miro && v.esProyecto) return v;
+  }
+  return v;
 }
 
 (async () => {
@@ -628,7 +799,7 @@ async function reiniciarPremiere() {
     process.exit(0);
   }
   if (REINICIAR) {
-    if (!corriendo("MacOS/Adobe Premiere Pro")) {
+    if (premiereAbierto() === false) {
       console.error("  Premiere no está abierto: no hay nada que reiniciar.");
       process.exit(1);
     }

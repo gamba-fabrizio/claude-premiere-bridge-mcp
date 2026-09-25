@@ -2317,6 +2317,151 @@ async function buscarMedio(project, nombre) {
  * calculado: la duración real difiere de la pedida por el redondeo a frames
  * (pedir 10s puede dar 10,01) y esos milisegundos acumulados dejan huecos.
  */
+/*
+ * LOS in/out DE UN MEDIO SE DEVUELVEN A COMO ESTABAN, NO SE LIMPIAN (2026-09-24).
+ *
+ * `armarSecuencia` y `colocarLote` escriben los in/out en el ProjectItem para colocar cada tramo, y
+ * al final los LIMPIABAN. Para un video limpiar es neutro —queda el medio entero—, para una imagen
+ * fija NO: un PNG entra con los 5 s que Premiere le da a un still, y limpiado queda con el generador
+ * ENTERO. Lo encontró una sesión de uso en el proyecto de prueba: después de un armado con una capa
+ * de PNG, `insertar` de ese mismo PNG entró con `dura 43200` —DOCE HORAS— y pisó la pista. La capa de
+ * ajuste de control, que el armado no tocó, seguía entrando con 5 s.
+ *
+ * Se leen ANTES de tocarlos y se devuelven. Limpiar queda para el que no se pudo leer, y el resumen
+ * lo dice. Los getters van AWAITED y FUERA del lock, como en la cola: adentro devuelven una Promise,
+ * que es truthy, y `createSetInOutPointsAction` contesta "Illegal Parameter type".
+ */
+async function leerInOut(clipItem) {
+  /* SIN ARGUMENTO NO LEE (medido el 2026-09-24, en vivo): los dos medios de un armado dieron null y se
+   * limpiaron, y el still volvió a las doce horas. La aridad dice 1, así que se enumeran los tipos de
+   * medio reales y se usa el primero que devuelva ticks; `via` dice cuál fue. */
+  const M = (ppro.Constants && ppro.Constants.MediaType) || {};
+  const formas = [["VIDEO", M.VIDEO], ["ANY", M.ANY], ["AUDIO", M.AUDIO], ["sin argumento", undefined]];
+  for (const [via, tipo] of formas) {
+    try {
+      const i = tipo === undefined ? await clipItem.getInPoint() : await clipItem.getInPoint(tipo);
+      const o = tipo === undefined ? await clipItem.getOutPoint() : await clipItem.getOutPoint(tipo);
+      if (i && o && i.ticks !== undefined && o.ticks !== undefined) return { entrada: i, salida: o, via: via };
+    } catch (e) { /* la forma siguiente */ }
+  }
+  return null;
+}
+
+/* Devuelve los in/out en UNA transacción y RELEE cada medio: que la transacción diga true no
+ * prueba que el medio quedó como estaba. */
+async function devolverInOut(project, tocados, titulo) {
+  const r = { corrio: false, devueltos: 0, limpiados: 0, mal: [],
+    vias: Array.from(new Set(tocados.filter((t) => t.inOutPrevio).map((t) => t.inOutPrevio.via))) };
+  if (!tocados.length) { r.corrio = true; return r; }
+  project.lockedAccess(() => {
+    r.corrio = project.executeTransaction((a) => {
+      for (const t of tocados) {
+        a.addAction(t.inOutPrevio
+          ? t.clipItem.createSetInOutPointsAction(t.inOutPrevio.entrada, t.inOutPrevio.salida)
+          : t.clipItem.createClearInOutPointsAction());
+      }
+    }, titulo);
+  });
+  for (const t of tocados) {
+    if (!t.inOutPrevio) { r.limpiados++; continue; }
+    const ahora = await leerInOut(t.clipItem);
+    if (ahora && String(ahora.entrada.ticks) === String(t.inOutPrevio.entrada.ticks) &&
+        String(ahora.salida.ticks) === String(t.inOutPrevio.salida.ticks)) r.devueltos++;
+    else r.mal.push(t.nombre);
+  }
+  return r;
+}
+
+function textoInOut(r) {
+  if (!r) return "";
+  if (!r.corrio) {
+    return "OJO: NO se pudieron devolver los in/out de los medios: quedaron como los dejó la colocación" +
+      (r.error ? ` (${r.error})` : "");
+  }
+  return `in/out devueltos a como estaban en ${r.devueltos} medio(s)` +
+    (r.limpiados ? ` · ${r.limpiados} LIMPIADO(S) porque no se pudieron leer antes: si alguno es una imagen fija, quedó con el generador entero` : "") +
+    (r.mal.length ? ` · OJO: ${r.mal.length} NO quedaron como estaban: ${r.mal.join(", ")}` : "");
+}
+
+/*
+ * LEER O PONER LOS in/out DE UN MEDIO DEL PANEL (2026-09-24).
+ *
+ * Nació para curar los stills que quedaban con el generador entero —doce horas—: devolverles lo que
+ * tienen es devolverles las doce horas, y reimportarlos no se puede, porque `importar` saltea lo que
+ * ya está (`importFiles` duplica). Sin `entrada` y `salida` solo LEE; con las dos, las pone en UNA
+ * transacción y RELEE. Cambia el MEDIO, no una instancia: vale para lo que se cree desde él después,
+ * y los clips que ya están en las secuencias no cambian.
+ *
+ * El medio va por el nombre EXACTO y tiene que ser UNO: `buscarMedio` se queda con el primero que
+ * CONTIENE el nombre, y en un verbo que escribe eso es tocar el que no era.
+ */
+async function inOutMedio(params) {
+  const project = await getProyecto();
+  if (!params.medio) throw new Error("Falta `medio`: el nombre EXACTO del medio en el panel, con la extensión.");
+  const escribe = params.entrada !== undefined || params.salida !== undefined;
+  if (escribe && (typeof params.entrada !== "number" || typeof params.salida !== "number")) {
+    throw new Error("Para escribir van `entrada` y `salida` juntas, en segundos de FUENTE; sin ninguna de las dos, solo lee.");
+  }
+  if (escribe && !(params.entrada >= 0 && params.salida > params.entrada)) {
+    throw new Error(`\`salida\` tiene que ser mayor que \`entrada\`, y las dos positivas: llegó ${params.entrada} → ${params.salida}.`);
+  }
+  const iguales = [];
+  const recorrer = async (carpeta, prof) => {
+    if (prof > 8) return;
+    const hijos = await hijosDe(carpeta);
+    if (!hijos) return;
+    for (let i = 0; i < hijos.length; i++) {
+      const n = nombreDeItem(hijos[i]);
+      if (n === null) continue;
+      const sub = await hijosDe(hijos[i]);
+      if (sub === null) { if (igualN(n, params.medio)) iguales.push(hijos[i]); }
+      else await recorrer(hijos[i], prof + 1);
+    }
+  };
+  await recorrer(await project.getRootItem(), 0);
+  if (iguales.length !== 1) {
+    throw new Error(iguales.length
+      ? `Hay ${iguales.length} medios que se llaman exactamente "${params.medio}": este verbo escribe y no elige uno a ciegas.`
+      : `No hay ningún medio que se llame exactamente "${params.medio}": el nombre va entero, con la extensión.`);
+  }
+  let clipItem = null;
+  try { clipItem = ppro.ClipProjectItem.cast(iguales[0]); } catch (e) { clipItem = null; }
+  if (!clipItem) throw new Error(`No se pudo castear "${params.medio}" a ClipProjectItem.`);
+  const seg = (t) => Number(t.ticks) / TICKS_POR_SEGUNDO;
+  /* SIN MARCA es el centinela −400000, como en `estado`, y se DICE en vez de restarlo: "(0 s)" se lee
+     como un medio roto. Y no separa nada: así se leen un video y una secuencia de imágenes sanos, y
+     también un still envenenado, que solo se delata insertándolo (medido el 2026-09-25). */
+  const ver = (io) => {
+    if (!io) return null;
+    const e = seg(io.entrada), s = seg(io.salida);
+    const sinMarca = Math.abs(e) > 1e5 || Math.abs(s) > 1e5;
+    return { entrada: +e.toFixed(3), salida: +s.toFixed(3), dura: sinMarca ? null : +(s - e).toFixed(3), sinMarca: sinMarca };
+  };
+  const decir = (x) => !x ? "sin leer" : x.sinMarca ? "SIN MARCA (centinela)" : `${x.entrada}–${x.salida} s (${x.dura} s)`;
+  const antes = ver(await leerInOut(clipItem));
+  if (!escribe) {
+    return { resumen: `"${params.medio}": in/out ${decir(antes)}` + (!antes ? ": NO se pudieron leer"
+               : antes.sinMarca ? " · así se leen un video o una secuencia de imágenes sanos, y también un still " +
+                 "envenenado: lo separa insertarlo, que en el still da 43200 s" : ""),
+             medio: params.medio, antes: antes, despues: antes, entro: null };
+  }
+  let corrio = false;
+  project.lockedAccess(() => {
+    corrio = project.executeTransaction((a) => {
+      a.addAction(clipItem.createSetInOutPointsAction(aTick(params.entrada), aTick(params.salida)));
+    }, "in/out del medio");
+  });
+  const despues = ver(await leerInOut(clipItem));
+  const entro = !!despues && Math.abs(despues.entrada - params.entrada) < 0.001 && Math.abs(despues.salida - params.salida) < 0.001;
+  return {
+    resumen: `"${params.medio}": ${decir(antes)} → ${decir(despues)}` +
+      (entro ? " · se deshace con Cmd+Z"
+        : corrio ? " · OJO: la transacción corrió y el medio NO quedó como se pidió"
+        : " · LA TRANSACCIÓN NO CORRIÓ"),
+    medio: params.medio, antes: antes, despues: despues, entro: entro
+  };
+}
+
 async function armarSecuencia(params) {
   const project = await getProyecto();
 
@@ -2350,7 +2495,8 @@ async function armarSecuencia(params) {
       let clipItem = null;
       try { clipItem = ppro.ClipProjectItem.cast(medio); } catch (e) { clipItem = null; }
       if (!clipItem) throw new Error(`No se pudo castear "${String(medio.name)}" a ClipProjectItem.`);
-      cache[nombre] = { medio: medio, clipItem: clipItem, nombre: String(medio.name) };
+      cache[nombre] = { medio: medio, clipItem: clipItem, nombre: String(medio.name),
+                        inOutPrevio: await leerInOut(clipItem) };   // ANTES de tocarlo
     }
     return cache[nombre];
   };
@@ -2430,14 +2576,7 @@ async function armarSecuencia(params) {
     limpiar: async () => {
       const tocados = Object.values(cache);
       if (!tocados.length) return "";
-      let ok = false;
-      project.lockedAccess(() => {
-        ok = project.executeTransaction((a) => {
-          for (const t of tocados) a.addAction(t.clipItem.createClearInOutPointsAction());
-        }, "devolver los in/out de los medios");
-      });
-      return ok ? `in/out devueltos en ${tocados.length} medio(s)`
-        : "OJO: NO se pudieron devolver los in/out de los medios, quedaron recortados en el panel";
+      return textoInOut(await devolverInOut(project, tocados, "devolver los in/out de los medios"));
     }
   };
 
@@ -2735,26 +2874,18 @@ async function armarSecuencia(params) {
   }
 
   /*
-   * LIMPIAR LOS in/out DE LOS MEDIOS. No lo hacía, y es el mismo daño que ya
+   * DEVOLVER LOS in/out DE LOS MEDIOS. No lo hacía, y es el mismo daño que ya
    * pagó `cortar`: `createSetInOutPointsAction` escribe en el ProjectItem, que es
    * de TODO el proyecto y no de este corte, así que cada medio quedaba recortado
-   * en el panel para siempre. Cualquier cosa que después creara una secuencia
-   * desde él arrancaba en el in-point viejo.
+   * en el panel para siempre. Y se DEVUELVEN, no se limpian: ver `leerInOut`.
    *
    * Va en UNA transacción para no encadenar una por medio.
    */
-  let inOutLimpiados = null;
+  let inOut = null;
   const tocados = Object.values(cache);
   if (tocados.length) {
-    try {
-      let ok = false;
-      project.lockedAccess(() => {
-        ok = project.executeTransaction((a) => {
-          for (const t of tocados) a.addAction(t.clipItem.createClearInOutPointsAction());
-        }, "devolver los in/out de los medios");
-      });
-      inOutLimpiados = ok ? tocados.length : 0;
-    } catch (e) { inOutLimpiados = 0; }
+    try { inOut = await devolverInOut(project, tocados, "devolver los in/out de los medios"); }
+    catch (e) { inOut = { corrio: false, devueltos: 0, limpiados: 0, mal: [], error: e && e.message ? e.message : String(e) }; }
   }
 
   const porMedio = {};
@@ -2813,9 +2944,7 @@ async function armarSecuencia(params) {
         ? ` · OJO: la API devolvió huecos al releer ${sinReleer.length} fragmento(s) y su fin se CALCULÓ, ` +
           `puede haber un cuadro de hueco o de solape: ${sinReleer.join(", ")} — pasá revisar`
         : "") +
-      (inOutLimpiados === null ? "" :
-        inOutLimpiados ? ` · in/out devueltos en ${inOutLimpiados} medio(s)` :
-        " · OJO: NO se pudieron devolver los in/out de los medios, quedaron recortados en el panel") +
+      (inOut === null ? "" : " · " + textoInOut(inOut)) +
       (reajuste && reajuste.reloj && !reajuste.reloj.entro
         ? ` · OJO: el RELOJ quedó en ${reajuste.reloj.despues} y la secuencia es de ${ajustes ? ajustes.fps : "?"}fps: ` +
           `la regla va a contar mal. A mano: Sequence → Sequence Settings → Display Format → ${nombreReloj(reajuste.reloj.pedido)}`
@@ -2825,7 +2954,7 @@ async function armarSecuencia(params) {
     nombrePedido: nombre,
     ajustes: ajustes,
     reajuste: reajuste,
-    inOutLimpiados: inOutLimpiados,
+    inOut: inOut,
     puestos: puestos,
     capasPuestas: capasPuestas,
     audioApagado: audioApagado,
@@ -4175,6 +4304,26 @@ async function borrar(params) {
     );
   }
 
+  /*
+   * LA SELECCIÓN SE VACÍA DESPUÉS DE BORRAR (2026-09-24). La selección se arma sobre el objeto VIVO
+   * de la secuencia —no hay otra: `TrackItemSelection` no tiene createEmpty y `new` pierde la
+   * conexión—, y `createRemoveItemsAction` saca el clip del timeline pero lo deja ADENTRO de la
+   * selección. La edición siguiente dispara el aviso de cambio de selección, y Effect Controls lee
+   * el clip que ya no existe: puntero nulo, y Premiere se cae sin poder guardar. Reproducido en el
+   * proyecto de prueba al primer ensayo —borrar una capa e insertar en el mismo lugar—, con la pila
+   * del reporte. En la interfaz, Delete deja la selección vacía; acá se hace a mano, con los mismos
+   * items que se agregaron, y se espera a que el aviso se procese con todo en orden.
+   */
+  let seleccionVaciada = false;
+  try {
+    for (const it of [encontrado.clip, ...vinculados]) {
+      try { seleccion.removeItem(it); } catch (e) { /* ya no estaba */ }
+    }
+    await sequence.setSelection(seleccion);
+    seleccionVaciada = (await seleccion.getTrackItems()).length === 0;
+  } catch (e) { seleccionVaciada = false; }
+  await esperarEntreTx();
+
   // El conteo de TODA la secuencia, no solo de la pista: si el clip tenía audio
   // vinculado y quedó suelto, acá se ve. Contar una parte del efecto confirma lo
   // que uno esperaba, no lo que pasó.
@@ -4194,6 +4343,7 @@ async function borrar(params) {
       (ripple ? " (con ripple: se corrió lo de la derecha)" : " (dejando el hueco)") +
       (vinculados.length ? ` · con ${vinculados.length} vinculado(s)` : "") +
       (audioSuelto ? " · OJO: no bajó ningún clip de audio, puede haber quedado suelto" : "") +
+      (seleccionVaciada ? "" : " · OJO: la selección NO quedó vacía: antes de otra edición, deseleccioná en Premiere") +
       ` · vía ${via} · se deshace con Cmd+Z`,
     clip: encontrado.nombre,
     pista: encontrado.pista,
@@ -4203,6 +4353,7 @@ async function borrar(params) {
     secuenciaDespues: totalDespues,
     ripple: ripple,
     vinculadosSacados: vinculados.length,
+    seleccionVaciada: seleccionVaciada,
     via: via
   };
 }
@@ -6208,14 +6359,9 @@ async function cortar(params) {
    * buena y `createSetInOutPointsAction` contestaba "Illegal Parameter type".
    * Un valor equivocado que pasa la guarda es peor que no leer nada.
    */
-  let inOutPrevios = null;
-  try {
-    const i = await clipItem.getInPoint();
-    const o = await clipItem.getOutPoint();
-    if (i && o && i.ticks !== undefined && o.ticks !== undefined) {
-      inOutPrevios = { entrada: i, salida: o };
-    }
-  } catch (e) { inOutPrevios = null; }
+  /* Con `leerInOut`: sin argumento `getInPoint` NO lee (medido el 2026-09-24), así que esto caía
+     siempre a limpiar, y un still cortado quedaba con el generador entero, doce horas. */
+  const inOutPrevios = await leerInOut(clipItem);
 
   let inOutRestaurado = null;
   try {
@@ -6253,13 +6399,8 @@ async function cortar(params) {
         }, "devolver los in/out del medio");
       });
       let quedo = null;
-      try {
-        const i = await clipItem.getInPoint();
-        const o = await clipItem.getOutPoint();
-        if (i && o && i.ticks !== undefined && o.ticks !== undefined) {
-          quedo = Number((Number(o.ticks) - Number(i.ticks)) / TICKS_POR_SEGUNDO).toFixed(2) + "s";
-        }
-      } catch (e) { quedo = null; }
+      const releido = await leerInOut(clipItem);
+      if (releido) quedo = Number((Number(releido.salida.ticks) - Number(releido.entrada.ticks)) / TICKS_POR_SEGUNDO).toFixed(2) + "s";
       inOutRestaurado =
         (corrio ? (inOutPrevios ? "restaurados" : "limpiados") : "LA TRANSACCION NO CORRIO") +
         (quedo !== null ? ` (el medio quedó abarcando ${quedo})` : " (no se pudo releer para confirmar)");
@@ -11446,7 +11587,8 @@ async function colocarLote(params) {
     let clipItem = null;
     try { clipItem = ppro.ClipProjectItem.cast(medio); } catch (e) { clipItem = null; }
     if (!clipItem) throw new Error(`No se pudo castear "${String(medio.name)}" a ClipProjectItem.`);
-    cache[nombre] = { medio: medio, clipItem: clipItem, nombre: String(medio.name) };
+    cache[nombre] = { medio: medio, clipItem: clipItem, nombre: String(medio.name),
+                      inOutPrevio: await leerInOut(clipItem) };   // ANTES de tocarlo: ver `leerInOut`
   }
 
   const editor = ppro.SequenceEditor.getEditor(sequence);
@@ -11485,21 +11627,16 @@ async function colocarLote(params) {
     if (!okIO || !okPegar) fallosTx++;
   }
 
-  /* LOS IN/OUT SE LIMPIAN: son del PROYECTO, no de este corte. Dejarlos deja cada
+  /* LOS IN/OUT SE DEVUELVEN: son del PROYECTO, no de este corte. Dejarlos deja cada
    * medio recortado en el panel para siempre, y cualquier cosa que despues cree una
-   * secuencia desde el arranca en el in-point viejo. Ya se pago en `cortar`. */
-  let inOutLimpiados = "no se intento";
+   * secuencia desde el arranca en el in-point viejo. Ya se pago en `cortar`. Y se
+   * DEVUELVEN a como estaban, no se limpian: ver `leerInOut`. */
+  let inOut = null;
   if (lotes.length) await esperarEntreTx();   /* tambien se separa del ultimo lote */
   try {
-    let ok = false;
-    project.lockedAccess(() => {
-      ok = project.executeTransaction((a) => {
-        for (const k of Object.keys(cache)) a.addAction(cache[k].clipItem.createClearInOutPointsAction());
-      }, "limpiar in/out de los medios");
-    });
+    inOut = await devolverInOut(project, Object.values(cache), "devolver los in/out de los medios");
     transacciones++;
-    inOutLimpiados = ok ? `limpiados (${Object.keys(cache).length} medios)` : "LA TRANSACCION NO CORRIO";
-  } catch (e) { inOutLimpiados = "NO SE PUDO: " + (e && e.message ? e.message : e); }
+  } catch (e) { inOut = { corrio: false, devueltos: 0, limpiados: 0, mal: [], error: e && e.message ? e.message : String(e) }; }
 
   /* EL VEREDICTO: releer la pista. Que la transaccion no haya tirado no dice que los
    * N hayan entrado, y con el in/out compartido el modo de fallo esperable es que
@@ -11533,9 +11670,9 @@ async function colocarLote(params) {
       (porTx > 1 ? ` de hasta ${porTx}, sin repetir medio` : "") +
       (fallosTx ? ` · ${fallosTx} transacción(es) NO corrieron` : "") +
       (mal.length ? ` · MAL ${mal.length}: ${mal.slice(0, 3).join(" | ")}` : "") +
-      ` · in/out de los medios: ${inOutLimpiados}`,
+      ` · ${textoInOut(inOut)}`,
     pista: pista, colocados: bien.length, total: frags.length,
-    transacciones: transacciones, mal: mal, inOutLimpiados: inOutLimpiados
+    transacciones: transacciones, mal: mal, inOut: inOut
   };
 }
 
@@ -12193,7 +12330,7 @@ async function cerrarProyecto(params) {
 
 
 
-const VERBOS = { limpiarRangos, transicion, relink, clonar, proyectosAbiertos, cerrarProyecto, sondaTranscribir, colocarLote, abrirProyecto, crearProyecto, copiarEfecto, quitarEfecto, borrarKeyframe, moverKeyframe, curvaKeyframe, leerParam, sondaParam, radiografia, desactivar, estado, guardar, bins, exportar, cortesDeEscena, etiquetar, interpretar, proxy, subclip, renombrarPista, renombrar, revisar, importar, importarTranscripcion, motion, keyframe, frame, playhead, clips, seleccionar, efectos, param, editar, catalogo, agregarEfecto, medios, insertar, secuencias, borrar, transcripcion, armarSecuencia, borrarSecuencia, vistazo, mirarMedio, analizar, marcadores, marcar, desmarcar, editarMarcador, cortar, sacarRangos, cerrarHuecos, resolucion, ajustarAlCuadro, escalaFija, fijar, unirAudio, aplicarEscalas, aplicarZooms, leerEscalas, aplicarAnim, unirVideo, duplicarSecuencia, api };
+const VERBOS = { limpiarRangos, transicion, relink, clonar, proyectosAbiertos, cerrarProyecto, sondaTranscribir, colocarLote, abrirProyecto, crearProyecto, copiarEfecto, quitarEfecto, borrarKeyframe, moverKeyframe, curvaKeyframe, leerParam, sondaParam, radiografia, desactivar, estado, guardar, bins, exportar, cortesDeEscena, etiquetar, interpretar, inOutMedio, proxy, subclip, renombrarPista, renombrar, revisar, importar, importarTranscripcion, motion, keyframe, frame, playhead, clips, seleccionar, efectos, param, editar, catalogo, agregarEfecto, medios, insertar, secuencias, borrar, transcripcion, armarSecuencia, borrarSecuencia, vistazo, mirarMedio, analizar, marcadores, marcar, desmarcar, editarMarcador, cortar, sacarRangos, cerrarHuecos, resolucion, ajustarAlCuadro, escalaFija, fijar, unirAudio, aplicarEscalas, aplicarZooms, leerEscalas, aplicarAnim, unirVideo, duplicarSecuencia, api };
 
 
 /*
@@ -12242,6 +12379,7 @@ const PARAMS_DE = {
   cortesDeEscena: ["indice", "modo", "nombre", "pista"],
   etiquetar: ["color", "medio", "medios"],
   interpretar: ["fps", "medio"],
+  inOutMedio: ["entrada", "medio", "salida"],
   proxy: ["archivo", "medio"],
   subclip: ["desde", "duros", "hasta", "medio", "nombre"],
   renombrarPista: ["nuevo", "pista"],

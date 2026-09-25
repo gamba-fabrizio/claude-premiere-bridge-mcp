@@ -98,16 +98,58 @@ pide el liviano, y con `--alfa` el 4444 con canal alfa real (`yuva444p10le`) par
 8,5 s a 25 fps son **212,5 cuadros**, así que el intro sale en 213 → **8,52 s**. Medio cuadro de
 más. Es el mismo piso que el resto de este repo: a 25 fps no hay nada entre cuadro y cuadro.
 
+## El color: BT.709 y etiquetado, o Premiere corre los saturados (2026-09-25)
+
+**Hasta el 2026-09-25 el ProRes salía con la matriz BT.601 y sin etiquetar.** Es lo que hace ffmpeg
+al pasar PNG RGB a YUV sin que se le diga nada, y el archivo quedaba con primaries, transfer y
+matriz en `unknown`. Premiere lee un HD sin etiqueta como Rec.709, así que los colores saturados se
+corrían; el blanco y los grises no, porque no tienen croma y dan igual con cualquier matriz.
+
+Medido con un artboard de prueba de parches por la herramienta vieja y la nueva, metidos en el
+proyecto de prueba y leídos en un cuadro **exportado por Premiere**:
+
+```
+                     #1d4fa8    #ff0032    #00ff00    #0000ff    blanco, gris
+viejo (601, sin etq) #184fad    #ff1c30    #00d700    #000fff    iguales
+nuevo (709, etq)     exacto     exacto     exacto     exacto     iguales
+```
+
+Leído como 601 el viejo volvía exacto: la captura estaba bien y el error era la matriz. **Lo que se
+exportó antes con esta herramienta tiene ese corrimiento**, y en lo que ya pasó por Premiere quedó
+horneado en el export final: el reporte lo encontró en un H.264 ya entregado, con el rojo de la
+paleta en `#ff1a30`.
+
+El arreglo es decir la conversión y escribir las etiquetas:
+
+```
+-vf scale=out_color_matrix=bt709:out_range=tv:flags=accurate_rnd+full_chroma_int,format=<pix>,
+    setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv
+-color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv
+```
+
+**`setparams` hace falta.** Con solo las banderas `-color_*` la matriz queda etiquetada, pero
+primaries y transfer siguen en `unknown`: medido, y es lo que agarró una de las mutaciones del test.
+
+**Y no se da por bueno: se prueba antes de exportar.** `probarColor` pasa un parche de seis colores
+por los MISMOS argumentos del export (`ARGS_COLOR`, un solo lugar), lo relee como lo lee Premiere
+—709, rango tv— y exige error ≤ 2 y las etiquetas en bt709; si no, no exporta. Blanco y gris solos
+no probarían nada. Después, el archivo exportado se mide con ffprobe y tiene que decir
+`bt709/bt709/bt709/tv`. `test.js` ejecuta el parche con los argumentos del archivo, que tiene que
+dar exacto, y con los viejos, que tiene que dar mal (error 40): un autochequeo que no puede fallar no
+prueba nada.
+
 ## Lo que la herramienta comprueba, y lo que NO alcanza
 
-Cinco guardas, y cada una existe por un fallo real:
+Siete guardas, y cada una existe por un fallo real:
 
 ```
 seek cambia y es determinista     o no exporta
+el color vuelve exacto como 709   o no exporta (el parche, antes de los cuadros)
 el PNG mide lo intrínseco         o aborta
 nada de afuera se solapa          o lista los intrusos
 los textos pedidos están          o los nombra
 la salida se mide con ffprobe     duración, códec, perfil, nb_frames
+las etiquetas del archivo         bt709/bt709/bt709/tv, o avisa y sale con 1
 ```
 
 **Y lo importante: ninguna de esas cinco agarró los dos peores defectos.** El primer export salió
@@ -174,9 +216,18 @@ negro puro, así que la luma ES el alfa, con el antialiasing intacto.
 
 ```bash
 ffmpeg -i matte.mov -filter_complex \
-  "color=c=white:s=1920x1080:r=25:d=49[c];[0:v]format=gray[m];[c][m]alphamerge,format=yuva444p10le[o]" \
-  -map "[o]" -c:v prores_ks -profile:v 4444 -pix_fmt yuva444p10le -alpha_bits 16 -vendor apl0 salida.mov
+  "color=c=white:s=1920x1080:r=25:d=49,format=rgba[c];[0:v]format=gray[m];[c][m]alphamerge,\
+scale=out_color_matrix=bt709:out_range=tv:flags=accurate_rnd+full_chroma_int,format=yuva444p10le,\
+setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv[o]" \
+  -map "[o]" -c:v prores_ks -profile:v 4444 -alpha_bits 16 -vendor apl0 \
+  -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv salida.mov
 ```
+
+**Esta receta tenía el mismo defecto de color** (ver *El color*, arriba) hasta el 2026-09-25: el
+`format=yuva444p10le` pelado convierte con la matriz 601 y no etiqueta. Con blanco no se nota —no
+tiene croma—, pero con el rojo de abajo sí: medido, la receta vieja con `#ff0032`, leída como 709, da
+`#ff1c30`; la de arriba, `#ff0032` exacto y el alfa intacto. El `format=rgba` después del `color`
+hace que el rojo se genere en RGB y lo convierta el `scale`, que es el que sabe de matrices.
 
 Verificado: el alfa pasa de 0 a los 0,9s, sube a la meseta a 1,6s, y vuelve a 0 entre 47,0 y 48,0s
 — o sea que **la animación de entrada y salida sobrevive**, que es lo que había que comprobar.
@@ -184,6 +235,9 @@ Verificado: el alfa pasa de 0 a los 0,9s, sube a la meseta a 1,6s, y vuelve a 0 
 **Y el segundo color sale del MISMO matte.** La animación es idéntica entre variantes —mismo
 componente, mismos parámetros, sólo cambia el `src` del PNG— así que el logo rojo se armó cambiando
 el color de base a `#ff0032`, el de la paleta. Medido en el archivo: `srgb(99,7%; 0,06%; 19,5%)`.
+**Esa medición no probaba el color**: se leyó con la misma matriz con que se había escrito, que es la
+verificación simétrica que este repo tiene prohibida. Leído como lo lee Premiere, 709, ese rojo da
+`#ff1c30`: el mismo corrimiento que el cuadro de Premiere mostró para el export viejo de la herramienta.
 
 **La lección, que es la de siempre en este repo:** cinco guardas numéricas dieron verde sobre un
 archivo inservible. Lo agarró medir el CANAL ALFA, que es la propiedad que el pedido pedía y

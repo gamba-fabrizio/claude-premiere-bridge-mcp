@@ -630,7 +630,7 @@ server.registerTool(
       /* 10 minutos: apagar el audio de muchas capas va en lotes espaciados —57 capas de 6 streams
          son ~23 s más—, y con 180 s el servidor podía dejar de esperar a un panel que seguía. */
       const r = await enviar("armarSecuencia", args, 600000);
-      return texto(r.resumen, { puestos: r.puestos, capasPuestas: r.capasPuestas, fallidos: r.fallidos, capasFallidas: r.capasFallidas, audioApagado: r.audioApagado, sinReleer: r.sinReleer, duracion: r.duracionTotal, reajuste: r.reajuste, inOutLimpiados: r.inOutLimpiados });
+      return texto(r.resumen, { puestos: r.puestos, capasPuestas: r.capasPuestas, fallidos: r.fallidos, capasFallidas: r.capasFallidas, audioApagado: r.audioApagado, sinReleer: r.sinReleer, duracion: r.duracionTotal, reajuste: r.reajuste, inOut: r.inOut });
     } catch (e) {
       return fallo(e);
     }
@@ -1252,6 +1252,48 @@ server.registerTool(
   async (args) => {
     try {
       const r = await enviar("etiquetar", args, 600000);
+      return texto(r.resumen, r);
+    } catch (e) {
+      return fallo(e);
+    }
+  }
+);
+
+server.registerTool(
+  "premiere_in_out_medio",
+  {
+    title: "In/out de un medio del panel: leerlos o ponerlos",
+    description:
+      "Lee o pone los in/out de un MEDIO del panel de proyecto —no de un clip de la secuencia—, en " +
+      "segundos de FUENTE.\n\n" +
+      "**Sin `entrada` y `salida` solo LEE.** Con las dos, las pone en una transaccion y RELEE: `entro` " +
+      "dice si quedaron como se pidio.\n\n" +
+      "Sirve para CURAR un still que quedo con el generador entero —doce horas: lo hacian " +
+      "armar_secuencia, colocarLote y cortar hasta el 2026-09-24—: se pone `entrada: 0, salida: 5`, " +
+      "que es como se lee uno sano. Reimportarlo no sirve: `importar` saltea lo que ya esta.\n\n" +
+      "**Leerlo NO alcanza para reconocerlo**: un still envenenado se lee SIN MARCA (el centinela " +
+      "-400000), igual que un video o una secuencia de imagenes sanos. Lo delata insertarlo en una " +
+      "secuencia descartable: entra con 43200 s.\n\n" +
+      "**Cambia el MEDIO**: vale para lo que se cree desde el despues, y los clips que ya estan en las " +
+      "secuencias no cambian. El nombre va EXACTO, con la extension, y tiene que haber uno solo.",
+    inputSchema: soloEstas({
+      secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
+      proyecto: z
+        .string()
+        .optional()
+        .describe(
+          "GUARDA: nombre (o parte) del proyecto sobre el que se quiere operar. Si el que tiene "
+          + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
+          + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
+        ),
+      medio: z.string().describe("Nombre EXACTO del medio en el panel, con la extension. Tiene que haber uno solo."),
+      entrada: z.number().optional().describe("In-point en segundos de FUENTE. Va junto con `salida`; sin las dos, solo lee."),
+      salida: z.number().optional().describe("Out-point en segundos de FUENTE. Va junto con `entrada`.")
+    })
+  },
+  async (args) => {
+    try {
+      const r = await enviar("inOutMedio", args, 120000);
       return texto(r.resumen, r);
     } catch (e) {
       return fallo(e);

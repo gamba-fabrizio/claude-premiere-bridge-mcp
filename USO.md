@@ -55,12 +55,18 @@ en `CLAUDE.md`.
 - **Un medio sin video no pone nada en V**: su clip se busca en la pista de audio.
 - **`borrar` rebota desde el 6º borrado en 60 s.** Vaciar una pista es seleccionarla y Delete en
   Premiere, o `borrarSecuencia` + `armarSecuencia`. Nunca barrerla, y menos con solapes: tiró
-  Premiere.
+  Premiere. Y deja la selección VACÍA (`seleccionVaciada`): hasta el 2026-09-24 dejaba adentro el
+  clip borrado, y la edición siguiente en ese lugar tiraba Premiere.
 - **`armarSecuencia` crea aunque el nombre exista**, no reemplaza. `fragmentos` son
   `{desde, hasta, medio}` en segundos de FUENTE; `capas`, `{en, dura, pista, medio, desde,
   pistaAudio}`. Pone los fps y el formato del reloj que les toca, y lo relee: si no entra, lo
   dice. Y Premiere corta el nombre después del último punto: `secuencia` trae el que quedó. Si se
-  corta a mitad, el error dice qué secuencia dejó y con cuántos fragmentos y capas.
+  corta a mitad, el error dice qué secuencia dejó y con cuántos fragmentos y capas. Los in/out de
+  los medios los devuelve a como estaban (`inOut` dice cuántos): hasta el 2026-09-24 los limpiaba, y
+  un PNG limpiado entra con DOCE HORAS. `cortar` también. Un still que ya quedó así NO se arregla
+  reimportándolo —`importar` saltea lo que ya está—: se cura con `in_out_medio` `entrada: 0,
+  salida: 5`. Y no se lo reconoce leyéndolo: se lee "sin marca", igual que un video sano; lo delata
+  insertarlo en una secuencia descartable.
 - **`borrar_secuencia` elige por el nombre EXACTO**; si coinciden varias rebota, y dos con el mismo
   nombre se eligen con `duracion`. Dos gemelas —mismo nombre y mismo largo— se borran a mano.
 - **`marcar` cuantiza al cuadro.** Con `clip`, el marcador va al MEDIO: `segundos` es tiempo de
@@ -80,7 +86,9 @@ en `CLAUDE.md`.
 - **Las capas de ajuste no se crean por API y no se escalan**: se inserta una que ya exista, y
   escalada la corrección queda en un rectángulo.
 - **`relink` no tiene Cmd+Z**, y `clonar` puede crear pistas de video que nada borra.
-- **Los proxies no tienen `detachProxy`**: no adjuntes uno que viva en una carpeta temporal.
+- **Los proxies no tienen `detachProxy`**: no adjuntes uno que viva en una carpeta temporal. Ni
+  importes nada del scratchpad (`/private/tmp`): el arranque de la máquina lo vacía, y el proyecto
+  saca Link Media en cada apertura, que traba el Cmd+Q del reinicio siguiente.
 - **Las rutas que devuelve la API vienen en NFD**: pasalas tal cual, nunca retipeadas.
 - **`cerrar_proyecto` guarda antes de cerrar y no descarta nunca.** No cierra el último abierto ni
   uno cuyo `.prproj` ya no está en disco —guardarlo abriría un cartel que el panel no ve—: esos los
@@ -108,7 +116,8 @@ en `CLAUDE.md`.
   ventana sale de `CGWindowListCopyWindowInfo` y se captura con `screencapture -x -o -l <n>`. Los
   otros monitores pueden tener cosas privadas.
 - **Con la pantalla bloqueada no entra ningún macro de Keyboard Maestro**, y con el Privacy Mode de
-  Jump fallan los que buscan por imagen. Los dos fallan callados.
+  Jump fallan los que buscan por imagen. Los dos fallan callados. El protector de pantalla marca la
+  sesión como bloqueada aunque no tenga contraseña: `--reiniciar` lo saca y vuelve a mirar.
 
 ## Las herramientas
 

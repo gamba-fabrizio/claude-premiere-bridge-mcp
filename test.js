@@ -1064,27 +1064,82 @@ for (const fn of ["asegurarBin", "moverABin"]) {
 }
 
 /*
- * `armarSecuencia` tiene que DEVOLVER los in/out de los medios que tocó.
+ * `armarSecuencia` y `colocarLote` tienen que DEVOLVER los in/out de los medios que tocaron, A COMO
+ * ESTABAN.
  *
  * `createSetInOutPointsAction` escribe en el ProjectItem, que es de todo el
- * proyecto y no de ese corte, así que sin limpiarlos cada medio queda recortado
+ * proyecto y no de ese corte, así que sin devolverlos cada medio queda recortado
  * en el panel para siempre y cualquier secuencia que se cree después desde él
  * arranca en el in-point viejo. Es el daño que ya pagó `cortar`; `armarSecuencia`
  * lo tenía igual y nadie lo había mirado.
  *
- * Y va en UNA transacción: una por medio es la ráfaga que tira Premiere.
+ * Y LIMPIARLOS NO ES DEVOLVERLOS (2026-09-24): una imagen fija limpiada queda con el generador entero
+ * —doce horas, medido en el proyecto de prueba— y el próximo overwrite de ese medio pisa la pista.
+ * Se leen ANTES de tocarlos, en la caché, y `devolverInOut` los repone en UNA transacción —una por
+ * medio es la ráfaga que tira Premiere— y los RELEE. Y se leen CON el tipo de medio: sin argumento
+ * `getInPoint` no lee, y la primera versión del arreglo limpió igual los dos medios de la prueba en
+ * vivo. Se mira por posición y sin comentarios.
  */
-if (cuerpoArmar) {
-  if (!/createClearInOutPointsAction/.test(cuerpoArmar[0])) {
-    mal("`armarSecuencia` no devuelve los in/out de los medios",
-        "quedan recortados en el panel del proyecto para siempre");
-  } else if (!/executeTransaction\(\(a\) => \{\s*\n\s*for \(const t of tocados\)/.test(cuerpoArmar[0])) {
-    mal("`armarSecuencia` limpia los in/out con una transacción por medio",
-        "es la ráfaga que tira Premiere con SIGSEGV");
-  } else if (!/inOutLimpiados/.test(cuerpoArmar[0])) {
-    mal("`armarSecuencia` no informa si pudo devolver los in/out");
+{
+  const sinCom = (x) => (x ? x.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "") : "");
+  const leer = sinCom(cuerpoDeFuncion(srcComandos, "async function leerInOut("));
+  const dev = sinCom(cuerpoDeFuncion(srcComandos, "async function devolverInOut("));
+  const leeAntes = /cache\[nombre\] = \{[^}]*inOutPrevio: await leerInOut\(clipItem\)/;
+  const tx = dev.indexOf("executeTransaction(");
+  const verbos = [["armarSecuencia", "async function armarSecuencia("], ["colocarLote", "async function colocarLote("]]
+    .map(([n, firma]) => [n, sinCom(cuerpoDeFuncion(srcComandos, firma))]);
+  const sinLeer = verbos.filter(([, c]) => !leeAntes.test(c)).map(([n]) => n);
+  const sinDevolver = verbos.filter(([, c]) => !/\bdevolverInOut\(project,/.test(c) || /createClearInOutPointsAction/.test(c)).map(([n]) => n);
+  if (!leer || !/await clipItem\.getInPoint\(tipo\)/.test(leer) || !/await clipItem\.getOutPoint\(tipo\)/.test(leer) || /lockedAccess/.test(leer)) {
+    mal("`leerInOut` no lee los in/out AWAITED, con el tipo de medio y fuera del lock",
+        "sin argumento NO leen (medido en vivo: los dos medios dieron null y el still volvió a las doce horas), y adentro del lock devuelven una Promise");
+  } else if (!/MediaType/.test(leer) || !/\bVIDEO\b/.test(leer)) {
+    mal("`leerInOut` no prueba los tipos de medio de `Constants.MediaType`", "la forma que lee un still es con MediaType.VIDEO");
+  } else if (!dev || tx === -1 || dev.indexOf("executeTransaction(", tx + 1) !== -1 ||
+             !/executeTransaction\(\(a\) => \{\s*for \(const t of tocados\)/.test(dev)) {
+    mal("`devolverInOut` no los devuelve en UNA transacción", "una por medio es la ráfaga que tira Premiere con SIGSEGV");
+  } else if (!/createSetInOutPointsAction\(t\.inOutPrevio\.entrada, t\.inOutPrevio\.salida\)/.test(dev) ||
+             !/:\s*t\.clipItem\.createClearInOutPointsAction\(\)/.test(dev)) {
+    mal("`devolverInOut` no repone lo que había", "limpiar un still lo deja con el generador entero: doce horas");
+  } else if (dev.indexOf("leerInOut(t.clipItem)") < tx) {
+    mal("`devolverInOut` no RELEE los medios después de la transacción", "que la transacción diga true no prueba que el medio quedó como estaba");
+  } else if (sinLeer.length) {
+    mal("no se leen los in/out ANTES de tocar el medio en: " + sinLeer.join(", "), "sin eso no hay qué devolver, y queda limpiar");
+  } else if (sinDevolver.length) {
+    mal("no se devuelven con `devolverInOut` (o se limpian a mano) en: " + sinDevolver.join(", "), "un still limpiado queda con el generador entero");
+  } else if (!/textoInOut\(inOut\)/.test(verbos[0][1]) || !/textoInOut\(inOut\)/.test(verbos[1][1])) {
+    mal("`armarSecuencia` o `colocarLote` no informan cómo quedaron los in/out");
   } else {
-    ok("`armarSecuencia` devuelve los in/out de los medios en una transacción");
+    ok("`armarSecuencia` y `colocarLote` leen los in/out antes de tocar cada medio y los devuelven en una transacción, releídos");
+  }
+}
+
+/*
+ * TODA lectura de los in/out de un MEDIO pasa por `leerInOut` (2026-09-24). Sin argumento, `getInPoint`
+ * no lee: la cola de `cortar` lo hacía así, caía siempre a limpiar, y un still cortado quedaba con el
+ * generador entero —doce horas, medido en vivo—. Y `inOutMedio`, que los ESCRIBE, elige el medio por
+ * el nombre EXACTO y único, valida el rango y RELEE. Sobre el código sin comentarios.
+ */
+{
+  const sinCom = (x) => (x ? x.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "") : "");
+  const cuerpoLeer = cuerpoDeFuncion(srcComandos, "async function leerInOut(") || "";
+  const resto = sinCom(srcComandos.replace(cuerpoLeer, ""));
+  const directas = (resto.match(/clipItem\.get(?:In|Out)Point\(/g) || []).length;
+  const io = sinCom(cuerpoDeFuncion(srcComandos, "async function inOutMedio("));
+  const tx = io.indexOf("executeTransaction(");
+  if (directas) {
+    mal(`hay ${directas} lectura(s) de los in/out de un medio por fuera de \`leerInOut\``,
+        "sin argumento no leen, y el que cae a limpiar deja un still en doce horas");
+  } else if (!io) {
+    mal("no está `inOutMedio`, el verbo que cura un still envenenado");
+  } else if (!/igualN\(n, params\.medio\)/.test(io) || !/iguales\.length !== 1/.test(io)) {
+    mal("`inOutMedio` no elige el medio por el nombre EXACTO y único", "escribe: con el primero que contiene el nombre toca el que no era");
+  } else if (!/params\.salida > params\.entrada/.test(io)) {
+    mal("`inOutMedio` no valida que la salida sea mayor que la entrada");
+  } else if (tx === -1 || io.indexOf("leerInOut(clipItem)", tx) === -1 || !/\bentro\b/.test(io.slice(tx))) {
+    mal("`inOutMedio` no RELEE después de escribir, o no dice si entró", "que la transacción diga true no prueba que el medio quedó así");
+  } else {
+    ok("los in/out de un medio se leen solo con `leerInOut`, y `inOutMedio` escribe por nombre exacto y relee");
   }
 }
 
@@ -2166,8 +2221,21 @@ titulo("recargar.js abre UDT, lo trae al frente y recien ahi dispara el macro");
     mal("falta `herramientas/recargar.js`", "es el que dispara el Load/Reload por Keyboard Maestro");
   } else {
     const src3 = fs.readFileSync(p, "utf8");
-    const bloqueaPremiere = /function exigirPremiere\(\)/.test(src3) &&
-                            /corriendo\(\s*["'`]Adobe Premiere Pro/.test(src3);
+    /* SIN COMENTARIOS y en el CUERPO de `exigirPremiere`. La versión que buscaba
+       `corriendo("Adobe Premiere Pro` en el archivo entero siguió pasando el 2026-09-25 con ese
+       patrón ya sacado del código: lo citaba el comentario que explica por qué se sacó. */
+    const limpio3 = src3.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    const cuerpoExigir = (() => {
+      const i = limpio3.indexOf("function exigirPremiere(");
+      if (i === -1) return "";
+      let d = 0;
+      for (let k = limpio3.indexOf("{", i); k < limpio3.length; k++) {
+        if (limpio3[k] === "{") d++;
+        else if (limpio3[k] === "}") { d--; if (d === 0) return limpio3.slice(i, k + 1); }
+      }
+      return "";
+    })();
+    const bloqueaPremiere = /premiereAbierto\(\)\s*!==\s*false/.test(cuerpoExigir);
     const abreUDT = /function prepararUDT\(\)/.test(src3) &&
                     /!corriendo\(\s*["'`]UXP Developer[\s\S]{0,200}activate/.test(src3);
     /*
@@ -3753,6 +3821,68 @@ titulo("El CSS de exportar_dc va ULTIMO, o no puede pisar nada");
       "las de el llevan !important y le ganan: el CSS del usuario no haria nada, y en silencio");
   } else {
     ok("`exportar_dc.js` inyecta el --css del usuario al final, donde puede pisar");
+  }
+}
+
+titulo("exportar_dc sale en BT.709 y etiquetado, y lo prueba antes de exportar");
+
+/*
+ * Hasta el 2026-09-25 el ProRes salía en BT.601 sin etiquetar y Premiere, que lee un HD sin
+ * etiqueta como 709, corría los saturados: #1d4fa8 → #184fad, #ff0032 → #ff1c30, medido en un
+ * cuadro exportado por Premiere. Se EJECUTA `probarColor` con los argumentos del archivo —tiene que
+ * volver exacto y etiquetado— y con los viejos, que tiene que dar mal: un autochequeo que no puede
+ * fallar no prueba nada. Y por posición, que el export use los MISMOS argumentos que el parche.
+ */
+{
+  const src = fs.readFileSync(path.join(raiz, "herramientas/exportar_dc.js"), "utf8");
+  const c = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const cuerpo = (txt, firma) => {
+    const i = txt.indexOf(firma);
+    if (i === -1) return "";
+    let d = 0;
+    for (let k = txt.indexOf("{", i); k < txt.length; k++) {
+      if (txt[k] === "{") d++;
+      else if (txt[k] === "}") { d--; if (d === 0) return txt.slice(i, k + 1); }
+    }
+    return "";
+  };
+  const bloqueArgs = src.slice(src.indexOf("const PERFILES"), src.indexOf("const VERIFICAR"));
+  const funciones = cuerpo(src, "function probarColor(") + "\n" + cuerpo(src, "function etiquetasDe(") + "\n" +
+    (src.match(/const ETIQUETAS_709 = [^\n]*/) || [""])[0];
+  const correr = (args) => {
+    try {
+      const ctx = { fs, path, require, Buffer, execFileSync: require("child_process").execFileSync, ALFA: false, FPS: 25, PERFIL: "4444" };
+      require("vm").runInNewContext(args + "\n" + funciones + "\nthis.r = probarColor(); this.E = ETIQUETAS_709;", ctx);
+      return { r: ctx.r, E: ctx.E };
+    } catch (e) { return { error: String(e.message || e).slice(0, 120) }; }
+  };
+  const actual = correr(bloqueArgs);
+  const viejo = correr(bloqueArgs.replace(/const ARGS_COLOR = \[[\s\S]*?\];/,
+    'const ARGS_COLOR = ["-c:v", "prores_ks", "-profile:v", PROF, "-pix_fmt", PIX, "-vendor", "apl0"];'));
+  const llamadaExport = (c.match(/execFileSync\("ffmpeg",\s*\[[^\]]*%05d\.png[\s\S]*?\]\)/) || [""])[0];
+  const iife = c.slice(c.lastIndexOf("(async () => {"));
+  const ramaParche = iife.slice(iife.indexOf("probarColor()"), iife.indexOf("hallarPuppeteer()"));
+  const trasExport = iife.slice(iife.indexOf("%05d.png"));
+  if (actual.error || !actual.r) {
+    mal("`probarColor` no se pudo ejecutar", actual.error || "sin resultado");
+  } else if (actual.r.error > 2 || actual.r.etiquetas !== actual.E) {
+    mal(`el parche de color NO vuelve bien: error máx ${actual.r.error}, etiquetas ${actual.r.etiquetas}`,
+      `volvió ${actual.r.vistos} y se pidió ${actual.r.pedidos}: Premiere mostraría los saturados corridos`);
+  } else if (viejo.error || !viejo.r || (viejo.r.error <= 2 && viejo.r.etiquetas === viejo.E)) {
+    mal("`probarColor` no detecta los argumentos VIEJOS (601 sin etiquetar)",
+      viejo.error || `con ellos dio error ${viejo.r.error} y ${viejo.r.etiquetas}: un chequeo que no puede fallar no prueba nada`);
+  } else if (!/\.\.\.ARGS_COLOR/.test(llamadaExport)) {
+    mal("el export no usa `ARGS_COLOR`", "se probaría un pipeline y se exportaría con otro");
+  } else if (!/\.\.\.ARGS_COLOR/.test(cuerpo(c, "function probarColor("))) {
+    mal("`probarColor` no usa `ARGS_COLOR`", "el parche tiene que pasar por los MISMOS argumentos que el export");
+  } else if (!ramaParche || !/process\.exit\(1\)/.test(ramaParche) || !/ETIQUETAS_709/.test(ramaParche) ||
+             !/\.error\s*>\s*[0-3]\b/.test(ramaParche)) {
+    mal("el parche de color no corre ANTES de exportar, o no aborta si sale mal",
+      "después de un minuto de cuadros, un aviso se lee y se entrega igual");
+  } else if (!/etiquetasDe\(salida\)/.test(trasExport) || !/process\.exitCode\s*=\s*1/.test(trasExport)) {
+    mal("el archivo exportado no se mide con ffprobe", "las etiquetas se leen del archivo, no se suponen de los argumentos");
+  } else {
+    ok(`\`exportar_dc.js\` sale en 709 etiquetado (parche exacto, error ${actual.r.error}), con los argumentos viejos el parche da error ${viejo.r.error} y ${viejo.r.etiquetas}, y se prueba antes de exportar`);
   }
 }
 
@@ -5393,6 +5523,37 @@ if (!cuerpoBorrar) {
   }
 }
 
+/* ---------- `borrar` deja la selección VACÍA ---------- */
+
+/*
+ * La selección de `borrar` se arma sobre el objeto VIVO de la secuencia, y `createRemoveItemsAction`
+ * saca el clip del timeline pero lo deja adentro de ella: la edición siguiente dispara el aviso de
+ * cambio de selección y Effect Controls lee el clip que ya no existe. Tiró Premiere en el proyecto de
+ * prueba al primer ensayo —borrar una capa de ajuste e insertar un PNG en el mismo lugar—, y con la
+ * selección vaciada después del borrado, 6 de 6 sin crash (2026-09-24). Se mira por POSICIÓN y sobre
+ * el código desnudo: vaciar ANTES de borrar no sirve, porque el clip tiene que estar para sacarlo.
+ */
+{
+  const cb = cuerpoDeFuncion(srcComandos, "async function borrar(params)");
+  const desnudo = cb ? cb.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "")
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""').replace(/`(?:[^`\\]|\\.)*`/g, "``") : "";
+  const iBorrado = desnudo.indexOf("const despues = await contarPista();");
+  const iQuita = desnudo.search(/seleccion\.removeItem\(it\)/);
+  const iFija = desnudo.search(/await sequence\.setSelection\(seleccion\)/);
+  const iResumen = desnudo.indexOf("return {");
+  if (!cb || iBorrado === -1 || iResumen === -1) {
+    mal("no se encontró `borrar` o su borrado para revisar la selección");
+  } else if (iQuita === -1 || iFija === -1) {
+    mal("`borrar` no vacía la selección después de borrar", "deja el clip borrado en la selección, y la edición siguiente tira Premiere en Effect Controls");
+  } else if (iQuita < iBorrado || iFija < iBorrado || iFija > iResumen) {
+    mal("`borrar` vacía la selección en el lugar equivocado", "tiene que ser DESPUÉS de confirmar el borrado —el clip tiene que estar para sacarlo— y antes de contestar");
+  } else if (!/\bseleccionVaciada\b/.test(desnudo.slice(iResumen))) {
+    mal("`borrar` no dice si la selección quedó vacía", "sin eso, un vaciado que falló se ve igual que uno que anduvo");
+  } else {
+    ok("`borrar` vacía la selección después de borrar, y lo informa");
+  }
+}
+
 /* ---------- `marcadores` devuelve la DURACIÓN ---------- */
 
 /*
@@ -5492,6 +5653,38 @@ const srcRecargar = fs.readFileSync(path.join(__dirname, "herramientas", "recarg
   // El catch tiene que devolver false (seguir), no true (frenar): no poder averiguar no es estar bloqueado.
   const cuerpo = c.match(/function pantallaBloqueada\(\)[\s\S]*?\n\}/);
   const noFrenaSinSaber = cuerpo ? /catch\s*\([^)]*\)\s*\{\s*return false;/.test(cuerpo[0]) : false;
+  /* EL PROTECTOR DE PANTALLA marca la sesión igual que el bloqueo (medido el 2026-09-25, sin
+     contraseña): antes de frenar se lo saca con el `stop` de System Events y se vuelve a mirar. Por
+     posición: el stop antes del primer `return false`, y otra lectura después del stop. Y la llamada
+     con `await`: una promesa es truthy, y `!promesa` no frenaría nunca. */
+  /* Se EJECUTA con dobles, en los tres casos: por posición, el bucle de espera ya lee la clave
+     después del stop, y una versión que nunca vuelve a dar true pasaba igual (mutación, 2026-09-25). */
+  const fuenteExigir = (srcRecargar.match(/async function exigirPantallaDesbloqueada\([^)]*\)\s*\{[\s\S]*?\n\}/) || [""])[0];
+  /* La función es async y este archivo no: los tres casos corren en un node hijo. */
+  const casos = (() => {
+    const guion = `
+      const vm = require("vm"), fuente = ${JSON.stringify(fuenteExigir)};
+      const conStop = (ll) => ll.some((s) => /stop current screen saver/.test(s));
+      const probar = async (bloqueada) => {
+        const llamadas = [];
+        const ctx = { console: { log() {}, error() {} }, osa: (s) => { llamadas.push(s); return ""; },
+                      dormir: async () => {}, pantallaBloqueada: () => bloqueada(llamadas) };
+        try {
+          vm.runInNewContext(fuente.replace(/^async function exigirPantallaDesbloqueada/, "this.f = async function"), ctx);
+          return { r: await ctx.f("el Cmd+Q"), stop: conStop(llamadas) };
+        } catch (e) { return { error: String(e.message || e) }; }
+      };
+      (async () => console.log(JSON.stringify({
+        protector: await probar((ll) => !conStop(ll)),   /* la clave se va con el stop */
+        bloqueo: await probar(() => true),               /* hay contraseña: no se va nunca */
+        libre: await probar(() => false),
+      })))();`;
+    try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
+    catch (e) { const x = { error: String(e.message || e).slice(0, 120) }; return { protector: x, bloqueo: x, libre: x }; }
+  })();
+  const { protector, bloqueo, libre } = casos;
+  const conAwait = /await\s+exigirPantallaDesbloqueada\(/.test(c) && !/!\s*exigirPantallaDesbloqueada\(/.test(c);
+  const conPkill = /(pkill|killall)[^\n]*ScreenSaverEngine/.test(c);
   if (!leeIoreg) {
     mal("`recargar.js` no detecta la pantalla bloqueada",
         "es la cuarta causa de que el macro no cierre Premiere, y se lee en un comando");
@@ -5501,8 +5694,21 @@ const srcRecargar = fs.readFileSync(path.join(__dirname, "herramientas", "recarg
   } else if (!noFrenaSinSaber) {
     mal("`pantallaBloqueada` frena cuando NO PUDO averiguar",
         "rechazar uso correcto es el peor modo de fallo de una guarda");
+  } else if (!fuenteExigir || protector.error || bloqueo.error || libre.error) {
+    mal("`exigirPantallaDesbloqueada` no se pudo ejecutar", protector.error || bloqueo.error || libre.error || "no está");
+  } else if (protector.r !== true || !protector.stop) {
+    mal("la guarda de pantalla no saca el PROTECTOR y vuelve a mirar antes de frenar",
+        "el protector sin contraseña marca la sesión bloqueada igual: frenaría un reinicio que anda");
+  } else if (bloqueo.r !== false) {
+    mal("la guarda de pantalla deja pasar un bloqueo que NO se va con el protector", "con contraseña no llega ningún macro");
+  } else if (libre.r !== true || libre.stop) {
+    mal("la guarda de pantalla toca el protector con la sesión libre", "no se le cambia la pantalla a nadie si no hace falta");
+  } else if (conPkill) {
+    mal("el protector se saca con `pkill`", "medido: el módulo del protector sigue vivo y la clave queda en Yes");
+  } else if (!conAwait) {
+    mal("`exigirPantallaDesbloqueada` se llama sin `await`", "una promesa es truthy: la guarda no frenaría nunca");
   } else {
-    ok("`recargar.js` detecta la pantalla bloqueada antes de disparar, y no frena si no puede saberlo");
+    ok("`recargar.js` detecta la pantalla bloqueada antes de disparar, saca el protector y vuelve a mirar, y no frena si no puede saberlo");
   }
 }
 
@@ -5776,6 +5982,97 @@ const srcRecargar = fs.readFileSync(path.join(__dirname, "herramientas", "recarg
     } else {
       ok("`sesionRemotaJump` acierta en las DOS direcciones (conectado y desconectado)");
     }
+  }
+}
+
+/* ---------- recargar.js: Premiere por su EJECUTABLE, y los auxiliares de ESTA sesión ---------- */
+
+titulo("recargar.js reconoce a Premiere por su ejecutable y espera a los auxiliares de esta sesión");
+
+/*
+ * El 2026-09-25 un `--reiniciar` informó "SIGUE ABIERTO tras 180s" con Premiere ya cerrado, trabó
+ * el transporte y no reabrió: `pgrep -f "MacOS/Adobe Premiere Pro"` enganchaba al broker de IPC de
+ * Adobe, que lleva la ruta de Premiere en los ARGUMENTOS y sobrevive a su cierre. Y la espera de
+ * auxiliares se vencía a los 45s por un crashpad de Sentry que vive adentro del bundle y había
+ * quedado colgado.
+ *
+ * Se EJECUTAN las funciones con la salida de `ps` de ese día, en las dos direcciones. Y aparte se
+ * mira que `ps` se pida con `comm`: con los argumentos la línea del broker TERMINA en la ruta de
+ * Premiere, y ninguna salida inyectada lo agarraría.
+ */
+{
+  const src = fs.readFileSync(path.join(__dirname, "herramientas", "recargar.js"), "utf8");
+  const c = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const cuerpo = (txt, firma) => {
+    const i = txt.indexOf(firma);
+    if (i === -1) return "";
+    let d = 0;
+    for (let k = txt.indexOf("{", i); k < txt.length; k++) {
+      if (txt[k] === "{") d++;
+      else if (txt[k] === "}") { d--; if (d === 0) return txt.slice(i, k + 1); }
+    }
+    return "";
+  };
+  /* Se EVALÚA el fuente CRUDO: sacarle los `//` rompe `DEL_BUNDLE`, cuyo regex termina en `\//`. */
+  const i0 = src.indexOf("const ES_PREMIERE"), i1 = src.indexOf("function exigirPremiere");
+  let f = null;
+  if (i0 !== -1 && i1 > i0) {
+    try {
+      const ctx = { path: path, require: require };
+      require("vm").runInNewContext(src.slice(i0, i1) +
+        ";this.f={premiereAbierto,auxiliaresDeEstaSesion,siguenVivos};", ctx);
+      f = ctx.f;
+    } catch (e) { f = null; }
+  }
+  const P = "/Applications/Adobe Premiere Pro 2026/Adobe Premiere Pro 2026.app/Contents/MacOS/";
+  const BROKER = "  626 01:20:30 /Library/Application Support/Adobe/Adobe Desktop Common/IPCBox/AdobeIPCBroker.app/Contents/MacOS/AdobeIPCBroker\n";
+  const CRASH_VIEJO = "  623 01:20:31 " + P + "crashpad_handler\n";
+  const DYN_VIEJO = "  700 01:10:00 " + P + "dynamiclinkmanager\n";
+  const PRINCIPAL = " 3048    37:49 " + P + "Adobe Premiere Pro 2026\n";
+  const CRASH = " 3067    37:39 " + P + "crashpad_handler\n";
+  const DYN = " 3068    37:39 " + P + "dynamiclinkmanager\n";
+  const CEP = " 3074    37:37 " + P + "CEPHtmlEngine.app/Contents/MacOS/CEPHtmlEngine\n";
+  const OTRO = "  900 02:00:00 /System/Applications/Mail.app/Contents/MacOS/Mail\n";
+  const ABIERTO = BROKER + CRASH_VIEJO + DYN_VIEJO + PRINCIPAL + CRASH + DYN + CEP + OTRO;
+  const CERRADO = BROKER + CRASH_VIEJO + CRASH + OTRO;          /* lo que quedó vivo el 2026-09-25 */
+  const DESPUES = " 3068    37:45 " + P + "dynamiclinkmanager\n" +
+                  " 3074    00:03 /usr/bin/otra_cosa\n";         /* 3074 cerró y su pid se reusó */
+  const pidsAux = (() => { try { return (f.auxiliaresDeEstaSesion(ABIERTO) || []).map((a) => a.pid).join(","); } catch (e) { return "tiró"; } })();
+  const cProcesos = cuerpo(c, "function procesos(");
+  const cReiniciar = cuerpo(c, "async function reiniciarPremiere(");
+  const iAux = cReiniciar.indexOf("auxiliaresDeEstaSesion()"), iMacro = cReiniciar.indexOf("do script");
+  const trasPanel = cReiniciar.slice(cReiniciar.indexOf("panel NUEVO cargado"));
+  const ramaCartel = trasPanel.slice(trasPanel.indexOf("ventanaTrasReabrir()"), trasPanel.indexOf("sacarTraba()"));
+  if (!f) {
+    mal("las funciones de procesos de `recargar.js` no se pudieron evaluar", "el chequeo las ejecuta, no las lee");
+  } else if (f.premiereAbierto(ABIERTO) !== true) {
+    mal("`premiereAbierto` no ve a Premiere abierto", "falso negativo: el reinicio reabriría encima de uno vivo");
+  } else if (f.premiereAbierto(CERRADO) !== false) {
+    mal("`premiereAbierto` da por abierto un Premiere CERRADO",
+        "es el reinicio del 2026-09-25: el broker y los crashpad sobreviven a Premiere y el cierre no terminaba nunca");
+  } else if (f.premiereAbierto(null) !== null) {
+    mal("`premiereAbierto` no devuelve null cuando `ps` no contestó", "\"no pude mirar\" no es \"está cerrado\"");
+  } else if (!/"comm="|pid=,etime=,comm=/.test(cProcesos) || /args=|command=/.test(cProcesos)) {
+    mal("`procesos` no le pide a `ps` el EJECUTABLE (`comm`)",
+        "con los argumentos la línea del broker termina en la ruta de Premiere y lo da por abierto");
+  } else if (/corriendo\(\s*["'`][^"'`]*Premiere/.test(c)) {
+    mal("queda un `corriendo(...Premiere...)` en `recargar.js`", "`pgrep -f` busca en los argumentos: engancha al broker");
+  } else if (pidsAux !== "3068,3074") {
+    mal(`\`auxiliaresDeEstaSesion\` devolvió ${pidsAux || "nada"} y son 3068,3074`,
+        "van los del bundle arrancados después del principal, sin crashpad: el crashpad puede quedar colgado, y uno viejo no es de esta sesión");
+  } else if (f.auxiliaresDeEstaSesion(CERRADO) !== null) {
+    mal("`auxiliaresDeEstaSesion` sin el proceso principal no devuelve null", "sin principal no se sabe cuáles son de esta sesión");
+  } else if (f.siguenVivos(f.auxiliaresDeEstaSesion(ABIERTO), DESPUES).map((a) => a.pid).join(",") !== "3068") {
+    mal("`siguenVivos` no compara pid Y ejecutable", "un pid reusado haría esperar a un proceso ajeno");
+  } else if (iAux === -1 || iMacro === -1 || iAux > iMacro) {
+    mal("los auxiliares no se anotan ANTES del Cmd+Q", "después ya no se sabe cuáles eran de esta sesión");
+  } else if (!/premiereAbierto\(\)\s*===\s*false/.test(cReiniciar)) {
+    mal("el cierre no se juzga con `premiereAbierto() === false`", "un `ps` que no contestó daría a Premiere por cerrado");
+  } else if (!/ponerTraba\(/.test(ramaCartel) || !/return false/.test(ramaCartel)) {
+    mal("un cartel al REABRIR no traba el transporte",
+        "con Link Media puesto el panel contesta igual y el reinicio siguiente se cuelga en el Cmd+Q");
+  } else {
+    ok("`premiereAbierto` acierta en las dos direcciones, `ps` va con `comm`, los auxiliares son los de esta sesión y un cartel al reabrir traba");
   }
 }
 
@@ -6589,6 +6886,64 @@ titulo("`subtitular.py` para un reel: palabras por clip, una línea en píxeles,
       "con lo general tomaría otras pistas sin avisar: " + String(otro.stderr || otro.stdout).trim().slice(0, 140));
   } else {
     ok("`subtitular.py` hace el reel: palabras por clip con su gracia, cambios anclados al clip, una línea en píxeles y los tiempos «reel» al cuadro");
+  }
+}
+
+/*
+ * UNA LÍNEA, EN AUTOMÁTICO (2026-09-24). Contra la división a mano de dos reels, el automático de una
+ * línea acertaba 61 % de los bloques: cortaba después de un posesivo («nuestro | cargador») o de un
+ * cuantificador («distintos | productos»), el umbral del bloque corto —pensado para 2 x 42— lo hacía
+ * preferir un corte malo a tres bloques cortos, y dejaba colgado lo que arrancaba después de una coma.
+ * Con las cuatro cosas arregladas, 87 %. Acá, frases SINTÉTICAS elegidas porque cada una de esas
+ * reglas, sacada, cambia el resultado (probado por mutación): ninguna línea puede terminar en una
+ * palabra que pide la siguiente, ni dejar colgado lo que sigue a una coma. Y la coma de una
+ * ENUMERACIÓN no cuenta como colgada: sin esa excepción la regla parte la lista, y la división se
+ * corre hasta partir «créditos | personales». Los anchos dependen de la fuente con que se eligieron:
+ * sin Arial, no corre.
+ */
+titulo("`subtitular.py` en UNA línea y en automático: sin posesivos ni cuantificadores al final, sin nada colgado de una coma");
+
+{
+  const py = fs.existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3";
+  const { spawnSync } = require("child_process");
+  const herr = path.join(raiz, "herramientas", "subtitular.py");
+  const arial = "/System/Library/Fonts/Supplemental/Arial.ttf";
+  const correr = (frase, px) => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "unalinea-"));
+    const escribir = (n, o) => fs.writeFileSync(path.join(tmp, n), JSON.stringify(o));
+    const palabras = frase.split(" ").map((t, i) => ({ texto: t, desde: +(0.5 + i * 0.3).toFixed(3), dura: 0.25 }));
+    const fin = 0.5 + palabras.length * 0.3 + 1;
+    escribir("P - audio.audio.json", { motor: "scribe", palabras });
+    escribir("P - timeline.json", { secuencia: "P", fin, fps: 25, A: { A1: [["ANA.mp4", 0, fin, 0]] }, V: { V1: [[0, fin]] } });
+    escribir("P - ajustes.json", { cambios: [] });
+    escribir("p.proyecto.json", { pistas: { habla: ["A1"] }, lineas: 1, ancho: { fuente: arial, cuerpo: 48, px } });
+    const r = spawnSync(py, [herr, path.join(tmp, "p.proyecto.json"), "P"], { encoding: "utf8" });
+    const f = path.join(tmp, "P - subtitulos.srt");
+    const lineas = fs.existsSync(f) ? fs.readFileSync(f, "utf8").trim().split(/\n\n+/).map((b) => b.split("\n").slice(2).join(" ")) : [];
+    fs.rmSync(tmp, { recursive: true, force: true });
+    return { r, lineas };
+  };
+  const pide = /\b(el|la|los|las|un|una|de|del|al|en|con|por|para|que|y|no|me|se|nuestro|nuestra|nuestros|nuestras|distintos|distintas|varios|varias|muchos|muchas|todos|todas|algunos|algunas|otros|otras)$/i;
+  const malas = (ls) => ls.slice(0, -1).filter((l) => pide.test(l) || (/,\s\S/.test(l) && !/[.,;:?!]$/.test(l)));
+  if (!fs.existsSync(arial)) {
+    console.log("  NO CORRIÓ  las frases se eligieron con las medidas de Arial, y no está");
+  } else {
+    const a = correr("Visitamos la planta, conocimos a nuestro equipo de trabajo y probamos distintos productos nuevos.", 560);
+    const b = correr("Llegamos temprano a la exposición, recorrimos todos los puestos y hablamos con varios vendedores.", 700);
+    const c = correr("Ofrecemos desde créditos personales, seguros, ahorro y soluciones de pago para comercios.", 700);
+    if (a.r.error || (a.r.status !== 0 && /No such file|not found|Pillow/i.test(String(a.r.stderr)))) {
+      console.log("  NO CORRIÓ  sin python3 o sin Pillow: " + String(a.r.error || a.r.stderr).trim().split("\n").pop());
+    } else if (a.r.status !== 0 || b.r.status !== 0 || c.r.status !== 0 || !a.lineas.length || !b.lineas.length || !c.lineas.length) {
+      mal("`subtitular.py` no dividió en una línea las frases de prueba", String(a.r.stderr || b.r.stderr).trim().split("\n").slice(-2).join(" | "));
+    } else if (malas(a.lineas).length || malas(b.lineas).length) {
+      mal("`subtitular.py` en una línea deja una palabra que pide la siguiente, o algo colgado de una coma",
+        [...malas(a.lineas), ...malas(b.lineas)].map((l) => "«" + l + "»").join(" · ") + "   (salió: " + a.lineas.join(" | ") + " // " + b.lineas.join(" | ") + ")");
+    } else if (!c.lineas.some((l) => l.includes("créditos personales"))) {
+      mal("`subtitular.py` en una línea toma la coma de una ENUMERACIÓN por una de cláusula",
+        "parte la lista y la división se corre hasta «créditos | personales»: " + c.lineas.join(" | "));
+    } else {
+      ok(`\`subtitular.py\` divide en una línea sin cortar después de un posesivo o un cuantificador ni colgar nada de una coma (${a.lineas.length} y ${b.lineas.length} bloques)`);
+    }
   }
 }
 

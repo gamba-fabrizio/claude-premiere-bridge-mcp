@@ -416,6 +416,13 @@ type"*, y con dos argumentos *"Not Enough Parameters"*. Se encontró enumerando 
 `Constants.MediaType` y `Constants.SequenceOperation`. La prueba de cuál sirvió no es que la llamada
 no tire, sino el efecto observable.
 
+Así salió también el getter de los in/out de un medio (2026-09-24, en vivo):
+`ClipProjectItem.getInPoint()` y `getOutPoint()` **sin argumento NO leen** —la aridad dice 1—, y con
+`ppro.Constants.MediaType.VIDEO` devuelven el `TickTime`. Y el par tiene una trampa al volver:
+`createClearInOutPointsAction` es neutro para un video —queda el medio entero— pero NO para una imagen
+fija: un PNG, que entra con los 5 s de un still, queda con el generador ENTERO, **43.200 s**. Los in/out
+de un medio se leen antes y se devuelven; no se limpian. → `leerInOut` y `devolverInOut`.
+
 Y **no enumeres ni llames getters a lo bruto**: en otro plugin una sonda que lo hizo crasheó Premiere.
 
 ## Lo medido que solo estaba en la bitácora (resumen del 2026-09-23)
