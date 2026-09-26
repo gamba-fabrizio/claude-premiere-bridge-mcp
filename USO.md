@@ -63,10 +63,13 @@ en `CLAUDE.md`.
   dice. Y Premiere corta el nombre después del último punto: `secuencia` trae el que quedó. Si se
   corta a mitad, el error dice qué secuencia dejó y con cuántos fragmentos y capas. Los in/out de
   los medios los devuelve a como estaban (`inOut` dice cuántos): hasta el 2026-09-24 los limpiaba, y
-  un PNG limpiado entra con DOCE HORAS. `cortar` también. Un still que ya quedó así NO se arregla
+  un PNG limpiado entra con DOCE HORAS. Un still que ya quedó así NO se arregla
   reimportándolo —`importar` saltea lo que ya está—: se cura con `in_out_medio` `entrada: 0,
   salida: 5`. Y no se lo reconoce leyéndolo: se lee "sin marca", igual que un video sano; lo delata
   insertarlo en una secuencia descartable.
+- **La cola de `cortar` es un CLON**: trae efectos, nombre, apagado y el mismo audio en las mismas
+  pistas, y no pisa nada. Con audio vinculado queda SIN VÍNCULO en Premiere —la API no crea
+  vínculos—: el bridge la sigue emparejando, y a mano es Cmd+L. A otra velocidad que 1x rebota.
 - **`borrar_secuencia` elige por el nombre EXACTO**; si coinciden varias rebota, y dos con el mismo
   nombre se eligen con `duracion`. Dos gemelas —mismo nombre y mismo largo— se borran a mano.
 - **`marcar` cuantiza al cuadro.** Con `clip`, el marcador va al MEDIO: `segundos` es tiempo de
@@ -85,7 +88,11 @@ en `CLAUDE.md`.
   sobre material 4K pesado, tiró Premiere.
 - **Las capas de ajuste no se crean por API y no se escalan**: se inserta una que ya exista, y
   escalada la corrección queda en un rectángulo.
-- **`relink` no tiene Cmd+Z**, y `clonar` puede crear pistas de video que nada borra.
+- **`relink` no tiene Cmd+Z.** `clonar` a la pista SIGUIENTE a la última la crea —es la forma de agregar
+  una pista de video— y más arriba rebota; no hay API para borrar pistas.
+- **El nivel de un audio (`Volume > Level`) es CRUDO**: 0 dB es 0,1778 y 1 es +15 dB, medido exportando.
+  Se pide con `db` en `fijar` y `keyframe`, y `leer_param` y `param` lo devuelven en `db`: un −6 pasado
+  como `valor` dejaba el clip MUDO, y ahora rebota. El fader de la PISTA no lo toca el bridge.
 - **Los proxies no tienen `detachProxy`**: no adjuntes uno que viva en una carpeta temporal. Ni
   importes nada del scratchpad (`/private/tmp`): el arranque de la máquina lo vacía, y el proyecto
   saca Link Media en cada apertura, que traba el Cmd+Q del reinicio siguiente.

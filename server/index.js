@@ -368,7 +368,8 @@ server.registerTool(
       "El valor de un parámetro en el playhead, más en qué segundos tiene keyframes. " +
       "Los tiempos vienen en segundos de la SECUENCIA, que es el reloj del timeline.\n\n" +
       "SOLO LEE. Para escribir: `premiere_fijar` pone un valor fijo —lo que se quiere casi " +
-      "siempre— y `premiere_keyframe` agrega uno en el playhead, o sea que anima.",
+      "siempre— y `premiere_keyframe` agrega uno en el playhead, o sea que anima.\n\n" +
+      "Volume > Level llega CRUDO —0 dB es 0.1778, no un nivel lineal— y por eso viene también en `db`.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       proyecto: z
@@ -873,9 +874,14 @@ server.registerTool(
   {
     title: "Partir un clip en dos",
     description:
-      "Parte un clip en un segundo de la secuencia. La API NO tiene razor, así que se emula: " +
-      "se recorta la salida del clip hasta ahí y se reinserta el mismo medio con la entrada " +
-      "corrida. El resultado es indistinguible de un corte, y el audio vinculado se parte igual.\n\n" +
+      "Parte un clip en un segundo de la secuencia. La API NO tiene razor, así que se emula, y la " +
+      "COLA ES UN CLON del clip: trae sus efectos, su nombre y su apagado, y el audio vinculado se " +
+      "parte con él —todos los streams, en sus mismas pistas—. Un clip sin audio sigue sin audio. " +
+      "No pisa nada ni toca los in/out del medio.\n\n" +
+      "EL COSTO: con audio vinculado, la cola queda SIN VÍNCULO en Premiere (la API no crea " +
+      "vínculos). El bridge la sigue emparejando por medio y rango; a mano se revincula con Cmd+L. " +
+      "Con otra velocidad que 1x rebota sin tocar nada. El resumen dice cuántos items esperaba y " +
+      "cuántos Cmd+Z lo deshacen.\n\n" +
       "Casi siempre conviene premiere_sacar_rangos, que hace los dos cortes y el borrado. Este " +
       "verbo es el atómico, para cuando hace falta partir sin sacar nada.",
     inputSchema: soloEstas({
@@ -1071,6 +1077,7 @@ server.registerTool(
 const PUNTO = z.object({
   segundos: z.number().min(0).optional().describe("Segundo de la SECUENCIA. Sin esto, el playhead."),
   valor: z.union([z.number(), z.boolean()]).optional().describe("Para params numéricos o de casilla."),
+  db: z.number().optional().describe("Solo para Volume > Level: el nivel en dB, que se convierte al crudo de Premiere (0 dB = 0.1778, +15 dB = 1, medido exportando). Con Level, `valor` es el CRUDO: pasarle -6 deja el clip MUDO, por eso rebota."),
   x: z.number().optional().describe("Para params de punto: fracción horizontal (0.5 es el centro)."),
   y: z.number().optional().describe("Para params de punto: fracción vertical.")
 }).strict();
@@ -1103,6 +1110,7 @@ server.registerTool(
         .union([z.number(), z.boolean()])
         .optional()
         .describe("Para un solo keyframe en el playhead. Booleano para params que son casillas (Volume > Mute)."),
+      db: z.number().optional().describe("Solo para Volume > Level: el nivel en dB, que se convierte al crudo de Premiere (0 dB = 0.1778, +15 dB = 1, medido exportando). Con Level, `valor` es el CRUDO: pasarle -6 deja el clip MUDO, por eso rebota."),
       x: z.number().optional().describe("Para un solo keyframe de punto en el playhead."),
       y: z.number().optional().describe("Idem, la vertical.")
     })
@@ -1135,6 +1143,8 @@ server.registerTool(
       "NO QUEDO COMO SE PIDIO. Los keyframes NO se borran —eso estuvo escrito al reves durante " +
       "meses— y la escritura queda invisible hasta que no queda ninguno. Para animar hay que " +
       "sacarlos antes con premiere_borrar_keyframe.\n\n" +
+      "EL NIVEL DE UN AUDIO (Volume > Level) NO VA EN dB: el `valor` es el crudo de Premiere, " +
+      "10^((dB − 15)/20), así que 0 dB es 0.1778. Para pedirlo en dB está `db`; un `valor` fuera de 0..1 rebota.\n\n" +
       "Devuelve el valor ANTES y DESPUÉS, releídos del clip. Esa diferencia es la prueba: " +
       "esta API puede aceptar una escritura y no aplicarla.",
     inputSchema: soloEstas({
@@ -1158,6 +1168,7 @@ server.registerTool(
         .union([z.number(), z.boolean()])
         .optional()
         .describe("El valor. Booleano para params que son casillas."),
+      db: z.number().optional().describe("Solo para Volume > Level: el nivel en dB, que se convierte al crudo de Premiere (0 dB = 0.1778, +15 dB = 1, medido exportando). Con Level, `valor` es el CRUDO: pasarle -6 deja el clip MUDO, por eso rebota."),
       x: z.number().optional().describe("Para params de punto (Position), la horizontal en 0-1."),
       y: z.number().optional().describe("Idem, la vertical."),
       nombre: z.string().optional().describe("Parte del nombre del clip. Sin nada, el seleccionado."),
@@ -1506,8 +1517,9 @@ server.registerTool(
       "y con un Lumetri agregado.\n\n" +
       "El destino se pide ABSOLUTO: `aPista` es el numero de pista (1 = V1) y `aSegundos` el momento " +
       "en la secuencia. El tiempo se cuantiza al cuadro y el verbo dice cuanto lo movio.\n\n" +
-      "**OJO: clonar CREA pistas de video** si el destino queda por encima de las que hay, y no hay " +
-      "API para borrarlas. El verbo avisa cuando paso.\n\n" +
+      "**La pista destino tiene que existir, o ser la SIGUIENTE a la última**: ésa la CREA —una sola, " +
+      "medido— y es la forma de agregar una pista de video desde acá. Más arriba rebota sin tocar nada. " +
+      "No hay API para borrar pistas.\n\n" +
       "Un Cmd+Z lo saca.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
@@ -1591,6 +1603,7 @@ server.registerTool(
       "  · `radiografia` con params, ~560 -> se cayo 2 de 2 (PromiseFulfillment)\n\n" +
       "El umbral exacto NO esta medido. Este verbo se queda del lado seguro: `limite` 25 por " +
       "defecto, con techo duro de 60. Para 88 clips son 4 llamadas en vez de 88.\n\n" +
+      "Volume > Level llega CRUDO —0 dB es 0.1778— y cada clip trae además `db`.\n\n" +
       "**`indiceParam` gana sobre `param`**, porque en Lumetri los nombres se repiten. Si se pasan " +
       "los dos y en algun clip no coinciden, ESE clip devuelve error en vez de un valor de otro param.",
     inputSchema: soloEstas({

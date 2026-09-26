@@ -1271,6 +1271,42 @@ function pistaDeSecuencia(valor, verbo) {
 const TICKS_POR_SEGUNDO = 254016000000;
 
 const aSegundos = (tick) => Number(tick.ticks) / TICKS_POR_SEGUNDO;
+
+/*
+ * EL NIVEL DE UN CLIP DE AUDIO NO VIENE EN dB (medido el 2026-09-26). `Volume > Level` es la escala
+ * CRUDA de Premiere, crudo = 10^((dB − 15)/20): 0 dB es 0,1778 y el tope, 1, es +15 dB. Medido de
+ * AFUERA —cinco tramos de un tono exportados a WAV y medidos con ffmpeg—: los crudos de −6, +6, −18 y
+ * +15 dB salieron −6,0, +6,0, −18,0 y +15,0 dB contra el 0,1778 de fábrica, que sonó igual que el
+ * archivo. Leído como lineal, 0,1778 parece −15 dB, y una sesión se lo informó así al editor
+ * (un reporte de uso, 2026-09-25); escrito en dB, −6 se clampea a 0 y el clip queda MUDO. Solo este param:
+ * `Channel Volume` quizás use la misma escala, y no está medido.
+ */
+const esNivelDeAudio = (efecto, param) =>
+  /^volume$/i.test(String(efecto || "")) && /^level$/i.test(String(param || ""));
+const crudoADb = (c) => (typeof c === "number" && c > 0 ? 20 * Math.log10(c) + 15 : -Infinity);
+const dbACrudo = (db) => Math.pow(10, (db - 15) / 20);
+const textoDb = (c) => {
+  const d = crudoADb(c);
+  if (!isFinite(d)) return "-inf dB, MUDO";
+  const r = Math.round(d * 10) / 10;
+  return `${(r === 0 ? 0 : r).toFixed(1)} dB`;   // sin «-0.0»: el crudo de fábrica da -0,0000001
+};
+const ESCALA_NIVEL = "Level es CRUDO: 0 dB = 0.1778 y 1 = +15 dB; en dB se pide con `db`";
+/* Lo que se pide para Level, validado ANTES de escribir: `db` explícito, o `valor` crudo en su rango.
+   Un crudo fuera de 0..1 nunca es lo que se quiso —negativo es el clip MUDO—, así que rebota. */
+function nivelPedido(e, donde) {
+  if (e.db !== undefined) {
+    if (typeof e.db !== "number" || !isFinite(e.db)) throw new Error(`${donde}: \`db\` tiene que ser un número. NO se escribió nada.`);
+    if (e.valor !== undefined) throw new Error(`${donde}: pasá \`db\` o \`valor\`, no los dos (con Level, \`valor\` es el número CRUDO). NO se escribió nada.`);
+    if (e.db > 15) throw new Error(`${donde}: Level llega a +15 dB (crudo 1) y se pidió ${e.db} dB. NO se escribió nada.`);
+    return dbACrudo(e.db);
+  }
+  if (typeof e.valor === "number" && (e.valor < 0 || e.valor > 1)) {
+    throw new Error(`${donde}: Volume > Level es CRUDO, de 0 a 1 —0 dB es 0.1778 y 1 es +15 dB—, y vino ${e.valor}. ` +
+      `Para pedirlo en dB: \`db: ${e.valor}\`. Con ${e.valor} crudo el clip quedaría ${e.valor < 0 ? "MUDO" : "en +15 dB"}. NO se escribió nada.`);
+  }
+  return e.valor;
+}
 const aTick = (segundos) =>
   ppro.TickTime.createWithTicks(String(Math.round(segundos * TICKS_POR_SEGUNDO)));
 
@@ -1790,6 +1826,7 @@ async function param(params) {
   const numero = aNumero(crudo);
   const punto = numero === null ? aPunto(crudo) : null;
   const booleano = numero === null && punto === null ? aBooleano(crudo) : null;
+  const nivel = esNivelDeAudio(nombreEfecto, params.param);
   const salida = {
     clip: nombreClip,
     efecto: nombreEfecto,
@@ -1797,16 +1834,18 @@ async function param(params) {
     valor: numero !== null ? numero : punto !== null ? punto : booleano,
     keyframes: tiempos.length,
     keyframesEnSegundos: tiempos,
-    valores: enKeyframes
+    valores: nivel ? enKeyframes.map((k) => Object.assign({}, k, { db: typeof k.valor === "number" ? Number(crudoADb(k.valor).toFixed(2)) : null })) : enKeyframes
   };
+  if (nivel && numero !== null) salida.db = Number(crudoADb(numero).toFixed(2));
   if (salida.valor === null) salida.visto = describirValor(crudo);
 
   return Object.assign(
     {
       resumen:
         `${nombreEfecto} > ${params.param} en "${nombreClip}": ` +
-        `${JSON.stringify(salida.valor)} · ${tiempos.length} keyframes` +
-        (tiempos.length ? ` en ${tiempos.join("s, ")}s` : ""),
+        `${JSON.stringify(salida.valor)}${nivel && numero !== null ? ` (${textoDb(numero)})` : ""} · ${tiempos.length} keyframes` +
+        (tiempos.length ? ` en ${tiempos.join("s, ")}s` : "") +
+        (nivel ? ` · ${ESCALA_NIVEL}` : ""),
     },
     salida
   );
@@ -2750,46 +2789,69 @@ async function armarSecuencia(params) {
           a.addAction(editor.createOverwriteItemAction(mc.medio, aTick(c.en), pistaIndex, pistaAudio));
         }, "poner la capa " + (i + 1));
       });
-      const track = await nueva.getVideoTrack(pistaIndex);
-      const its = track ? await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
+      /*
+       * DÓNDE QUEDÓ: en su pista de video, o —si el medio no tiene video, como un .wav— en su pista de
+       * AUDIO. Hasta el 2026-09-25 se miraba solo el video, y un tono puesto como capa en A3 se
+       * informaba «no tiró pero no apareció» estando ahí: el contador ciego que los fragmentos de este
+       * mismo verbo pagaron el 2026-09-16, una cuarta vez. En audio se exige además el MISMO medio, para
+       * no tomar por la capa otro clip que arranque en ese instante.
+       */
+      const pistaAudioIdx = typeof c.pistaAudio === "number" ? c.pistaAudio - 1 : pistaIndex;
+      const lugares = [
+        { etiqueta: "V" + (pistaIndex + 1), audio: false, traer: () => nueva.getVideoTrack(pistaIndex) },
+        { etiqueta: "A" + (pistaAudioIdx + 1), audio: true, traer: () => nueva.getAudioTrack(pistaAudioIdx) }
+      ];
       let ok = false;
-      for (let k = 0; k < its.length; k++) {
-        if (!its[k]) continue;  // el hueco de getTrackItems: ver el lazo de fragmentos
-        const t = await tiemposDe(its[k]);
-        if (Math.abs(t.desde - c.en) < 0.15) {
-          ok = true;
-          /*
-           * `nombre` y `apagado` van ACÁ y no en dos llamadas aparte porque cada
-           * una sería otra transacción: nueve capas serían 18 transacciones de
-           * más en ráfaga, y eso es lo que tira Premiere con SIGSEGV.
-           */
-          const acciones = [];
-          if (typeof c.nombre === "string" && c.nombre.trim()) acciones.push(() => its[k].createSetNameAction(c.nombre));
-          if (c.apagado === true) acciones.push(() => its[k].createSetDisabledAction(true));
-          let extras = null;
-          if (acciones.length) {
-            try {
-              project.lockedAccess(() => {
-                project.executeTransaction((a) => { for (const f of acciones) a.addAction(f()); }, "nombre y estado de la capa " + (i + 1));
-              });
-            } catch (e) { extras = e && e.message ? e.message : String(e); }
+      for (const lugar of lugares) {
+        if (ok) break;
+        let its = [];
+        try {
+          const track = await lugar.traer();
+          its = track ? await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
+        } catch (e) { its = []; }
+        for (let k = 0; k < its.length; k++) {
+          if (!its[k]) continue;  // el hueco de getTrackItems: ver el lazo de fragmentos
+          const t = await tiemposDe(its[k]);
+          let esElMedio = !lugar.audio;
+          if (lugar.audio) {
+            try { esElMedio = String((await its[k].getProjectItem()).name) === mc.nombre; } catch (e) { esElMedio = false; }
           }
-          const quedoNombre = typeof c.nombre === "string" && c.nombre.trim()
-            ? String(await its[k].getName()) === c.nombre : null;
-          capasPuestas.push({
-            en: t.desde, hasta: t.hasta, pista: "V" + (pistaIndex + 1),
-            medio: mc.nombre, fuenteDesde: fuenteDesde,
-            nombre: typeof c.nombre === "string" ? String(await its[k].getName()) : undefined,
-            nombreQuedo: quedoNombre, apagado: c.apagado === true || undefined,
-            errorExtras: extras || undefined
-          });
-          if (quedoNombre === false) capasFallidas.push(`capa ${i + 1}: NO se renombró a "${c.nombre}"`);
-          if (c.apagado === true) apagadasV.push({ capa: i + 1, item: its[k], puesta: capasPuestas[capasPuestas.length - 1] });
-          avance.capas = capasPuestas.length;
-          break;
+          if (Math.abs(t.desde - c.en) < 0.15 && esElMedio) {
+            ok = true;
+            /*
+             * `nombre` y `apagado` van ACÁ y no en dos llamadas aparte porque cada
+             * una sería otra transacción: nueve capas serían 18 transacciones de
+             * más en ráfaga, y eso es lo que tira Premiere con SIGSEGV.
+             */
+            const acciones = [];
+            if (typeof c.nombre === "string" && c.nombre.trim()) acciones.push(() => its[k].createSetNameAction(c.nombre));
+            if (c.apagado === true) acciones.push(() => its[k].createSetDisabledAction(true));
+            let extras = null;
+            if (acciones.length) {
+              try {
+                project.lockedAccess(() => {
+                  project.executeTransaction((a) => { for (const f of acciones) a.addAction(f()); }, "nombre y estado de la capa " + (i + 1));
+                });
+              } catch (e) { extras = e && e.message ? e.message : String(e); }
+            }
+            const quedoNombre = typeof c.nombre === "string" && c.nombre.trim()
+              ? String(await its[k].getName()) === c.nombre : null;
+            capasPuestas.push({
+              en: t.desde, hasta: t.hasta, pista: lugar.etiqueta, sinVideo: lugar.audio || undefined,
+              medio: mc.nombre, fuenteDesde: fuenteDesde,
+              nombre: typeof c.nombre === "string" ? String(await its[k].getName()) : undefined,
+              nombreQuedo: quedoNombre, apagado: c.apagado === true || undefined,
+              errorExtras: extras || undefined
+            });
+            if (quedoNombre === false) capasFallidas.push(`capa ${i + 1}: NO se renombró a "${c.nombre}"`);
+            // Un audio solo ya quedó apagado arriba: no tiene socios de audio que buscarle.
+            if (c.apagado === true && !lugar.audio) apagadasV.push({ capa: i + 1, item: its[k], puesta: capasPuestas[capasPuestas.length - 1] });
+            avance.capas = capasPuestas.length;
+            break;
+          }
         }
       }
-      if (!ok) capasFallidas.push(`capa ${i + 1} (${c.en}s): no tiró pero no apareció`);
+      if (!ok) capasFallidas.push(`capa ${i + 1} (${c.en}s): no tiró pero no apareció, ni en V${pistaIndex + 1} ni en A${pistaAudioIdx + 1}`);
     } catch (e) {
       capasFallidas.push(`capa ${i + 1} (${c.en}s): ${e && e.message ? e.message : e}`);
     }
@@ -2811,8 +2873,8 @@ async function armarSecuencia(params) {
   const capasRotas = [];
   for (const c of capasPuestas) {
     try {
-      const idx = Number(String(c.pista).replace("V", "")) - 1;
-      const track = await nueva.getVideoTrack(idx);
+      const idx = Number(String(c.pista).slice(1)) - 1;
+      const track = /^A/.test(c.pista) ? await nueva.getAudioTrack(idx) : await nueva.getVideoTrack(idx);
       const its = track ? await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
       let sigue = false;
       for (let k = 0; k < its.length; k++) {
@@ -3861,50 +3923,6 @@ async function insertar(params) {
  * lo que pasó. Y `addItem(clip, true)` NO los incluye: probado, el segundo
  * argumento es otra cosa.
  */
-/**
- * El audio que CUBRE el rango de un clip de video, aunque no coincida exacto.
- *
- * `buscarVinculados` exige que los ticks de inicio y fin sean idénticos, y eso
- * es lo correcto para `borrar` y `editar`: aflojarlo ahí agarraría clips que no
- * son el par. Pero rompe a `cortar` con `soloVideo`, que por diseño deja el
- * video partido y el audio entero — o sea que después del primer corte el par ya
- * no coincide, `audioAntes` queda vacío y la reparación no corre. No falla:
- * directamente no se ejecuta.
- *
- * Medido el 2026-08-16 con nueve cortes: **alineados 6 de 6 reparan,
- * desalineados 0 de 3**. Sin excepciones, y explica el "1 de cada 3" que se
- * venía viendo sin patrón — un corte exitoso desalinea el par y hace fallar al
- * siguiente de esa zona.
- */
-async function audioQueCubre(sequence, clip) {
-  const ini = Number((await clip.getStartTime()).ticks);
-  const fin = Number((await clip.getEndTime()).ticks);
-  let origen = null;
-  try { origen = String((await clip.getProjectItem()).name); } catch (e) { origen = null; }
-
-  const encontrados = [];
-  const cuantas = await sequence.getAudioTrackCount();
-  for (let t = 0; t < cuantas; t++) {
-    const track = await sequence.getAudioTrack(t);
-    if (!track) continue;
-    const items = await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
-    for (let i = 0; i < items.length; i++) {
-      const a = Number((await items[i].getStartTime()).ticks);
-      const b = Number((await items[i].getEndTime()).ticks);
-      // Que CONTENGA el rango del video, no que lo toque: un clip de audio que
-      // apenas se solapa es de otra toma, no el par de este.
-      if (a > ini + 1 || b < fin - 1) continue;
-      if (origen) {
-        let otro = null;
-        try { otro = String((await items[i].getProjectItem()).name); } catch (e) { otro = null; }
-        if (otro !== origen) continue;
-      }
-      encontrados.push(items[i]);
-    }
-  }
-  return encontrados;
-}
-
 /*
  * El vínculo se DEDUCE —la API no lo expone— por medio de origen y rango
  * iguales. Pero eso solo no alcanza, y el 2026-08-16 se midió por qué:
@@ -3923,9 +3941,7 @@ async function audioQueCubre(sequence, clip) {
  * se llevó puesto un Transparent Video del usuario en V1. Esa vez el resultado
  * dio bien de casualidad, porque los dos tenían la misma entrada.
  *
- * Por eso ahora se exige que el socio sea del OTRO tipo. `soloVideo` no usa
- * esta función —tiene `audioQueCubre`, que busca el audio que contiene el
- * rango— así que este cambio no lo toca.
+ * Por eso ahora se exige que el socio sea del OTRO tipo.
  *
  * El tipo se decide por LA PISTA donde está el clip, no por `getMediaType()`.
  * Se probó con el getter primero y salió al revés: los valores de
@@ -4148,6 +4164,40 @@ async function contarItems(sequence) {
 const BORRADOS_RECIENTES = [];
 const BORRAR_VENTANA_MS = 60000;
 const BORRAR_TOPE = 5;
+
+/*
+ * LO QUE BORRA POR DENTRO, Y NO ES `borrar` (2026-09-25). `vaciarSecuencia`, `unirAudio` y `unirVideo`
+ * sacan clips con `createRemoveItemsAction` sobre la selección VIVA, y la dejaban con los clips
+ * borrados adentro: el patrón que tiró Premiere en `borrar` el 2026-09-24 —la edición siguiente
+ * dispara el aviso de selección y Effect Controls lee un clip que ya no existe—. Y los dos `unir*`
+ * encima estiran el clip de al lado en la transacción siguiente, que es exactamente esa edición.
+ *
+ * `vaciarSeleccion` hace lo que `borrar` ya medía bien —6 de 6 sin crash—: saca los items, fija la
+ * selección, relee que quedó vacía y espera. `borradoPermitido` y `anotarBorrado` los hacen contar
+ * en la MISMA ventana que `borrar`: `unirAudio` barre todas las pistas, y barrer borrando es lo que
+ * tiró Premiere dos veces. Se cuenta lo que salió, no lo intentado.
+ */
+async function vaciarSeleccion(sequence, seleccion, items) {
+  let quedo = false;
+  try {
+    for (const it of items) {
+      try { seleccion.removeItem(it); } catch (e) { /* ya no estaba */ }
+    }
+    await sequence.setSelection(seleccion);
+    quedo = (await seleccion.getTrackItems()).length === 0;
+  } catch (e) { quedo = false; }
+  await esperarEntreTx();
+  return quedo;
+}
+
+function borradoPermitido() {
+  const ahoraMs = Date.now();
+  while (BORRADOS_RECIENTES.length && ahoraMs - BORRADOS_RECIENTES[0] > BORRAR_VENTANA_MS) BORRADOS_RECIENTES.shift();
+  if (BORRADOS_RECIENTES.length < BORRAR_TOPE) return { ok: true, libreEn: 0 };
+  return { ok: false, libreEn: Math.ceil((BORRAR_VENTANA_MS - (ahoraMs - BORRADOS_RECIENTES[0])) / 1000) };
+}
+
+function anotarBorrado() { BORRADOS_RECIENTES.push(Date.now()); }
 
 /**
  * Saca un clip del timeline.
@@ -4976,17 +5026,22 @@ async function keyframe(params) {
 
   const pedidos = Array.isArray(params.lista) && params.lista.length
     ? params.lista
-    : [{ segundos: aSegundos(playhead), valor: params.valor, x: params.x, y: params.y }];
+    : [{ segundos: aSegundos(playhead), valor: params.valor, db: params.db, x: params.x, y: params.y }];
+  const nivel = esNivelDeAudio(nombreEfecto, nombreParam);
 
   const puntos = [];
   for (let i = 0; i < pedidos.length; i++) {
     const e = pedidos[i];
+    if (e.db !== undefined && !nivel) {
+      throw new Error(`\`db\` es solo para Volume > Level; "${nombreEfecto} > ${nombreParam}" se escribe con \`valor\`. NO se escribió nada.`);
+    }
+    const v = nivel ? nivelPedido(e, `el keyframe ${i}`) : e.valor;
     let valor;
     if (typeof e.x === "number" && typeof e.y === "number") {
       valor = new ppro.PointF(e.x, e.y);
-    } else if (typeof e.valor === "number" || typeof e.valor === "boolean") {
+    } else if (typeof v === "number" || typeof v === "boolean") {
       // Booleano incluido: hay params que son casillas, como Volume > Mute.
-      valor = e.valor;
+      valor = v;
     } else {
       throw new Error(
         `El keyframe ${i} no trae ni "valor" ni el par x/y. Llegó: ${JSON.stringify(e)}. ` +
@@ -5050,6 +5105,7 @@ async function keyframe(params) {
   return {
     resumen:
       `${nombreEfecto} > ${nombreParam} en "${nombreClip}": keyframes ${antes} → ${despues}` +
+      (nivel ? ` · pedidos en ${puntos.map((x) => textoDb(x.valor)).join(", ")} · ${ESCALA_NIVEL}` : "") +
       (excepcion ? ` (excepción: ${excepcion})` : "") +
       (despues > antes
         ? ` en ${quedaron.join("s, ")}s` +
@@ -5801,6 +5857,7 @@ async function vaciarSecuencia(project, sequence) {
       a.addAction(editor.createRemoveItemsAction(seleccion, false, ppro.Constants.MediaType.ANY));
     }, "vaciar la secuencia");
   });
+  await vaciarSeleccion(sequence, seleccion, items);
 
   let quedan = 0;
   for (const g of grupos) {
@@ -6129,15 +6186,36 @@ async function analizar(params) {
 /**
  * Parte un clip en dos, en un tiempo de la secuencia.
  *
- * **La API no tiene razor**, así que se emula: se recorta la salida del clip
- * hasta el punto de corte y se vuelve a insertar el mismo medio, con la entrada
- * corrida, justo ahí. El resultado es indistinguible de un corte.
+ * **La API no tiene razor**, así que se emula, y LA COLA ES UN CLON DEL CLIP (2026-09-25). Se clona
+ * el clip —y cada uno de sus socios— pasado el final de la secuencia, al clon se le recorta el
+ * inicio hasta el punto de corte, al original el final, y el clon se corre a su lugar. Todo en
+ * tiempo de SECUENCIA: no se tocan los in/out del medio, no se pisa nada y no se borra nada.
  *
- * `SEQUENCE_OPERATION_APPLYCUT` no sirve para esto: es qué hacer con los cortes
- * que encuentra la detección de escenas, no un corte en un tiempo cualquiera.
+ * Hasta ese día la cola se REINSERTABA: `createOverwriteItemAction` con el medio entero. Eso no es
+ * el clip, es una instancia NUEVA del medio, y se pagó en un podcast, en un reporte de uso: partir una ISO
+ * de 6 streams puesta sin audio trajo SEIS clips de audio a A2–A7, prendidos y sonando encima del
+ * switch, y la cola volvió con el nombre del medio. Reproducido en el proyecto de prueba, donde
+ * además perdió su Lumetri. Y por el mismo camino, lo que el reporte no vio:
  *
- * Los VINCULADOS se recortan también. Sin eso, partir un video deja su audio
- * entero por debajo y el segundo pedazo queda sonando encima del primero.
+ *   - el audio iba a las pistas que ESPEJAN el video, lo tuviera o no el original, y el overwrite
+ *     PISA: con algo en esas pistas en ese tramo, se borraba sin aviso;
+ *   - la cola nacía con los componentes por defecto: sin efectos, sin el Essential Sound ni el
+ *     volumen de su audio, a 1x y prendida. Solo Scale y Position se reponían.
+ *
+ * El clon, medido ese día con las tres formas de la firma: es UN item —clonar el video no trae su
+ * audio— y trae el nombre, el apagado y los efectos con sus valores. Un clip de audio se clona a su
+ * misma pista. Así que el grupo se arma clonando cada socio, y la cola tiene exactamente el audio
+ * que tenía el original, en las mismas pistas. `createSetStartAction` recorta el borde izquierdo en
+ * tiempo de secuencia y Premiere calcula la entrada; `createMoveAction` toma un delta.
+ *
+ * EL COSTO, y se dice en cada corte que lo paga: **la cola queda SIN VÍNCULO en Premiere.** La API
+ * no crea vínculos —no hay un método en ninguna de sus 71 clases— y un clon nace suelto: leído en el
+ * `.prproj` guardado, que es donde Premiere guarda los grupos. El bridge los sigue emparejando por
+ * medio y rango, y a mano se vuelven a vincular con Cmd+L. El editor lo eligió antes que perder el
+ * procesamiento de la cola.
+ *
+ * `SEQUENCE_OPERATION_APPLYCUT` no sirve para esto: es qué hacer con los cortes que encuentra la
+ * detección de escenas, no un corte en un tiempo cualquiera.
  */
 async function cortar(params) {
   const { project, sequence } = await getProyectoYSecuencia();
@@ -6222,389 +6300,216 @@ async function cortar(params) {
     );
   }
 
-  let medio = null;
-  try { medio = await clip.getProjectItem(); } catch (e) { medio = null; }
-  if (!medio) throw new Error(`No se pudo llegar al medio de "${encontrado.nombre}".`);
-  let clipItem = null;
-  try { clipItem = ppro.ClipProjectItem.cast(medio); } catch (e) { clipItem = null; }
-  if (!clipItem) throw new Error(`No se pudo castear "${String(medio.name)}" a ClipProjectItem.`);
-
-  const vel = antes.velocidad === undefined ? 1 : 1;
-  // Dónde cae el corte dentro del MATERIAL, y qué queda para la cola.
-  const enFuente = antes.entrada + (t - antes.desde);
-  const finFuente = antes.entrada + (antes.hasta - antes.desde);
+  /*
+   * A OTRA VELOCIDAD NO SE CORTA. El clon y los recortes van en tiempo de secuencia, así que en
+   * teoría no dependen de ella, pero no está medido: ningún verbo la cambia y el proyecto de prueba
+   * no tiene un clip así. La reinserción de antes la ignoraba —la cola salía a 1x y con la entrada
+   * corrida— sin avisar. Rebotar antes de tocar nada es mejor que un corte que no se probó.
+   */
+  const velocidad = await velocidadDe(clip);
+  let alReves = false;
+  try { alReves = !!(await clip.isSpeedReversed()); } catch (e) { alReves = false; }
+  if (velocidad !== 1 || alReves) {
+    throw new Error(
+      `"${encontrado.nombre}" corre a ${velocidad === null ? "una velocidad que no se pudo leer" : velocidad + "x"}` +
+      (alReves ? " y al revés" : "") + ": `cortar` no está medido con otra velocidad, y NO se tocó nada. " +
+      "Partilo en Premiere con la C."
+    );
+  }
 
   /*
-   * `soloVideo` deja el audio de largo. Es lo correcto para un punch-in: el
-   * corte existe para cambiar la escala del video, y partir el audio ahí no
-   * aporta nada y agrega un empalme.
+   * EL GRUPO: el clip y sus socios del otro tipo, por `sociosDe`, el emparejado de `desactivar`:
+   * junta TODOS los streams de un multicanal y, con dos planos del mismo medio en el mismo instante,
+   * desempata por el in-point o no toca. Si el clip es de AUDIO, sus socios son su video y los otros
+   * streams de ese video. `soloVideo` no parte el audio: sigue entero debajo de las dos partes.
    *
-   * No se puede pedir "insertá sin audio": el cuarto argumento de
-   * createOverwriteItemAction en -1 igual lo trae (sigue sin saberse qué
-   * significa). Así que se corta normal y después se REPARA el audio: se saca el
-   * pedazo nuevo y se estira el anterior hasta donde llegaba.
+   * Con una duda se parte SOLO el clip pedido, y se dice: el audio queda entero debajo, que no
+   * desincroniza nada. Partir el audio de otro plano creyendo que es el de este sí.
    */
-  /*
-   * El Motion del clip ORIGINAL, leído antes de partir, para reponerlo después
-   * en la cola.
-   *
-   * `createOverwriteItemAction` no copia nada: la cola nace con Motion por
-   * defecto —escala 100, posición al centro—. En el M2 (2026-08-15) eso borró
-   * el escalado de **20 clips que ya estaban en 50**, y el verbo informó los
-   * cortes como exitosos, porque lo eran: partió bien y encima destruyó algo
-   * que no estaba mirando. De ahí la regla de contar el efecto COMPLETO.
-   *
-   * Se lee en el PUNTO DE CORTE. Con un clip sin animación eso es exactamente
-   * el valor del clip y la reposición queda perfecta, que es el caso que
-   * importa (la regla es cortar primero y escalar después).
-   *
-   * Con keyframes la cola arranca en el valor CORRECTO —el interpolado en el
-   * punto de corte— desde que `valorEnTiempo` usa `getValueAtTime`. Antes
-   * heredaba el del keyframe anterior y quedaba un salto contra la cabeza.
-   *
-   * Lo que sigue sin hacerse es continuar la ANIMACIÓN: la cola queda fija en
-   * ese valor en vez de seguir moviéndose. Se avisa, porque un clip que venía
-   * animándose y de golpe se congela es un cambio visible.
-   */
-  let motionAntes = null;
-  try {
-    const mo = await getComponente(clip, "Motion");
-    if (mo) {
-      const cual = getParametro(project, mo, "Scale") ? "Scale" : "Scale Height";
-      const pEsc = getParametro(project, mo, cual);
-      const pPos = getParametro(project, mo, "Position");
-      const reloj = await relojDelClip(clip);
-      const enCorte = reloj.aMaterial(tickCorte);
-      motionAntes = {
-        cual: cual,
-        escala: pEsc ? aNumero(await valorEnTiempo(project, pEsc, enCorte)) : null,
-        pos: pPos ? aPunto(await valorEnTiempo(project, pPos, enCorte)) : null,
-        animado:
-          (pEsc ? contarKeyframes(project, pEsc) : 0) > 0 ||
-          (pPos ? contarKeyframes(project, pPos) : 0) > 0
-      };
-    }
-  } catch (e) { motionAntes = null; }
-
   const soloVideo = params.soloVideo === true;
-  const vinculados = soloVideo ? [] : await buscarVinculados(sequence, clip);
-  const audioAntes = [];
-  if (soloVideo) {
-    // `audioQueCubre` y no `buscarVinculados`: ver el comentario de esa función.
-    // Con la búsqueda estricta, el segundo corte de una misma zona no reparaba.
-    for (const v of await audioQueCubre(sequence, clip)) audioAntes.push({ item: v, t: await tiemposDe(v) });
-  }
-  const contar = async () => (await contarItems(sequence)).total;
-  const itemsAntes = await contar();
-
-  // 1) Recortar el clip (y sus vinculados) hasta el punto de corte.
-  let excepcion = null;
-  try {
-    project.lockedAccess(() => {
-      project.executeTransaction((a) => {
-        // El tick YA cuantizado, no aTick(t): reconvertir desde segundos vuelve a
-        // meter el redondeo que se acaba de sacar.
-        a.addAction(clip.createSetEndAction(tickCorte));
-        for (let i = 0; i < vinculados.length; i++) a.addAction(vinculados[i].createSetEndAction(tickCorte));
-      }, "recortar para partir");
-    });
-  } catch (e) { excepcion = "recortar: " + (e && e.message ? e.message : e); }
-
-  /*
-   * 2) Reinsertar la cola DONDE EL CLIP TERMINÓ DE VERDAD, no donde se pidió el
-   *    corte.
-   *
-   * createSetEndAction ajusta el final al frame más cercano y el overwrite ajusta
-   * el inicio por su cuenta: si se usa el tiempo pedido para las dos cosas, entre
-   * ellas queda un frame suelto. Con 32 cortes eso dejó 17 huecos de 1 a 1,5
-   * frames — parpadeos negros. Leer el final real y usarlo cierra la junta.
-   */
-  const pistaIndex = parseInt(encontrado.pista.slice(1), 10) - 1;
-  const trasRecorte = await tiemposDe(clip);
-  const junta = trasRecorte.hasta;
-  /*
-   * El TickTime EXACTO del final, sin pasar por segundos, que es donde se va a
-   * pegar la cola.
-   *
-   * `junta` sirve para las cuentas y para el informe, pero NO para posicionar:
-   * viene de `tiemposDe`, que redondea a 3 decimales, y `aTick` redondea
-   * segundos a ticks. Un final real de 329.8799… se vuelve 329.88 y en ticks
-   * queda un pelo por encima del frame, así que Premiere empuja la cola al
-   * siguiente: **un frame de hueco**.
-   *
-   * Medido el 2026-08-16 cortando en 329.9 —entre dos frames— sobre una
-   * secuencia a 25fps: cabeza hasta 329.88, cola desde 329.92. Es el mismo
-   * hueco de 1 frame que apareció siete veces en el M1, donde los puntos de
-   * corte salían de tiempos de palabras y casi ninguno caía sobre un frame.
-   */
-  const juntaTick = await clip.getEndTime();
-  const enFuenteReal = antes.entrada + (junta - antes.desde);
-  /*
-   * Los in/out del PROJECT ITEM son de todo el proyecto, no de este corte.
-   *
-   * Para armar la cola hay que escribirlos, pero si quedan puestos ensucian el
-   * medio para cualquier cosa que después cree una secuencia desde él. Con eso,
-   * `mirarMedio` sobre un medio ya cortado devolvía todos los cuadros iguales:
-   * el tiempo pedido le daba NEGATIVO —la temporal arrancaba en el in-point que
-   * dejó el último corte— y el clamp a 0 los aplastaba a todos al mismo frame.
-   *
-   * La aridad que reporta `getInPoint` es 1 y puede estar mintiendo, así que se
-   * prueban las dos formas y el resumen informa qué se pudo hacer. Si no se
-   * pueden leer, se limpian: un medio sin in/out es el estado neutro, y dejarlos
-   * como los dejó el corte no lo es.
-   */
-  /*
-   * Los getters van AWAITED y FUERA del lock. Llamados adentro y sin await
-   * devuelven una Promise, que es truthy: la guarda `if (i && o)` la daba por
-   * buena y `createSetInOutPointsAction` contestaba "Illegal Parameter type".
-   * Un valor equivocado que pasa la guarda es peor que no leer nada.
-   */
-  /* Con `leerInOut`: sin argumento `getInPoint` NO lee (medido el 2026-09-24), así que esto caía
-     siempre a limpiar, y un still cortado quedaba con el generador entero, doce horas. */
-  const inOutPrevios = await leerInOut(clipItem);
-
-  let inOutRestaurado = null;
-  try {
-    project.lockedAccess(() => {
-      project.executeTransaction((a) => {
-        a.addAction(clipItem.createSetInOutPointsAction(aTick(enFuenteReal), aTick(finFuente)));
-      }, "entrada y salida de la cola");
-    });
-    const editor = ppro.SequenceEditor.getEditor(sequence);
-    project.lockedAccess(() => {
-      project.executeTransaction((a) => {
-          // el audio de la cola va a la pista que espeja su video, no a A1
-        a.addAction(editor.createOverwriteItemAction(medio, juntaTick, pistaIndex, pistaIndex));
-      }, "pegar la cola");
-    });
-
-    /*
-     * Devolver el medio a como estaba, ya con la cola pegada.
-     *
-     * Se mira el booleano de `executeTransaction` Y SE VUELVE A LEER. La primera
-     * versión de esto informaba "limpiados" apenas la llamada no tiraba, y no
-     * limpiaba nada: los medios quedaban con el in/out del corte y el verbo
-     * decía que estaban bien. Un verbo que miente sobre lo que hizo es peor que
-     * uno que no lo hace.
-     */
-    try {
-      let corrio = false;
-      project.lockedAccess(() => {
-        corrio = project.executeTransaction((a) => {
-          if (inOutPrevios) {
-            a.addAction(clipItem.createSetInOutPointsAction(inOutPrevios.entrada, inOutPrevios.salida));
-          } else {
-            a.addAction(clipItem.createClearInOutPointsAction());
-          }
-        }, "devolver los in/out del medio");
-      });
-      let quedo = null;
-      const releido = await leerInOut(clipItem);
-      if (releido) quedo = Number((Number(releido.salida.ticks) - Number(releido.entrada.ticks)) / TICKS_POR_SEGUNDO).toFixed(2) + "s";
-      inOutRestaurado =
-        (corrio ? (inOutPrevios ? "restaurados" : "limpiados") : "LA TRANSACCION NO CORRIO") +
-        (quedo !== null ? ` (el medio quedó abarcando ${quedo})` : " (no se pudo releer para confirmar)");
-    } catch (e) { inOutRestaurado = "NO SE PUDO: " + (e && e.message ? e.message : e); }
-  } catch (e) { excepcion = (excepcion ? excepcion + " · " : "") + "reinsertar: " + (e && e.message ? e.message : e); }
-
-  // Reponer en la cola el Motion que se leyó del original (ver arriba por qué).
-  let motionRepuesto = null;
-  if (motionAntes && (motionAntes.escala !== null || motionAntes.pos)) {
-    try {
-      const trk = await sequence.getVideoTrack(pistaIndex);
-      const its = trk ? await trk.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
-      let cola = null;
-      for (let i = 0; i < its.length; i++) {
-        const x = await tiemposDe(its[i]);
-        if (Math.abs(x.desde - junta) <= 0.05) { cola = its[i]; break; }
-      }
-      if (!cola) throw new Error(`no se encontró la cola en ${junta.toFixed(3)}s`);
-      const mo = await getComponente(cola, "Motion");
-      if (!mo) throw new Error("la cola no tiene Motion");
-      const pEsc = getParametro(project, mo, motionAntes.cual);
-      const pPos = getParametro(project, mo, "Position");
-      let kE = null, kP = null;
-      project.lockedAccess(() => {
-        if (pEsc && motionAntes.escala !== null) kE = pEsc.createKeyframe(motionAntes.escala);
-        if (pPos && motionAntes.pos) kP = pPos.createKeyframe(new ppro.PointF(motionAntes.pos.x, motionAntes.pos.y));
-      });
-      let corrioMotion = false;
-      project.lockedAccess(() => {
-        corrioMotion = project.executeTransaction((a) => {
-          if (kE) a.addAction(pEsc.createSetValueAction(kE));
-          if (kP) a.addAction(pPos.createSetValueAction(kP));
-        }, "reponer el Motion en la cola");
-      });
-      /*
-       * SE RELEE LA COLA. Esto informaba `motionAntes` —los valores del clip que se
-       * CORTÓ— así que el resumen afirmaba "Motion repuesto en la cola (escala 80,
-       * x 0.5453, y 0.66)" sin haber mirado la cola ni una vez, y con el booleano
-       * de la transacción tirado.
-       *
-       * Y es justo el daño que este bloque existe para prevenir: 20 clips del M2
-       * escalados a 50 que volvieron a 100 sin aviso. Afirmarlo sin leerlo lo
-       * vuelve peor que no decir nada, porque en una tanda de cortes nadie lo mira
-       * clip por clip — el defecto original se descubrió mirando el video.
-       */
-      const relojCola = await relojDelClip(cola);
-      const enCola = relojCola.aMaterial(aTick(junta));
-      const escalaReal = pEsc ? aNumero(await valorEnTiempo(project, pEsc, enCola)) : null;
-      const posReal = pPos ? aPunto(await valorEnTiempo(project, pPos, enCola)) : null;
-      const cerca = (a, b) => a === null || b === null ? a === b : Math.abs(a - b) < 0.01;
-      motionRepuesto = {
-        transaccion: corrioMotion,
-        escala: escalaReal,
-        x: posReal ? posReal.x : null,
-        y: posReal ? posReal.y : null,
-        pedido: {
-          escala: motionAntes.escala,
-          x: motionAntes.pos ? motionAntes.pos.x : null,
-          y: motionAntes.pos ? motionAntes.pos.y : null
-        },
-        coincide: cerca(escalaReal, motionAntes.escala) &&
-          cerca(posReal ? posReal.x : null, motionAntes.pos ? motionAntes.pos.x : null) &&
-          cerca(posReal ? posReal.y : null, motionAntes.pos ? motionAntes.pos.y : null)
-      };
-    } catch (e) {
-      excepcion = (excepcion ? excepcion + " · " : "") + "reponer Motion: " + (e && e.message ? e.message : e);
-    }
-  }
-
-  // Reparar el audio: sacar el pedazo que trajo la inserción y estirar el anterior.
-  const reparado = [];
-  const falloReparar = [];
-  if (soloVideo) {
-    for (const a of audioAntes) {
-      try {
-        const naudio = await sequence.getAudioTrackCount();
-        for (let at = 0; at < naudio; at++) {
-          const tr = await sequence.getAudioTrack(at);
-          if (!tr) continue;
-          const its = await tr.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
-          for (let k = 0; k < its.length; k++) {
-            const x = await tiemposDe(its[k]);
-            /*
-             * El pedazo nuevo arranca en la junta. Y NADA MÁS que eso.
-             *
-             * Antes se exigía además que terminara donde terminaba el audio
-             * original, y eso sólo pasa cuando el clip de video que se corta
-             * llega hasta el final del audio. En una edición de verdad el audio
-             * es largo y tiene varios clips de video encima, así que la cola
-             * insertada termina ANTES: la condición no matcheaba, no se reparaba
-             * nada, y el verbo lo informaba como "sin reparar" mientras A1 se
-             * llenaba de pedazos.
-             *
-             * Reproducido el 2026-08-16: clip 305–312 sobre audio 300–330,
-             * cortando en 310. La cola quedó en 310–312 y se comparaba 312
-             * contra 330.
-             */
-            if (Math.abs(x.desde - junta) < 0.06 && x.hasta <= a.t.hasta + 0.06) {
-              const sel = await sequence.getSelection();
-              const prev = await sel.getTrackItems();
-              for (let z = 0; z < prev.length; z++) sel.removeItem(prev[z]);
-              sel.addItem(its[k], false);
-              const ed = ppro.SequenceEditor.getEditor(sequence);
-              let okSacar = false, okEstirar = false;
-              project.lockedAccess(() => {
-                okSacar = project.executeTransaction((ac) => {
-                  ac.addAction(ed.createRemoveItemsAction(sel, false, ppro.Constants.MediaType.ANY));
-                }, "sacar el audio partido");
-              });
-              /*
-               * Se estira hasta donde terminaba EL PEDAZO, no hasta el final
-               * del audio original: si el audio seguía más allá, ese resto
-               * sigue ahí y estirar por encima se solaparía.
-               */
-              project.lockedAccess(() => {
-                okEstirar = project.executeTransaction((ac) => {
-                  ac.addAction(a.item.createSetEndAction(aTick(x.hasta)));
-                }, "estirar el audio");
-              });
-
-              /*
-               * Y ACÁ SE MIRA SI QUEDÓ, que es lo que faltaba.
-               *
-               * Antes el push era incondicional: alcanzaba con que las dos
-               * llamadas no tiraran para informar "audio reparado". Es el modo
-               * de fallar nº1 de CLAUDE.md, y explica la discrepancia del M1
-               * —informó 10 reparados de 13 y A1 ganó 6 clips, cuando 3 fallos
-               * explican 3—: parte de esos 10 nunca reparó y nadie se enteró.
-               *
-               * La prueba no es el booleano de la transacción sino el estado:
-               * que el clip vuelva a llegar hasta donde llegaba.
-               */
-              const quedo = await tiemposDe(a.item);
-              if (Math.abs(quedo.hasta - x.hasta) < 0.06) {
-                reparado.push(x.hasta);
-              } else {
-                falloReparar.push(
-                  `${a.t.desde}–${a.t.hasta}s quedó en ${quedo.desde}–${quedo.hasta}s` +
-                  (okSacar ? "" : " · no se pudo sacar el pedazo") +
-                  (okEstirar ? "" : " · no se pudo estirar")
-                );
-              }
-            }
-          }
-        }
-      } catch (e) {
-        falloReparar.push(`${a.t.desde}–${a.t.hasta}s: ${e && e.message ? e.message : e}`);
+  let socios = [];
+  let duda = null;
+  if (!soloVideo) {
+    if (!encontrado.esAudio) {
+      const s = (await sociosDe(sequence, [clip], true))[0];
+      socios = s.socios;
+      duda = s.motivo;
+    } else {
+      const v = (await sociosDe(sequence, [clip], false))[0];
+      duda = v.motivo;
+      if (v.socios.length > 1) {
+        duda = `"${encontrado.nombre}" empareja con ${v.socios.length} planos de video en el mismo instante`;
+      } else if (v.socios.length === 1) {
+        const a = (await sociosDe(sequence, [v.socios[0].clip], true))[0];
+        duda = a.motivo;
+        const otros = a.socios.filter((x) => x.pista !== encontrado.pista || x.indice !== encontrado.indice);
+        if (!duda) socios = [v.socios[0]].concat(otros);
       }
     }
   }
+  const miembros = [{ item: clip, pista: encontrado.pista, nombre: encontrado.nombre }]
+    .concat(socios.map((s) => ({ item: s.clip, pista: s.pista, nombre: null })));
+  const pistaDe = async (etq) => {
+    const m = /^([VA])(\d+)$/.exec(etq);
+    const i = Number(m[2]) - 1;
+    return m[1] === "V" ? sequence.getVideoTrack(i) : sequence.getAudioTrack(i);
+  };
+  const deClips = async (etq) => {
+    const tr = await pistaDe(etq);
+    return tr ? await tr.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
+  };
 
-  // La prueba: dos clips donde había uno, pegados y con las entradas correctas.
-  const track = await sequence.getVideoTrack(pistaIndex);
-  const items = track ? await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
-  const cerca = [];
-  for (let i = 0; i < items.length; i++) {
-    const x = await tiemposDe(items[i]);
-    if (x.hasta > antes.desde - 0.05 && x.desde < antes.hasta + 0.05) {
-      cerca.push({ desde: x.desde, hasta: x.hasta, entrada: x.entrada });
-    }
+  /*
+   * DÓNDE SE ESTACIONAN LOS CLONES: un segundo después del final, en cuadro. Ahí no hay nada en
+   * ninguna pista, y un clon es un overwrite: estacionado ahí no pisa nada. Se toma el mayor entre
+   * el final de la secuencia y el del último clip de cada pista del grupo, por si `getEndTime`
+   * contara solo una parte. Los clips de una pista vienen en orden, así que el último es el último.
+   */
+  let tpf = null;
+  try { tpf = Number(await sequence.getTimebase()); } catch (e) { tpf = null; }
+  const paso = isFinite(tpf) && tpf > 0 ? tpf : TICKS_POR_SEGUNDO;
+  let finTicks = Number((await sequence.getEndTime()).ticks);
+  for (const m of miembros) {
+    const its = await deClips(m.pista);
+    const ultimo = its.length ? its[its.length - 1] : null;
+    if (ultimo) finTicks = Math.max(finTicks, Number((await ultimo.getEndTime()).ticks));
   }
-  cerca.sort((a, b) => a.desde - b.desde);
-  const pegados = cerca.length >= 2 && Math.abs(cerca[1].desde - cerca[0].hasta) < 0.05;
-  const itemsDespues = await contar();
+  const parqueTicks = Math.ceil((finTicks + TICKS_POR_SEGUNDO) / paso) * paso;
+  const inicioTicks = Number((await clip.getStartTime()).ticks);
+  const finClipTicks = Number((await clip.getEndTime()).ticks);
+  const corteTicks = Number(tickCorte.ticks);
+  const tk = (n) => ppro.TickTime.createWithTicks(String(Math.round(n)));
+  const seg = (n) => Number((n / TICKS_POR_SEGUNDO).toFixed(3));
+  // Medio milisegundo: la API guarda el tick exacto; esto es solo para no comparar floats a ciegas.
+  const TOL = TICKS_POR_SEGUNDO / 2000;
+  const cerca = (a, b) => Math.abs(a - b) <= TOL;
+
+  const itemsAntes = (await contarItems(sequence)).total;
+  const trPrincipal = await pistaDe(encontrado.pista);
+  const contarTransiciones = async () => {
+    try { return (await trPrincipal.getTrackItems(ppro.Constants.TrackItemType.TRANSITION, false)).length; }
+    catch (e) { return null; }
+  };
+  const transicionesAntes = await contarTransiciones();
+
+  /*
+   * Cada paso es una transacción aparte y se RELEE antes del siguiente: un paso que no entró no
+   * deja al siguiente trabajar sobre un estado que no existe. Si algo falla, se dice qué quedó
+   * dónde y cuántos Cmd+Z lo deshacen, que son las transacciones que corrieron. De a
+   * `TOPE_LOTE`, y espaciadas: `enLotes` espacia sus lotes y `esperarEntreTx` los pasos.
+   */
+  let transacciones = 0;
+  const correr = async (fabricas, nombre) => {
+    const r = await enLotes(project, fabricas.map((f) => [f]), nombre);
+    transacciones += r.corrieron;
+    return r;
+  };
+  const deshacer = () => (transacciones ? ` · ${transacciones} Cmd+Z lo deshace${transacciones > 1 ? "n" : ""}` : " · no corrió ninguna transacción");
+  const fallar = (que, estado) => {
+    const e = new Error(`NO SE PARTIÓ "${encontrado.nombre}" en ${encontrado.pista}: ${que}` +
+      (estado ? ` · ${estado}` : "") + deshacer());
+    e.quedoAMedias = transacciones > 0;
+    throw e;
+  };
+  const estacionados = (n) => `quedaron ${n} clon(es) ESTACIONADOS en ${seg(parqueTicks)}s, pasado el final de la secuencia`;
+
+  // 1) Clonar el grupo, estacionado.
+  const ed = ppro.SequenceEditor.getEditor(sequence);
+  const offTicks = parqueTicks - inicioTicks;
+  const r1 = await correr(miembros.map((m) => () => ed.createCloneTrackItemAction(m.item, tk(offTicks), 0, 0)),
+    "cortar: clonar la cola");
+  const clones = [];
+  for (const m of miembros) {
+    const its = await deClips(m.pista);
+    const ultimo = its.length ? its[its.length - 1] : null;
+    const aca = ultimo && cerca(Number((await ultimo.getStartTime()).ticks), parqueTicks) ? ultimo : null;
+    clones.push(aca);
+  }
+  const faltan = miembros.filter((m, i) => !clones[i]).map((m) => m.pista);
+  if (faltan.length) {
+    fallar(`no apareció el clon en ${faltan.join(", ")}` + (r1.errores.length ? ` (${r1.errores.join(" | ")})` : ""),
+      estacionados(clones.filter(Boolean).length));
+  }
+
+  // 2) Recortarles el inicio hasta el punto de corte, todavía estacionados.
+  await esperarEntreTx();
+  const inicioCola = parqueTicks + (corteTicks - inicioTicks);
+  const r2 = await correr(clones.map((c) => () => c.createSetStartAction(tk(inicioCola))), "cortar: recortar la cola");
+  const iniciosCola = [];
+  for (const c of clones) iniciosCola.push(Number((await c.getStartTime()).ticks));
+  const malRecortados = miembros.filter((m, i) => !cerca(iniciosCola[i], inicioCola)).map((m) => m.pista);
+  if (malRecortados.length) {
+    fallar(`el inicio de la cola no quedó en el corte en ${malRecortados.join(", ")}` +
+      (r2.errores.length ? ` (${r2.errores.join(" | ")})` : ""), estacionados(clones.length));
+  }
+
+  // 3) Recortar el original —y sus socios— hasta el punto de corte: la cabeza.
+  await esperarEntreTx();
+  const r3 = await correr(miembros.map((m) => () => m.item.createSetEndAction(tickCorte)), "cortar: recortar la cabeza");
+  const malCabeza = [];
+  for (const m of miembros) {
+    if (!cerca(Number((await m.item.getEndTime()).ticks), corteTicks)) malCabeza.push(m.pista);
+  }
+  if (malCabeza.length) {
+    fallar(`la cabeza no quedó cortada en ${malCabeza.join(", ")}` + (r3.errores.length ? ` (${r3.errores.join(" | ")})` : ""),
+      estacionados(clones.length));
+  }
+
+  // 4) Correr la cola a su lugar, con el delta que sale del inicio RELEÍDO de cada clon.
+  await esperarEntreTx();
+  const r4 = await correr(clones.map((c, i) => () => c.createMoveAction(tk(corteTicks - iniciosCola[i]))), "cortar: pegar la cola");
+  const colas = [];
+  for (const c of clones) colas.push(await tiemposDe(c));
+  const malPegados = miembros.filter((m, i) => !(Math.abs(colas[i].desde - t) < 0.001 && Math.abs(colas[i].hasta - antes.hasta) < 0.001))
+    .map((m, i) => m.pista);
+  if (malPegados.length) {
+    fallar(`la cola no quedó en ${t}–${antes.hasta}s en ${malPegados.join(", ")}` + (r4.errores.length ? ` (${r4.errores.join(" | ")})` : ""),
+      `OJO: la cabeza ya está cortada, así que entre ${t} y ${antes.hasta}s puede haber un HUECO`);
+  }
+
+  /*
+   * LA PRUEBA, releída y no deducida: la cabeza y la cola pegadas, la entrada de la cola donde
+   * sigue el material, el nombre, y el conteo de TODA la secuencia contra lo esperado —un item más
+   * por miembro del grupo—. Ese conteo es justo lo que delató el reporte: 27 → 34 donde tocaba 28.
+   */
+  const cabeza = await tiemposDe(clip);
+  const cola = colas[0];
+  const entradaEsperada = Number((antes.entrada + (t - antes.desde)).toFixed(3));
+  const entradaBien = Math.abs(cola.entrada - entradaEsperada) < 0.001;
+  const pegados = Math.abs(cola.desde - cabeza.hasta) < 0.001;
+  const nombreCola = String(await clones[0].getName());
+  const itemsDespues = (await contarItems(sequence)).total;
+  const itemsEsperados = itemsAntes + miembros.length;
+  const transicionesDespues = await contarTransiciones();
+  const partes = [
+    { desde: cabeza.desde, hasta: cabeza.hasta, entrada: cabeza.entrada },
+    { desde: cola.desde, hasta: cola.hasta, entrada: cola.entrada }
+  ];
+  const deAudio = miembros.filter((m) => /^A/.test(m.pista)).map((m) => m.pista);
 
   return {
     resumen:
       `"${encontrado.nombre}" en ${encontrado.pista}: ${antes.desde}-${antes.hasta}s → ` +
-      cerca.map((c) => `${c.desde}-${c.hasta}s (entrada ${c.entrada})`).join(" + ") +
-      ` · items en la secuencia ${itemsAntes} → ${itemsDespues}` +
-      (cerca.length < 2 ? " · NO SE PARTIÓ" : pegados ? "" : " · OJO: quedó un hueco entre las partes") +
+      partes.map((c) => `${c.desde}-${c.hasta}s (entrada ${c.entrada})`).join(" + ") +
+      (pegados ? "" : " · OJO: quedó un hueco entre las partes") +
+      (entradaBien ? "" : ` · OJO: la cola arranca en ${cola.entrada} del material y tocaba ${entradaEsperada}`) +
+      " · la cola es un CLON: trae efectos, nombre y apagado del original" +
+      (nombreCola === encontrado.nombre ? "" : ` · OJO: la cola se llama "${nombreCola}"`) +
       (soloVideo
-        ? ` · audio ${
-            falloReparar.length
-              ? `NO SE REPARÓ (${falloReparar.join(" | ")})`
-              : reparado.length
-                ? "reparado (sigue de largo), verificado releyéndolo"
-                : audioAntes.length
-                  ? "SIN REPARAR: no se encontró el pedazo partido"
-                  : "SIN REPARAR: no se encontró audio que cubriera el clip"
-          }`
+        ? " · soloVideo: el audio sigue entero debajo"
+        : duda
+          ? ` · OJO: ${duda}. Se partió SOLO este clip: el audio sigue entero debajo`
+          : miembros.length > 1
+            ? ` · partido con ${miembros.length - 1} socio(s) (${miembros.slice(1).map((m) => m.pista).join(", ")}), en sus mismas pistas`
+            : encontrado.esAudio ? " · sin video vinculado: se partió solo este clip" : " · sin audio vinculado: la cola tampoco lleva") +
+      ` · items en la secuencia ${itemsAntes} → ${itemsDespues}` +
+      (itemsDespues === itemsEsperados ? "" : ` · OJO: se esperaban ${itemsEsperados}`) +
+      (transicionesAntes !== null && transicionesDespues !== null && transicionesAntes !== transicionesDespues
+        ? ` · OJO: ${encontrado.pista} tenía ${transicionesAntes} transición(es) y quedaron ${transicionesDespues}` : "") +
+      (miembros.length > 1
+        ? ` · la cola queda SIN VÍNCULO en Premiere: la API no crea vínculos. El bridge la sigue emparejando por medio y rango; a mano, Cmd+L`
         : "") +
-      /*
-       * Se informa SIEMPRE, incluso cuando no había nada que reponer: si el
-       * verbo callara en ese caso, el silencio se leería como "no hizo falta"
-       * y es justo el punto ciego que costó 20 clips.
-       */
-      (motionAntes === null
-        ? " · OJO: no se pudo leer el Motion del original, la cola puede haber quedado en 100"
-        : motionRepuesto
-        ? ` · Motion en la cola, RELEÍDO (escala ${motionRepuesto.escala}` +
-          (motionRepuesto.x !== null ? `, x ${motionRepuesto.x}, y ${motionRepuesto.y}` : "") + ")" +
-          (motionRepuesto.coincide
-            ? ""
-            : ` · NO QUEDÓ COMO EL ORIGINAL (escala ${motionRepuesto.pedido.escala}` +
-              (motionRepuesto.pedido.x !== null ? `, x ${motionRepuesto.pedido.x}, y ${motionRepuesto.pedido.y}` : "") +
-              `), transacción ${motionRepuesto.transaccion} — la cola perdió el escalado`) +
-          (motionAntes.animado
-            ? " · OJO: el original tenía KEYFRAMES. La cola arranca en el valor correcto del punto de corte" +
-              " (no hay salto), pero queda FIJA ahí: la animación no sigue. Si tiene que seguir moviéndose," +
-              " hay que rehacerla sobre las dos partes"
-            : "")
-        : " · el original no tenía Motion que reponer") +
-      (inOutRestaurado ? ` · in/out del medio ${inOutRestaurado}` : "") +
+      ` · ${transacciones} Cmd+Z lo deshace${transacciones > 1 ? "n" : ""}` +
       /* `cuantizado` dice CUANTO se movio el corte para caer en cuadro. Hasta el
          2026-09-19 esta linea decia `dichos`, que es una variable de `editarMarcador`
          y aca no existe: el verbo cortaba, reponia el Motion y limpiaba los in/out, y
@@ -6612,21 +6517,21 @@ async function cortar(params) {
          un error y concluia que no habia pasado nada — un FALSO NEGATIVO sobre un corte
          que si ocurrio, que es lo que hace que alguien reintente y corte dos veces.
          Y de paso el dato no llegaba al resumen, que es lo mismo que no tenerlo. */
-      (cuantizado ? ` · ${cuantizado}` : "") +
-      (excepcion ? ` · ${excepcion}` : ""),
+      (cuantizado ? ` · ${cuantizado}` : ""),
     clip: encontrado.nombre,
-    partes: cerca,
-    partio: cerca.length >= 2,
+    partes: partes,
+    partio: true,
     pegados: pegados,
+    entradaBien: entradaBien,
     cuantizado: cuantizado,
-    audioCubriendo: audioAntes.length,
-    audioReparado: reparado.length,
-    audioFallado: falloReparar,
-    vinculadosRecortados: vinculados.length,
-    motionRepuesto: motionRepuesto,
-    inOutDelMedio: inOutRestaurado,
-    motionAnimado: motionAntes ? motionAntes.animado : null,
-    excepcion: excepcion
+    socios: miembros.slice(1).map((m) => m.pista),
+    audioPartido: deAudio,
+    duda: duda,
+    sinVinculo: miembros.length > 1,
+    itemsAntes: itemsAntes,
+    itemsDespues: itemsDespues,
+    itemsEsperados: itemsEsperados,
+    transacciones: transacciones
   };
 }
 
@@ -6682,6 +6587,7 @@ async function sacarRangos(params) {
 
   const hechos = [];
   const fallidos = [];
+  let frenado = false;
 
   for (let i = 0; i < rangos.length; i++) {
     const r = rangos[i];
@@ -6713,6 +6619,10 @@ async function sacarRangos(params) {
       hechos.push({ desde: r.desde, hasta: r.hasta, quito: Number((r.hasta - r.desde).toFixed(3)) });
     } catch (e) {
       fallidos.push(`${r.desde}-${r.hasta}s: ${e && e.message ? e.message : e}`);
+      /* Un corte que quedó A MEDIAS —clones estacionados pasado el final, o una cabeza cortada sin
+         su cola— no se tapa con los rangos que siguen: cada operación de más aleja el Cmd+Z que lo
+         deshace. Se frena acá, con el estado dicho en el error. */
+      if (e && e.quedoAMedias) { frenado = true; break; }
     }
   }
 
@@ -6734,9 +6644,11 @@ async function sacarRangos(params) {
        */
       (Math.abs(real - pedido) > 0.15 + hechos.length * 0.02 ? " · OJO: no coinciden" : "") +
       ` · items ${antesTotal} → ${despuesTotal}` +
-      (fallidos.length ? ` · NO SE PUDO: ${fallidos.join(" | ")}` : ""),
+      (fallidos.length ? ` · NO SE PUDO: ${fallidos.join(" | ")}` : "") +
+      (frenado ? " · SE FRENÓ: un corte quedó a medias y los rangos que seguían NO se tocaron" : ""),
     hechos: hechos,
     fallidos: fallidos,
+    frenado: frenado,
     duracionAntes: Number(duracionAntes.toFixed(3)),
     duracionDespues: Number(duracionDespues.toFixed(3)),
     sacadoReal: Number(real.toFixed(3))
@@ -7420,10 +7332,16 @@ async function fijar(params) {
    * si la API los toma; el verbo lo averigua solo, porque lee antes y después y
    * avisa cuando no quedó lo que se pidió.
    */
+  const nivel = esNivelDeAudio(efecto, cual);
+  if (params.db !== undefined && !nivel) {
+    throw new Error(`\`db\` es solo para Volume > Level, el único param con la escala medida; "${efecto} > ${cual}" ` +
+      "se escribe con `valor`. NO se escribió nada.");
+  }
+  const pedido = nivel ? nivelPedido(params, `${efecto} > ${cual}`) : params.valor;
   let valor;
-  const esTexto = typeof params.valor === "string";
+  const esTexto = typeof pedido === "string";
   if (typeof params.x === "number" && typeof params.y === "number") valor = new ppro.PointF(params.x, params.y);
-  else if (typeof params.valor === "number" || typeof params.valor === "boolean" || esTexto) valor = params.valor;
+  else if (typeof pedido === "number" || typeof pedido === "boolean" || esTexto) valor = pedido;
   else throw new Error(`Falta "valor" o el par x/y para ${cual}.`);
 
   const antes = await valorEnTiempo(project, p, await encontrado.clip.getStartTime());
@@ -7448,19 +7366,26 @@ async function fijar(params) {
   const leido = cual === "Position" ? aPunto(despues)
     : esTexto ? (despues && despues.value !== undefined ? despues.value : despues)
     : aNumero(despues);
-  const esperado = cual === "Position" ? { x: params.x, y: params.y } : params.valor;
+  const esperado = cual === "Position" ? { x: params.x, y: params.y } : pedido;
+  /* La tolerancia es RELATIVA. Era 0,5 absoluto, y en Level —que va de 0 a 1— eso daba por quedado
+     cualquier cosa: pedir 0,02 y que siguiera en 0,1778 se informaba bien. En Level se compara en dB. */
   const quedo = cual === "Position"
     ? leido && Math.abs(leido.x - params.x) < 0.002 && Math.abs(leido.y - params.y) < 0.002
-    : esTexto ? String(leido) === String(params.valor)
-    : leido !== null && Math.abs(leido - params.valor) < 0.5;
+    : esTexto ? String(leido) === String(pedido)
+    : leido === null ? false
+    : nivel ? (pedido === 0 ? leido === 0 : Math.abs(crudoADb(leido) - crudoADb(pedido)) < 0.05)
+    : Math.abs(leido - pedido) <= Math.max(1e-4, Math.abs(pedido) * 1e-3);
+  const conDb = (x) => (nivel && typeof x === "number" ? `${JSON.stringify(x)} (${textoDb(x)})` : JSON.stringify(x));
 
   return {
     resumen:
       `${efecto} > ${cual} en "${nombreClip}" (${encontrado.pista}[${encontrado.indice}]): ` +
-      `${JSON.stringify(cual === "Position" ? aPunto(antes) : esTexto ? antes : aNumero(antes))} → ${JSON.stringify(leido)}` +
-      (quedo ? "" : ` · NO QUEDÓ COMO SE PIDIÓ (${JSON.stringify(esperado)}), transacción ${ok}`) +
+      `${cual === "Position" ? JSON.stringify(aPunto(antes)) : esTexto ? JSON.stringify(antes) : conDb(aNumero(antes))} → ${conDb(leido)}` +
+      (quedo ? "" : ` · NO QUEDÓ COMO SE PIDIÓ (${nivel && params.db !== undefined ? params.db + " dB" : JSON.stringify(esperado)}), transacción ${ok}`) +
+      (nivel && params.db === undefined ? ` · ${ESCALA_NIVEL}` : "") +
       (avisoAmbiguo ? ` · ${avisoAmbiguo}` : ""),
     clip: nombreClip, param: cual, valor: leido, quedo: quedo,
+    db: nivel && typeof leido === "number" ? Number(crudoADb(leido).toFixed(2)) : undefined,
     ambiguo: avisoAmbiguo || null
   };
 }
@@ -7482,10 +7407,11 @@ async function unirAudio(params) {
   const naudio = await sequence.getAudioTrackCount();
   const editor = ppro.SequenceEditor.getEditor(sequence);
 
-  let unidos = 0, revisados = 0;
+  let unidos = 0, revisados = 0, seleccionSucia = 0;
+  let frenado = null;
   const fallidos = [];
 
-  for (let t = 0; t < naudio; t++) {
+  for (let t = 0; t < naudio && frenado === null; t++) {
     let vueltas = 0;
     // Se repite hasta que no quede nada por unir: cada unión cambia la lista.
     while (vueltas++ < 200) {
@@ -7508,6 +7434,8 @@ async function unirAudio(params) {
         if (pegados && continuos && mismoMedio) { par = i; break; }
       }
       if (par < 0) break;
+      const cupo = borradoPermitido();
+      if (!cupo.ok) { frenado = cupo.libreEn; break; }
       revisados++;
 
       try {
@@ -7521,11 +7449,14 @@ async function unirAudio(params) {
             a.addAction(editor.createRemoveItemsAction(sel, false, ppro.Constants.MediaType.ANY));
           }, "sacar el pedazo de audio");
         });
+        anotarBorrado();
+        if (!(await vaciarSeleccion(sequence, sel, [its[par]]))) seleccionSucia++;
         project.lockedAccess(() => {
           project.executeTransaction((a) => {
             a.addAction(its[par - 1].createSetEndAction(aTick(finalReal)));
           }, "estirar el audio anterior");
         });
+        await esperarEntreTx();
         unidos++;
       } catch (e) {
         fallidos.push(`A${t + 1} en ${tiempos[par].desde}s: ${e && e.message ? e.message : e}`);
@@ -7544,8 +7475,13 @@ async function unirAudio(params) {
   return {
     resumen:
       `Unidos ${unidos} pedazos de audio · quedan ${quedan} clips de audio` +
+      (frenado !== null
+        ? ` · SE FRENÓ en el tope de borrados (${BORRAR_TOPE} en ${BORRAR_VENTANA_MS / 1000}s, el de \`borrar\`): ` +
+          `puede quedar algo por unir; volvé a llamar en ${frenado}s`
+        : "") +
+      (seleccionSucia ? ` · OJO: ${seleccionSucia} vez/veces la selección NO quedó vacía: deseleccioná en Premiere antes de otra edición` : "") +
       (fallidos.length ? ` · FALLARON: ${fallidos.slice(0, 3).join(" | ")}` : ""),
-    unidos: unidos, quedan: quedan, fallidos: fallidos
+    unidos: unidos, quedan: quedan, fallidos: fallidos, frenadoPorElTope: frenado !== null
   };
 }
 
@@ -8202,6 +8138,7 @@ async function unirVideo(params) {
   };
 
   const hechos = [], fallidos = [];
+  let frenado = null, seleccionSucia = 0;
   // De atrás para adelante no hace falta —no hay ripple— pero se relee igual.
   for (const r of rangos) {
     try {
@@ -8211,6 +8148,8 @@ async function unirVideo(params) {
 
       const primero = dentro[0];
       const resto = dentro.slice(1);
+      const cupo = borradoPermitido();
+      if (!cupo.ok) { frenado = cupo.libreEn; break; }
 
       const sel = await sequence.getSelection();
       const prev = await sel.getTrackItems();
@@ -8222,11 +8161,14 @@ async function unirVideo(params) {
           a.addAction(editor.createRemoveItemsAction(sel, false, ppro.Constants.MediaType.VIDEO));
         }, "sacar los pedazos a fusionar");
       });
+      anotarBorrado();
+      if (!(await vaciarSeleccion(sequence, sel, resto.map((x) => x.item)))) seleccionSucia++;
       project.lockedAccess(() => {
         project.executeTransaction((a) => {
           a.addAction(primero.item.createSetEndAction(aTick(r.hasta)));
         }, "estirar el primero");
       });
+      await esperarEntreTx();
 
       // La prueba: en ese rango tiene que quedar UN solo clip, del largo pedido.
       const despues = (await traer()).filter((x) => x.t.desde >= r.desde - 0.03 && x.t.hasta <= r.hasta + 0.03);
@@ -8244,8 +8186,13 @@ async function unirVideo(params) {
   return {
     resumen:
       `${pista}: ${hechos.length} fusiones de ${rangos.length} pedidas · quedan ${total} clips` +
+      (frenado !== null
+        ? ` · SE FRENÓ en el tope de borrados (${BORRAR_TOPE} en ${BORRAR_VENTANA_MS / 1000}s, el de \`borrar\`): ` +
+          `los rangos que seguían NO se tocaron; volvé a llamar en ${frenado}s`
+        : "") +
+      (seleccionSucia ? ` · OJO: ${seleccionSucia} vez/veces la selección NO quedó vacía: deseleccioná en Premiere antes de otra edición` : "") +
       (fallidos.length ? ` · FALLARON: ${fallidos.slice(0, 3).join(" | ")}` : ""),
-    hechos: hechos.length, quedan: total, fallidos: fallidos
+    hechos: hechos.length, quedan: total, fallidos: fallidos, frenadoPorElTope: frenado !== null
   };
 }
 
@@ -11288,6 +11235,7 @@ async function leerParam(params) {
       fila.valor = num !== null && num !== undefined ? Number(Number(num).toFixed(4))
         : pt ? [Number(pt.x.toFixed(4)), Number(pt.y.toFixed(4))] : null;
       fila.keyframes = contarKeyframes(project, p);
+      if (esNivelDeAudio(efecto, fila.param) && typeof fila.valor === "number") fila.db = Number(crudoADb(Number(num)).toFixed(2));
     } catch (e) { fila.error = e && e.message ? e.message : String(e); }
     salida.push(fila);
   }
@@ -11296,7 +11244,10 @@ async function leerParam(params) {
   return {
     resumen: `${etiqueta} · ${efecto} > ${nombreParam || "#" + iParam} · leídos ${salida.length} de ${items.length}` +
       (conError.length ? ` · ${conError.length} CON ERROR: ` + conError.slice(0, 3).map((f) => `[${f.indice}] ${f.error}`).join("; ") : "") +
-      ` · ` + salida.filter((f) => f.valor !== null).map((f) => `[${f.indice}]=${JSON.stringify(f.valor)}${f.keyframes ? "/" + f.keyframes + "kf" : ""}`).join(" ") +
+      ` · ` + salida.filter((f) => f.valor !== null).map((f) => `[${f.indice}]=${JSON.stringify(f.valor)}` +
+        (f.db !== undefined ? ` (${isFinite(f.db) ? f.db.toFixed(1) + " dB" : "-inf dB, MUDO"})` : "") +
+        `${f.keyframes ? "/" + f.keyframes + "kf" : ""}`).join(" ") +
+      (salida.some((f) => f.db !== undefined) ? ` · ${ESCALA_NIVEL}` : "") +
       (hastaI < items.length ? ` · FALTAN desde ${hastaI}` : ""),
     pista: etiqueta, efecto: efecto, clips: salida, total: items.length,
     siguiente: hastaI < items.length ? hastaI : null
@@ -11574,6 +11525,13 @@ async function colocarLote(params) {
       `\`pistaAudio\` se cuenta desde 1 (A1 es 1), y vino ${params.pistaAudio}. ` +
       `Con 0 o menos el indice queda negativo y el audio cae en A1 PISANDO lo que haya.`
     );
+  }
+  /* La pista tiene que EXISTIR antes de escribir, como en `insertar`: la verificación de abajo corre
+     DESPUÉS de las transacciones, y con una pista de más `getVideoTrack` tira en vez de devolver null,
+     así que lo que Premiere hubiera hecho quedaba hecho y el verbo contestaba la excepción cruda. */
+  const totalV = await sequence.getVideoTrackCount();
+  if (pistaIndex >= totalV) {
+    throw new Error(`"${sequence.name}" tiene ${totalV} pista(s) de video (V1 a V${totalV}); se pidió ${pista}. NO se ejecutó nada.`);
   }
   const pistaAudio = typeof params.pistaAudio === "number" ? params.pistaAudio - 1 : pistaIndex;
   const porTx = Math.max(1, Math.min(TOPE_LOTE, typeof params.porTransaccion === "number" ? params.porTransaccion : 1));
@@ -12146,6 +12104,22 @@ async function clonar(params) {
   const cuantasV = await sequence.getVideoTrackCount();
   const destIdx = params.aPista - 1;
   if (destIdx < 0) throw new Error(`\`aPista\` es ${params.aPista}; la primera es 1.`);
+  /*
+   * LA PISTA DESTINO: una que existe, o LA SIGUIENTE a la última, que el clon crea (2026-09-26).
+   * `getVideoTrack` con un índice de más no devuelve null: TIRA «BE: An invalid track index was
+   * passed to the sequence.», y el verbo moría antes de clonar con ese mensaje crudo (un reporte de uso,
+   * 2026-09-25) —y lo que se decía, que clonar CREA pistas, salía de la sonda, nunca de este verbo—.
+   * Medido con la sonda el 2026-09-26: un clon de V3 a una V4 que no existía creó UNA pista —3 → 4— y
+   * cayó en ella, sin tocar V3. Así que se acepta exactamente la siguiente, y se relee que la cuenta
+   * subió en uno y que el clon está ahí. Más arriba no está medido: rebota.
+   */
+  if (destIdx > cuantasV) {
+    throw new Error(
+      `No existe V${params.aPista}: "${sequence.name}" tiene ${cuantasV} pista(s) de video (V1 a V${cuantasV}), ` +
+      `y NO se ejecutó nada. \`clonar\` crea como mucho la siguiente, V${cuantasV + 1}; más arriba, agregalas en Premiere.`
+    );
+  }
+  const pistaNueva = destIdx === cuantasV;
   const origenIdx = Number(String(ubic.pista).replace(/^V/i, "")) - 1;
 
   /* Al cuadro, como `marcar`: la API acepta sub-frame y un clip entre frames deja huecos de
@@ -12163,7 +12137,7 @@ async function clonar(params) {
   }
 
   const t4 = await tiemposDe(ubic.clip);
-  const track = await sequence.getVideoTrack(destIdx);
+  const track = pistaNueva ? null : await sequence.getVideoTrack(destIdx);
   const contar = async () => track
     ? (await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false)).length
     : 0;
@@ -12186,7 +12160,8 @@ async function clonar(params) {
   /* EL VEREDICTO SALE DE RELEER LA PISTA DESTINO. `executeTransaction` devolvió true sobre
      clones que no habían entrado, y contar la pista equivocada informó "NO CLONÓ" sobre tres
      que sí: el contador ciego de este archivo, pagado en esta misma medición. */
-  const trackDespues = await sequence.getVideoTrack(destIdx);
+  const cuantasDespues = await sequence.getVideoTrackCount();
+  const trackDespues = destIdx < cuantasDespues ? await sequence.getVideoTrack(destIdx) : null;
   let despues = 0, quedo = null;
   if (trackDespues) {
     const items = await trackDespues.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
@@ -12196,7 +12171,6 @@ async function clonar(params) {
       if (Math.abs(t.desde - segDestino) < 0.05) { quedo = { indice: i, desde: t.desde, hasta: t.hasta }; break; }
     }
   }
-  const cuantasDespues = await sequence.getVideoTrackCount();
 
   return {
     resumen:
@@ -12205,9 +12179,14 @@ async function clonar(params) {
         : `NO SE CLONÓ "${ubic.nombre}" (la pista destino sigue con ${despues} clip(s)); transacción ${ok}`) +
       ` · tiempo: ${cuantizado}` +
       (error ? ` · TIRÓ: ${error}` : "") +
-      (cuantasDespues > cuantasV ? ` · OJO: la secuencia pasó de ${cuantasV} a ${cuantasDespues} pistas de video — clonar las CREA y no hay API para borrarlas` : "") +
+      (pistaNueva && cuantasDespues === cuantasV + 1 ? ` · CREÓ V${params.aPista}, la pista pedida` : "") +
+      (cuantasDespues !== cuantasV + (pistaNueva && quedo ? 1 : 0)
+        ? ` · OJO: la secuencia pasó de ${cuantasV} a ${cuantasDespues} pistas de video` +
+          (pistaNueva ? ` y se esperaba ${cuantasV + 1}` : " sin que se pidiera ninguna")
+        : "") +
+      (cuantasDespues > cuantasV ? " · no hay API para borrar pistas: si sobra, a mano" : "") +
       " · el clon es INDEPENDIENTE: sus efectos se retocan sin tocar el original" +
-      " · UN Cmd+Z lo saca",
+      " · UN Cmd+Z lo saca" + (pistaNueva ? " (si también saca la pista creada, no está medido)" : ""),
     clono: !!quedo, quedo: quedo,
     pistasAntes: cuantasV, pistasDespues: cuantasDespues,
   };
@@ -12388,7 +12367,7 @@ const PARAMS_DE = {
   importar: ["archivos", "bin"],
   importarTranscripcion: ["desdeMedio", "json", "medio", "ruta", "todasLasFormas"],
   motion: [],
-  keyframe: ["efecto", "lista", "param", "valor", "x", "y"],
+  keyframe: ["db", "efecto", "lista", "param", "valor", "x", "y"],
   frame: ["ancho"],
   playhead: ["segundos"],
   clips: ["pista"],
@@ -12418,7 +12397,7 @@ const PARAMS_DE = {
   resolucion: ["alto", "ancho", "fps"],
   ajustarAlCuadro: ["solo"],
   escalaFija: ["desdeIndice", "limite", "pista", "valor"],
-  fijar: ["efecto", "indice", "indiceParam", "nombre", "param", "pista", "valor", "x", "y"],
+  fijar: ["db", "efecto", "indice", "indiceParam", "nombre", "param", "pista", "valor", "x", "y"],
   unirAudio: [],
   aplicarEscalas: ["desdeIndice", "limite", "pista", "plan", "porTransaccion"],
   colocarLote: ["fragmentos", "pista", "pistaAudio", "porTransaccion"],
@@ -12517,7 +12496,7 @@ async function ejecutar(cmd, params) {
       fragmentos: ["desde", "hasta", "medio"],
       capas: ["apagado", "desde", "dura", "en", "medio", "nombre", "pista", "pistaAudio"],
     },
-    keyframe: { lista: ["segundos", "valor", "x", "y"] },
+    keyframe: { lista: ["db", "segundos", "valor", "x", "y"] },
     aplicarEscalas: { plan: ["desde", "escala", "x", "y"] },
     sacarRangos: { rangos: ["desde", "hasta"] },
   };

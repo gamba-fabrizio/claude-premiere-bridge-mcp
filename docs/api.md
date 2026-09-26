@@ -131,11 +131,13 @@ eso no puede salir de un error simétrico.
   `"ApplyCuts"`, `"CreateMarkers"` y `"CreateSubclips"`, o sea qué hacer con los
   cortes que encuentra `performSceneEditDetectionOnSelection`. Corta donde la
   detección de escenas ve un cambio de plano, no donde uno quiera.
-- **Un corte en un tiempo cualquiera se emula** y anda: `premiere_cortar`
-  recorta la salida del clip hasta el punto y reinserta el mismo medio con la
-  entrada corrida. El audio vinculado se parte igual. Verificado: partir en 25s
-  un clip de 0-60 con entrada 10 deja `0-25 (entrada 10)` + `25-60 (entrada 35)`,
-  pegados y sincronizados.
+- **Un corte en un tiempo cualquiera se emula**, y la COLA ES UN CLON (2026-09-25):
+  `premiere_cortar` clona el clip y sus socios pasado el final de la secuencia, les
+  recorta el inicio con `createSetStartAction`, recorta la cabeza con
+  `createSetEndAction` y corre los clones con `createMoveAction`. Hasta ese día
+  REINSERTABA el medio, y eso trae todos sus streams a las pistas espejo, pisa lo
+  que haya ahí y pierde efectos, nombre y el procesamiento del audio. El costo del
+  clon: la cola queda sin vínculo, porque la API no los crea.
 - **`premiere_sacar_rangos`** encadena eso: dos cortes y un borrado con ripple
   por cada tramo. Procesa **del último al primero**, porque cada ripple corre los
   tiempos de la derecha y de adelante para atrás los rangos siguientes ya no
@@ -184,6 +186,10 @@ callarlo. `premiere_borrar` después se los lleva junto con el video.
 
 Un clip de audio expone `Volume` (Mute, Level) y `Channel Volume` (33 params),
 así que `premiere_param` y `premiere_keyframe` sirven para niveles y fundidos.
+**Level es CRUDO: crudo = 10^((dB − 15)/20)**, o sea 0 dB = 0,1778 y 1 = +15 dB,
+medido exportando un tono con cinco niveles y midiéndolo con ffmpeg (2026-09-26):
+−6, +6, −18 y +15 dB salieron exactos. Los verbos lo piden y lo leen en `db`. El
+nivel de la PISTA —el fader del mixer— no aparece en ninguna clase de la API.
 `Mute` llega como `{value: false}`: los params de casilla se normalizan aparte
 porque como número dan `null`, indistinguible de un param ilegible.
 
@@ -504,6 +510,9 @@ el bridge: cada una es una medición contra Premiere, no una deducción del nomb
 - Al arrastrar un clip, Premiere recuantiza su in-point a la grilla de la SECUENCIA, y el del
   audio vinculado no.
 - `TrackItem.getTrackIndex()` es 0-based y separa dos copias del mismo clip en el mismo instante.
+- `sequence.getVideoTrack(i)` con un índice de más TIRA «BE: An invalid track index was passed to the
+  sequence.», no devuelve null: se cuenta antes con `getVideoTrackCount()`. Un clon cuyo destino es la
+  SIGUIENTE a la última la crea —una sola, medido 3 → 4— y cae en ella.
 - `isDisabled()` lo tienen los clips de video y los de audio; `isAdjustmentLayer()`, solo
   `VideoClipTrackItem`. `createSetDisabledAction(true)` sobre el audio lo calla en el render: medido
   por banda en un export, -47 dB apagado contra -2 dB prendido.
@@ -513,7 +522,16 @@ el bridge: cada una es una medición contra Premiere, no una deducción del nomb
   "Illegal Parameter type". Con `TrackItemType.TRANSITION` la lista tiene el largo correcto y todos
   sus items son `null`: las transiciones se cuentan, no se leen.
 - `createCloneTrackItemAction(item, tick, pistaV, pistaA)` toma OFFSETS relativos al clip de
-  origen. El clon es independiente, efectos incluidos, y puede crear pistas de video.
+  origen. El clon es independiente, efectos incluidos, y crea UNA pista de video si cae en la
+  siguiente a la última. Clona UN item: el video no trae su audio vinculado, con ninguna de las tres
+  formas medidas —4 argumentos, y 6 con `alignToVideo` en true o false—; un audio se clona a su misma
+  pista. Trae nombre y apagado, y nace SIN VÍNCULO.
+- `createSetStartAction(tick)` —en video y en audio— recorta el borde IZQUIERDO en tiempo de
+  secuencia y Premiere corre la entrada: 40–44 entrada 2 → 41–44 entrada 3. Es el espejo de
+  `createSetEndAction`, no un `createMoveAction`.
+- **Los vínculos no los expone ni los crea la API**: en sus 71 clases no hay nada para eso. Se
+  leen del `.prproj` guardado: `PersistentGroupContainer/LinkContainer/Links/Link` de cada
+  secuencia, con los `TrackItem` de cada grupo.
 - `new ppro.TrackItemSelection()` contesta "Connection to object lost".
 
 **Transiciones**

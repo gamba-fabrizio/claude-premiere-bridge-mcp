@@ -107,7 +107,7 @@ claude mcp add premiere-bridge --scope user -- node /RUTA/A/TU/COPIA/premiere-br
 | `premiere_secuencias` | Lista las secuencias del proyecto, o cambia la activa |
 | `premiere_clips` | Todos los clips con pista, índice, nombre y tiempos |
 | `premiere_radiografia` | Una pista entera con TODO lo necesario para reconstruirla —Motion, efectos con valores, deshabilitado, velocidad— y el veredicto `intacto`: qué se perdería si la rehago |
-| `premiere_leer_param` | UN param para un RANGO de clips en una llamada. `limite` 25 por defecto: el umbral que tira Premiere está entre 176 (medido bueno) y 560 (medido malo) |
+| `premiere_leer_param` | UN param para un RANGO de clips en una llamada. `limite` 25 por defecto: el umbral que tira Premiere está entre 176 (medido bueno) y 560 (medido malo). El nivel de un audio viene también en dB |
 | `premiere_seleccionar` | Cambia el clip seleccionado, por nombre o por pista+índice |
 | `premiere_playhead` | Lee o mueve el playhead, en segundos |
 | `premiere_frame` | El cuadro bajo el playhead, como imagen |
@@ -126,12 +126,12 @@ claude mcp add premiere-bridge --scope user -- node /RUTA/A/TU/COPIA/premiere-br
 | `premiere_medios` | Qué hay en el panel de proyecto, bin por bin |
 | `premiere_insertar` | Pone un medio en una pista, en el segundo que se pida |
 | `premiere_borrar` | Saca un clip y sus vinculados |
-| `premiere_cortar` | Parte un clip en dos, en un segundo dado |
+| `premiere_cortar` | Parte un clip en dos, en un segundo dado. La cola es un clon: efectos, nombre y el mismo audio, pero sin vínculo en Premiere |
 | `premiere_sacar_rangos` | Saca tramos de la secuencia cerrando el hueco |
 | `premiere_cerrar_huecos` | Cierra las juntas de un frame que dejan los cortes |
 | `premiere_resolucion` | Cambia el tamaño de cuadro de la secuencia |
 | `premiere_escala` | Fija la escala del Motion en todos los clips |
-| `premiere_fijar` | Fija un param del Motion en un clip, sin keyframes |
+| `premiere_fijar` | Fija un param de un efecto en un clip, sin keyframes. El nivel de un audio va en dB con `db` |
 | `premiere_renombrar` | Le cambia el nombre a un clip del timeline, sin tocar el medio |
 | `premiere_marcadores` | Los marcadores de la secuencia, con comentario y color |
 | `premiere_marcar` | Deja un marcador en un segundo, con nombre, comentario y color |
@@ -147,7 +147,7 @@ claude mcp add premiere-bridge --scope user -- node /RUTA/A/TU/COPIA/premiere-br
 | `premiere_proxy` | Lee o adjunta el proxy de un medio; sin `archivo` sólo lee |
 | `premiere_relink` | Repunta un medio a otro archivo; el archivo tiene que existir y NO hay Cmd+Z |
 | `premiere_transicion` | Pone un fundido en un corte. Default Cross Dissolve moderno; el AUDIO no lo toca |
-| `premiere_clonar` | Duplica un clip con sus efectos; el clon es INDEPENDIENTE del original |
+| `premiere_clonar` | Duplica un clip con sus efectos; el clon es INDEPENDIENTE del original. A la pista siguiente a la última, la crea |
 | `premiere_subclip` | Un pedazo con nombre de un medio, en el panel; verifica que el item aparezca |
 | `premiere_desactivar` | Apaga o prende el ojito DE UN CLIP, o de una pista entera, con TODOS los streams del audio vinculado y en lotes de 10 acciones; existe para dejar los suplentes a la vista sin que tapen el corte |
 | `premiere_renombrar_pista` | Le pone nombre a una pista de video o audio; relee para confirmar |
