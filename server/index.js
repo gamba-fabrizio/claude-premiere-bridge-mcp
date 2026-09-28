@@ -546,7 +546,8 @@ server.registerTool(
           + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
         ),
       nombre: z.string().optional().describe("Parte del nombre del clip. No distingue mayúsculas."),
-      pista: z.number().int().min(1).optional().describe("Pista como en el timeline: 1 es V1."),
+      pista: z.union([z.number().int().min(1), z.string()]).optional()
+        .describe("Pista como en el timeline: 1 o \"V1\" es V1, \"A1\" es la primera de audio —para `premiere_keyframe` sobre el nivel de un audio—."),
       indice: z.number().int().min(0).optional().describe("Índice dentro de la pista, de premiere_clips.")
     })
   },
@@ -1118,6 +1119,51 @@ server.registerTool(
   async (args) => {
     try {
       const r = await enviar("keyframe", args);
+      return texto(r.resumen, r);
+    } catch (e) {
+      return fallo(e);
+    }
+  }
+);
+
+server.registerTool(
+  "premiere_aplicar_motion",
+  {
+    title: "Escala, posición y rotación de varios clips en tanda",
+    description:
+      "Escribe la Motion —`escala`, `x`/`y`, `rotacion`— de hasta 30 clips de UNA pista de video por " +
+      "llamada, apuntando por índice como premiere_fijar: una llamada hace lo que premiere_fijar en 69. Lee la " +
+      "pista UNA vez, no lee valores, junta hasta 20 acciones por transacción y las espacia.\n\n" +
+      "NO ES MÁS SEGURA POR ESCRITURA. Premiere se cae por lo ACUMULADO en la sesión, aunque se espacie: medido, " +
+      "~540–630 escrituras con premiere_fijar y de ~200 a ~2.900 con esta tanda, con mucha variación. Guardá " +
+      "antes y después de cada tanda y reiniciá Premiere antes de una grande; premiere_estado dice cuánto lleva " +
+      "la sesión.\n\n" +
+      "NO relee lo escrito: confirmalo con premiere_leer_param o un premiere_frame. Si el param está " +
+      "ANIMADO, avisa: ahí la escritura va al valor base y los keyframes la tapan. Cada transacción es un " +
+      "Cmd+Z, y el resumen dice cuántas corrieron.",
+    inputSchema: soloEstas({
+      secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
+      proyecto: z
+        .string()
+        .optional()
+        .describe(
+          "GUARDA: nombre (o parte) del proyecto sobre el que se quiere operar. Si el que tiene "
+          + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
+          + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
+        ),
+      pista: z.union([z.number().int().min(1), z.string()]).describe("Pista de video: \"V2\" o 2."),
+      clips: z.array(z.object({
+        indice: z.number().int().min(0).describe("Índice dentro de la pista, de premiere_clips."),
+        escala: z.number().optional().describe("Scale, en porcentaje (100 es el tamaño original)."),
+        x: z.number().optional().describe("Position horizontal, en fracción del cuadro (0.5 es el centro). Va con `y`."),
+        y: z.number().optional().describe("Position vertical, en fracción del cuadro. Va con `x`."),
+        rotacion: z.number().optional().describe("Rotation, en grados.")
+      }).strict()).min(1).max(30).describe("Un elemento por clip, hasta 30 por llamada.")
+    })
+  },
+  async (args) => {
+    try {
+      const r = await enviar("aplicarMotion", args, 120000);
       return texto(r.resumen, r);
     } catch (e) {
       return fallo(e);

@@ -20,6 +20,12 @@ en `CLAUDE.md`.
   descartable, no en el del editor.
 - **Si encadenás escrituras a mano, espaciadas**: a ~200 ms entre transacciones Premiere se cae, y
   el borde baja con los proyectos pesados. Las herramientas ya espacian.
+- **Premiere se cae por lo ACUMULADO en la sesión, aunque espacies**, y el punto varía mucho: medido en
+  el proyecto de prueba, ~540–630 escrituras con `fijar` espaciado y de ~200 a ~2.900 con una tanda.
+  Ninguno es un umbral. Guardá antes y después de cada tanda —Premiere recupera lo guardado— y reiniciá
+  antes de una grande (`node herramientas/recargar.js --reiniciar`). `premiere_aplicar_motion` hace con
+  una llamada lo que `fijar` con 69, pero no es más segura por escritura. `estado` dice cuánto lleva la
+  sesión.
 
 ## Cómo leer lo que contesta
 

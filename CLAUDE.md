@@ -1,7 +1,7 @@
 # Bridge Claude ↔ Premiere Pro — lo que costó medir
 
 Le da a un agente control de Premiere Pro: leer la secuencia, **mirar el frame**, navegar,
-animar, editar y armar timeline. **58 herramientas MCP sobre 74 verbos del panel** — la
+animar, editar y armar timeline. **59 herramientas MCP sobre 75 verbos del panel** — la
 diferencia importa, ver *Al escribir un verbo nuevo*.
 
 Esos dos números los chequea `test.js` contra el código. Escritos a mano envejecen: decían
@@ -144,6 +144,12 @@ Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que
 - **`borrar` rebota desde el 6º borrado en 60 s.** Vaciar una pista es Delete nativo o rehacer la
   secuencia; nunca barrerla, y menos con solapes. → `crashes.md`
 - **Guardar antes y después de cada tanda.** Es lo que volvió gratis cada crash.
+- **Premiere se cae por lo ACUMULADO en la sesión, no por el ritmo ni por un verbo**, en siete lugares
+  del puente de scripts y con mucha variación: ~540–630 escrituras con `fijar` espaciado, ~200–2.900
+  con una tanda. Ningún número es un umbral: guardar antes y después, y reiniciar antes de una tanda
+  grande. → `crashes.md`
+- **A un objeto de la API no se le asigna nada**: envolver su `addAction` no entraba, no contaba nada
+  y tocaba memoria nativa en medio de crashes de memoria. → `crashes.md`
 - **Lo nuevo se prueba en un proyecto de prueba descartable**, nunca en uno de trabajo, y con todos
   sus medios: un medio faltante saca un modal que traba cualquier prueba desatendida.
 - **Un panel, un cliente por vez.** Mientras corre una tanda, el progreso se mira en el disco o en

@@ -476,9 +476,51 @@ async function limpiarRangos() {
  * fallaban con "ninguna secuencia activa" y solo `secuencias` andaba. O sea que
  * el bridge era casi inútil en el momento en que arranca todo trabajo real.
  */
+/*
+ * CUÁNTO SE ESCRIBIÓ EN ESTA SESIÓN DE PREMIERE (2026-09-27). Premiere se cayó en la escritura 57 de
+ * una tanda de `fijar` espaciada 1,2 s, en una sesión que ya venía con cientos (un reporte de uso). Medido
+ * ese día, tirándolo a propósito trece veces: se cae por lo ACUMULADO en la sesión, en siete lugares
+ * distintos del puente de scripts, y el punto varía mucho. Para que el próximo crash quede MEDIDO y no
+ * estimado, se cuentan las transacciones que corrieron desde que arrancó el panel, envolviendo
+ * `executeTransaction` en el PROTOTIPO del proyecto —una función de JavaScript, no un objeto nativo—.
+ * No arregla nada. Si la envoltura no entra, se dice: un cero que no cuenta se leería como sesión limpia.
+ */
+const SESION = { desde: Date.now(), transacciones: 0, escrituras: 0, contando: null };
+/* Una transacción de `fijar` es UNA escritura y una de `aplicarMotion` hasta 18: los verbos en tanda
+   suman las suyas de más (`sumarEscrituras`). NO hay umbral de aviso a propósito: lo medido el
+   2026-09-27 va de ~200 escrituras de una tanda seguida a ~630 de `fijar` espaciado antes de caer, en
+   la misma máquina y el mismo proyecto, y un aviso a las N daría una seguridad que no hay. El número
+   está para que el próximo crash quede MEDIDO. */
+function sumarEscrituras(n) { if (SESION.contando && n > 0) SESION.escrituras += n; }
+function contarEn(project) {
+  if (SESION.contando !== null || !project) return;
+  try {
+    const proto = Object.getPrototypeOf(project);
+    const orig = proto && proto.executeTransaction;
+    if (typeof orig !== "function") { SESION.contando = false; return; }
+    /* Solo transacciones. Las ACCIONES no se cuentan: envolver el `addAction` del objeto de Premiere
+       no entra —la asignación no tira pero no queda, medido el 2026-09-27— y tocar las propiedades de
+       un objeto nativo es justo lo que no se hace mientras se buscan crashes de memoria. */
+    const envoltorio = function (fn, nombre) {
+      const r = orig.call(this, fn, nombre);
+      if (r) { SESION.transacciones++; SESION.escrituras++; }
+      return r;
+    };
+    proto.executeTransaction = envoltorio;
+    SESION.contando = proto.executeTransaction === envoltorio;
+  } catch (e) { SESION.contando = false; }
+}
+function textoSesion() {
+  const min = Math.round((Date.now() - SESION.desde) / 60000);
+  const hace = min < 60 ? `${min} min` : `${Math.floor(min / 60)} h ${min % 60} min`;
+  if (!SESION.contando) return `esta sesión de Premiere (${hace}): NO se pudieron contar las escrituras`;
+  return `esta sesión de Premiere lleva ${SESION.transacciones} transacciones (~${SESION.escrituras} escrituras) en ${hace}`;
+}
+
 async function getProyecto() {
   const project = await ppro.Project.getActiveProject();
   if (!project) throw new Error("No hay un proyecto abierto en Premiere.");
+  contarEn(project);
   return project;
 }
 
@@ -5105,14 +5147,14 @@ async function keyframe(params) {
   return {
     resumen:
       `${nombreEfecto} > ${nombreParam} en "${nombreClip}": keyframes ${antes} → ${despues}` +
-      (nivel ? ` · pedidos en ${puntos.map((x) => textoDb(x.valor)).join(", ")} · ${ESCALA_NIVEL}` : "") +
       (excepcion ? ` (excepción: ${excepcion})` : "") +
       (despues > antes
         ? ` en ${quedaron.join("s, ")}s` +
           (reloj.velocidad !== 1 ? ` (clip a ${reloj.velocidad}x)` : "") +
           ` · se deshace con ${transacciones} Cmd+Z` +
           (transacciones > 1 ? " (uno agrega los keyframes, otro activa el param)" : "")
-        : " · NO SE ESCRIBIÓ NADA"),
+        : " · NO SE ESCRIBIÓ NADA") +
+      (nivel ? ` · pedidos en ${puntos.map((x) => textoDb(x.valor)).join(", ")} · ${ESCALA_NIVEL}` : ""),
     clip: nombreClip,
     efecto: nombreEfecto,
     param: nombreParam,
@@ -7546,6 +7588,125 @@ const TOPE_LOTE = 10;
 const MS_ENTRE_TX = 400;
 const esperarEntreTx = () => new Promise((r) => setTimeout(r, MS_ENTRE_TX));
 
+/*
+ * LA MOTION DE VARIOS CLIPS EN TANDA, DESDE MCP (2026-09-27). Una sesión que solo tenía las
+ * herramientas MCP terminó 46 capas con ~95 `fijar` espaciados 1,2 s, y Premiere se cayó en la 57
+ * (un reporte de uso). `aplicarEscalas` está fuera de MCP a propósito y no escribe Rotation. Esto es su
+ * molde, para cualquier combinación de escala, posición y rotación, apuntando por ÍNDICE como `fijar`:
+ *
+ *   - UNA lectura de la pista por llamada, no una por clip;
+ *   - cero lecturas de VALOR: `fijar` hace dos por escritura. Se avisa del param ANIMADO contando
+ *     keyframes, que no lee valores;
+ *   - las acciones de un clip van juntas, hasta ACCIONES_POR_TX por transacción —20, lo medido con
+ *     `aplicarEscalas` a 10 clips de dos acciones—, espaciadas con `esperarEntreTx`;
+ *   - de a TOPE_MOTION clips por llamada, el tope que `escalaFija` necesitó sobre 4K pesado.
+ *
+ * LO QUE NO ES, medido el mismo día: más segura por escritura. Premiere se cae por lo ACUMULADO en la
+ * sesión, y esto cayó entre las ~200 y las ~2.900 escrituras, contra ~540–630 de `fijar` espaciado. Ahorra
+ * llamadas y tiempo, no riesgo: ver «Premiere se cae por lo ACUMULADO» en crashes.md.
+ */
+const TOPE_MOTION = 30;
+const ACCIONES_POR_TX = 20;
+async function aplicarMotion(params) {
+  const { project, sequence } = await getProyectoYSecuencia();
+  const pedidos = Array.isArray(params.clips) ? params.clips : [];
+  if (!pedidos.length) throw new Error("Falta `clips`: [{indice, escala?, x?, y?, rotacion?}] de UNA pista de video.");
+  if (pedidos.length > TOPE_MOTION) {
+    throw new Error(`Van de a ${TOPE_MOTION} clips por llamada y vinieron ${pedidos.length}: pasá el resto en otra. NO se escribió nada.`);
+  }
+  const { pista, pistaIndex } = pistaDeVideo(params.pista, "aplicarMotion");
+  const totalV = await sequence.getVideoTrackCount();
+  if (pistaIndex >= totalV) {
+    throw new Error(`"${sequence.name}" tiene ${totalV} pista(s) de video (V1 a V${totalV}); se pidió ${pista}. NO se escribió nada.`);
+  }
+  const items = await (await sequence.getVideoTrack(pistaIndex)).getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
+
+  /* Todo se valida ANTES de escribir: una tanda que se corta a la mitad por un pedido mal armado
+     deja la pista a medio hacer. */
+  const vistos = new Set();
+  pedidos.forEach((c, i) => {
+    const donde = `el pedido ${i}`;
+    if (!Number.isInteger(c.indice) || c.indice < 0 || c.indice >= items.length) {
+      throw new Error(`${donde}: \`indice\` ${JSON.stringify(c.indice)} no está en ${pista}, que tiene ${items.length} clip(s). NO se escribió nada.`);
+    }
+    if (vistos.has(c.indice)) throw new Error(`${donde}: ${pista}[${c.indice}] viene dos veces. NO se escribió nada.`);
+    vistos.add(c.indice);
+    if ((typeof c.x === "number") !== (typeof c.y === "number")) {
+      throw new Error(`${donde}: la posición va con \`x\` e \`y\` juntos. NO se escribió nada.`);
+    }
+    if (typeof c.escala !== "number" && typeof c.x !== "number" && typeof c.rotacion !== "number") {
+      throw new Error(`${donde}: no pide nada —escala, x/y o rotacion—. NO se escribió nada.`);
+    }
+    if (!items[c.indice]) throw new Error(`${donde}: ${pista}[${c.indice}] no se pudo leer (un hueco de la lista). NO se escribió nada.`);
+  });
+
+  const hechos = [], fallidos = [], animados = [];
+  const grupos = [];
+  for (const c of pedidos) {
+    const it = items[c.indice];
+    try {
+      const motion = await getComponente(it, "Motion");
+      if (!motion) { fallidos.push(`[${c.indice}]: sin Motion`); continue; }
+      const cualEsc = getParametro(project, motion, "Scale") ? "Scale" : "Scale Height";
+      const quiere = [];
+      if (typeof c.escala === "number") quiere.push([cualEsc, c.escala]);
+      if (typeof c.x === "number") quiere.push(["Position", new ppro.PointF(c.x, c.y)]);
+      if (typeof c.rotacion === "number") quiere.push(["Rotation", c.rotacion]);
+      const params_ = quiere.map(([nom]) => getParametro(project, motion, nom));
+      const falta = quiere.filter((q, k) => !params_[k]).map((q) => q[0]);
+      if (falta.length) { fallidos.push(`[${c.indice}]: Motion no expuso ${falta.join(", ")}`); continue; }
+      const kfs = [];
+      project.lockedAccess(() => { quiere.forEach(([, val], k) => kfs.push(params_[k].createKeyframe(val))); });
+      const conKf = quiere.filter((q, k) => contarKeyframes(project, params_[k]) > 0).map((q) => q[0]);
+      if (conKf.length) animados.push(`[${c.indice}] ${conKf.join(", ")}`);
+      grupos.push({ indice: c.indice, acciones: kfs.map((kf, k) => () => params_[k].createSetValueAction(kf)), pedido: c });
+    } catch (e) {
+      fallidos.push(`[${c.indice}]: ${e && e.message ? e.message : e}`);
+    }
+  }
+
+  /* Las acciones de un clip nunca se parten; se juntan clips hasta ACCIONES_POR_TX. */
+  const lotes = [];
+  let actual = [];
+  for (const g of grupos) {
+    if (actual.length && actual.reduce((n, x) => n + x.acciones.length, 0) + g.acciones.length > ACCIONES_POR_TX) {
+      lotes.push(actual); actual = [];
+    }
+    actual.push(g);
+  }
+  if (actual.length) lotes.push(actual);
+  let transacciones = 0;
+  for (let l = 0; l < lotes.length; l++) {
+    if (l) await esperarEntreTx();
+    let corrio = false, error = null;
+    try {
+      project.lockedAccess(() => {
+        corrio = project.executeTransaction((a) => {
+          for (const g of lotes[l]) for (const f of g.acciones) a.addAction(f());
+        }, `motion en tanda (${lotes[l].length} clip${lotes[l].length > 1 ? "s" : ""})`);
+      });
+    } catch (e) { error = e && e.message ? e.message : String(e); }
+    if (corrio) { transacciones++; sumarEscrituras(lotes[l].reduce((n, g) => n + g.acciones.length, 0) - 1); }
+    for (const g of lotes[l]) {
+      if (corrio) hechos.push(g.indice);
+      else fallidos.push(`[${g.indice}]: la transacción de su lote NO corrió${error ? ": " + error : ""}`);
+    }
+  }
+
+  return {
+    resumen:
+      `${pista}: ${hechos.length} de ${pedidos.length} clips ESCRITOS en ${transacciones} transacción(es)` +
+      " · el valor NO se releyó: confirmalo con `leer_param`, o mirando un `frame`" +
+      (animados.length
+        ? ` · OJO: ${animados.length} con el param ANIMADO, donde la escritura va al valor BASE y los keyframes ` +
+          `la TAPAN: ${animados.slice(0, 4).join(" | ")}${animados.length > 4 ? ` (y ${animados.length - 4} más)` : ""}`
+        : "") +
+      (fallidos.length ? ` · FALLARON ${fallidos.length}: ${fallidos.slice(0, 3).join(" | ")}` : "") +
+      (transacciones ? ` · ${transacciones} Cmd+Z lo deshace${transacciones > 1 ? "n" : ""}` : ""),
+    escritos: hechos, fallidos: fallidos, animados: animados, transacciones: transacciones, total: items.length
+  };
+}
+
 async function aplicarEscalas(params) {
   const { project, sequence } = await getProyectoYSecuencia();
   const plan = Array.isArray(params.plan) ? params.plan : [];
@@ -7595,6 +7756,7 @@ async function aplicarEscalas(params) {
       }, lote.length === 1 ? "escala y posición" : `escala y posición (${lote.length} clips)`);
     });
     transacciones++;
+    if (corrio) sumarEscrituras(lote.reduce((n, w) => n + (w.kPos ? 2 : 1), 0) - 1);
     for (const w of lote) {
       if (!corrio) { fallidos.push(`[${w.i}] en ${w.desde}s: la transacción del lote NO corrió`); continue; }
       if (w.animado) animados.push(`[${w.i}] en ${w.desde}s (${w.kfEsc} kf de escala, ${w.kfPos} de posición)`);
@@ -12309,7 +12471,7 @@ async function cerrarProyecto(params) {
 
 
 
-const VERBOS = { limpiarRangos, transicion, relink, clonar, proyectosAbiertos, cerrarProyecto, sondaTranscribir, colocarLote, abrirProyecto, crearProyecto, copiarEfecto, quitarEfecto, borrarKeyframe, moverKeyframe, curvaKeyframe, leerParam, sondaParam, radiografia, desactivar, estado, guardar, bins, exportar, cortesDeEscena, etiquetar, interpretar, inOutMedio, proxy, subclip, renombrarPista, renombrar, revisar, importar, importarTranscripcion, motion, keyframe, frame, playhead, clips, seleccionar, efectos, param, editar, catalogo, agregarEfecto, medios, insertar, secuencias, borrar, transcripcion, armarSecuencia, borrarSecuencia, vistazo, mirarMedio, analizar, marcadores, marcar, desmarcar, editarMarcador, cortar, sacarRangos, cerrarHuecos, resolucion, ajustarAlCuadro, escalaFija, fijar, unirAudio, aplicarEscalas, aplicarZooms, leerEscalas, aplicarAnim, unirVideo, duplicarSecuencia, api };
+const VERBOS = { limpiarRangos, transicion, relink, clonar, proyectosAbiertos, cerrarProyecto, sondaTranscribir, colocarLote, abrirProyecto, crearProyecto, copiarEfecto, quitarEfecto, borrarKeyframe, moverKeyframe, curvaKeyframe, leerParam, sondaParam, radiografia, desactivar, estado, guardar, bins, exportar, cortesDeEscena, etiquetar, interpretar, inOutMedio, proxy, subclip, renombrarPista, renombrar, revisar, importar, importarTranscripcion, motion, keyframe, frame, playhead, clips, seleccionar, efectos, param, editar, catalogo, agregarEfecto, medios, insertar, secuencias, borrar, transcripcion, armarSecuencia, borrarSecuencia, vistazo, mirarMedio, analizar, marcadores, marcar, desmarcar, editarMarcador, cortar, sacarRangos, cerrarHuecos, resolucion, ajustarAlCuadro, escalaFija, fijar, unirAudio, aplicarEscalas, aplicarMotion, aplicarZooms, leerEscalas, aplicarAnim, unirVideo, duplicarSecuencia, api };
 
 
 /*
@@ -12400,6 +12562,7 @@ const PARAMS_DE = {
   fijar: ["db", "efecto", "indice", "indiceParam", "nombre", "param", "pista", "valor", "x", "y"],
   unirAudio: [],
   aplicarEscalas: ["desdeIndice", "limite", "pista", "plan", "porTransaccion"],
+  aplicarMotion: ["clips", "pista"],
   colocarLote: ["fragmentos", "pista", "pistaAudio", "porTransaccion"],
   aplicarZooms: ["desdeIndice", "limite", "pista", "porTransaccion", "ratioY", "tope", "velocidad"],
   leerEscalas: ["desdeIndice", "limite", "pista"],
@@ -12463,6 +12626,10 @@ async function ejecutar(cmd, params) {
     throw new Error(`Comando desconocido "${cmd}". Los que hay: ${Object.keys(VERBOS).join(", ")}.`);
   }
   const p = params || {};
+  // El contador se engancha antes del primer verbo, venga por donde venga el proyecto.
+  if (SESION.contando === null) {
+    try { contarEn(await ppro.Project.getActiveProject()); } catch (e) { /* sin proyecto: el próximo */ }
+  }
 
   /*
    * CLAVES DESCONOCIDAS: REBOTAN. Va PRIMERO, antes que las guardas de proyecto y secuencia,
@@ -12498,6 +12665,7 @@ async function ejecutar(cmd, params) {
     },
     keyframe: { lista: ["db", "segundos", "valor", "x", "y"] },
     aplicarEscalas: { plan: ["desde", "escala", "x", "y"] },
+    aplicarMotion: { clips: ["escala", "indice", "rotacion", "x", "y"] },
     sacarRangos: { rangos: ["desde", "hasta"] },
   };
   const dentro = CLAVES_DE_OBJETO[cmd];
@@ -12683,7 +12851,13 @@ async function ejecutar(cmd, params) {
   }
   delete A_MEDIAS[cmd];
   try {
-    return await fn(p);
+    const txAntes = SESION.transacciones;
+    const r = await fn(p);
+    if (r && typeof r === "object" && typeof r.resumen === "string" && (cmd === "estado" || SESION.transacciones > txAntes)) {
+      r.resumen += ` · ${textoSesion()}`;
+      r.sesion = { transacciones: SESION.transacciones, escrituras: SESION.escrituras, desde: new Date(SESION.desde).toISOString(), contando: SESION.contando };
+    }
+    return r;
   } catch (e) {
     const am = A_MEDIAS[cmd];
     delete A_MEDIAS[cmd];

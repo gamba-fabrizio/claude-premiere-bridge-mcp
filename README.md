@@ -2,7 +2,7 @@
 
 Un bridge que le da a Claude acceso de lectura y escritura a Premiere Pro: leer la
 secuencia, **mirar el frame** bajo el playhead, animar, editar y armar timeline.
-**58 herramientas MCP sobre 74 verbos del panel.**
+**59 herramientas MCP sobre 75 verbos del panel.**
 
 > **Esto salió de un flujo de trabajo real, no de un ejercicio.** Se usó para armar
 > cortes de videoclips, cursos e institucionales, y casi todo lo que hay acá se pagó
@@ -131,6 +131,7 @@ claude mcp add premiere-bridge --scope user -- node /RUTA/A/TU/COPIA/premiere-br
 | `premiere_cerrar_huecos` | Cierra las juntas de un frame que dejan los cortes |
 | `premiere_resolucion` | Cambia el tamaño de cuadro de la secuencia |
 | `premiere_escala` | Fija la escala del Motion en todos los clips |
+| `premiere_aplicar_motion` | Escala, posición y rotación de hasta 30 clips de una pista en tanda, sin releer. Para más de unos pocos clips, en vez de `fijar` en bucle |
 | `premiere_fijar` | Fija un param de un efecto en un clip, sin keyframes. El nivel de un audio va en dB con `db` |
 | `premiere_renombrar` | Le cambia el nombre a un clip del timeline, sin tocar el medio |
 | `premiere_marcadores` | Los marcadores de la secuencia, con comentario y color |

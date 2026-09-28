@@ -284,6 +284,15 @@ sola vez** y traen `limite` y `siguiente` para ir por tandas. Con tandas de 12-1
 y una pausa entre medio, los 94 clips pasan sin problema. Una llamada que toca
 94 clips es además un solo punto de falla del que no se puede retomar.
 
+**Y ninguna tanda es segura por sí sola (medido el 2026-09-27).** Premiere se cae por
+lo ACUMULADO en la sesión, en siete lugares distintos del puente de scripts
+—recolección de basura, timers, referencias, `napi_wrap`, promesas, `lockedAccess`—,
+y el punto varía mucho entre corridas iguales: ~540–630 escrituras con `fijar`
+espaciado, de ~200 a ~2.900 con `premiere_aplicar_motion`. Una tanda ahorra
+llamadas, no riesgo. Lo que evita perder trabajo es guardar antes y después, y
+reiniciar Premiere antes de una tanda grande. **Y a un objeto de la API no se le
+asigna nada**: envolver el `addAction` de una transacción no entra.
+
 ## Fijar el valor de un param, sin keyframes
 
 `param.createSetValueAction` **no toma el número**: con un valor crudo contesta

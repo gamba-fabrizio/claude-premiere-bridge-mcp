@@ -27,6 +27,9 @@
   → «La guarda contra el BARRIDO», «4. `borrar` sobre una pista con SOLAPES»
 - **Recargar el plugin con su `setInterval` vivo crasheaba**: el panel se desarma en
   `beforeunload`. → «5. Recargar el plugin»
+- **Premiere se cae por lo ACUMULADO en la sesión**, no por el ritmo ni por un verbo, y el punto varía
+  mucho: ~540–630 escrituras con `fijar` espaciado, de ~200 a ~2.900 con una tanda. Guardar antes y
+  después de cada tanda, y reiniciar antes de una grande. → «Premiere se cae por lo ACUMULADO»
 
 # Los regímenes que tiran Premiere
 
@@ -322,3 +325,55 @@ varias pistas, **para averiguar un dato que ya estaba en la respuesta anterior**
 
 Antes de barrer para averiguar algo, fijarse si ya se lo tiene. El régimen peligroso no se justifica
 por un dato que uno ya pidió.
+
+## Premiere se cae por lo ACUMULADO en la sesión, en siete lugares distintos (2026-09-27)
+
+Lo trajo un reporte de uso: una sesión terminó 46 capas con unos 95 `fijar` espaciados 1,2 s, como
+pide `USO.md`, y Premiere se cayó en la escritura 57. La sesión ya venía con cientos de escrituras, y
+el volcado decía que murió en la recolección de basura de fondo (`MinorGCJob` → `UserWeakCallback`,
+`null+0x18`), no adentro de una edición. La hipótesis era que pesa la cantidad y no el ritmo, y se
+midió tirando Premiere a propósito: trece corridas en el proyecto de prueba, con 46 capas en V2, cada
+una desde Premiere recién abierto salvo donde se dice.
+
+```
+fijar Position en bucle, 1,2 s                    600 SIN CAER (14 min)
+  ...y en la misma sesión, copiarEfecto           cayó en la copia 27: ~627 transacciones, 16 min
+copiarEfecto de un Lumetri a 45 capas x2          90 SIN CAER
+  ...y en la misma sesión, fijar en bucle         cayó en el fijar 538: ~629 transacciones, 16 min
+aplicarEscalas, 46 clips por llamada              cayó en la llamada 18: ~782 clips, ~1.560 escrituras
+aplicarMotion, 23 clips x 3 params por llamada    cayó en la llamada 11, 11, 42, 6, 5, 4 y 30
+                                                  —de ~200 a ~2.900 escrituras—, también sin la espera
+                                                  entre transacciones y en un proyecto nuevo, vacío
+Premiere quieto, con el panel latiendo            21 min y ~6.000 latidos SIN CAER
+```
+
+**Los volcados caen en siete lugares distintos** del puente entre JavaScript y Premiere: la recolección
+de basura (`UserWeakCallback`, y el scavenger con un puntero corrupto, `0x1500040008`), la liberación de
+un timer (`clearValueOnJsThread`), la creación de una referencia (`napi_create_reference_with_finalize_callback`,
+y `napi_wrap` al envolver lo que devuelve la API), la resolución de una promesa (`ConcludeDeferred`) y un
+callback de `lockedAccess` (`NAPIContextAdapter::CallCallback`). Siempre en el hilo de scripts y nunca en
+la edición en sí: es un estado que se corrompe con el uso, adentro de Premiere, y el bridge no lo puede
+arreglar.
+
+Lo que sale de esto, y lo que NO:
+
+- **Espaciar no alcanza**: con el mismo ritmo, `fijar` pasó 600 en una sesión y cayó a las 538 en otra.
+- **No es un verbo**: ni `fijar` ni `copiarEfecto` solos lo tiraron; la suma sí. El reporte, con su mezcla
+  de `fijar` y `copiarEfecto`, es el mismo caso.
+- **Una tanda NO es más segura por escritura.** `aplicarMotion` hace en una llamada lo que `fijar` en 69,
+  pero cayó entre las ~200 y las ~2.900 escrituras, contra las ~540–630 de `fijar` espaciado. Lo que
+  cambia es cuántas llamadas y cuánto tiempo hacen falta, no el riesgo. La variación entre corridas
+  iguales es tan grande que ningún número de estos es un umbral.
+- **El panel quieto no lo tira**: lo que se agota es por la actividad de la API, no por el latido.
+- **Un envoltorio del contador intentaba pisar el `addAction` de cada transacción**: la asignación no tira
+  y no queda. Con él, `aplicarMotion` cayó en la llamada 11 dos veces seguidas; sin él, entre la 4 y la
+  42. Con esa dispersión no se puede decir que lo empeoraba, pero no contaba nada y tocaba un objeto
+  nativo en medio de crashes de memoria: se sacó.
+
+Lo que se hizo: `premiere_aplicar_motion` —escala, posición y rotación de hasta 30 clips por llamada, una
+lectura de la pista, lotes de hasta 20 acciones espaciados, sin leer valores—, para que una sesión con
+solo MCP no necesite 95 llamadas, y con la Rotation que ninguna tanda tenía; y un contador de la sesión
+en `estado` y en el resumen de todo verbo que escribe —transacciones, y las escrituras que las tandas suman
+aparte—, para que el próximo crash quede medido. Sin umbral de aviso: no hay número seguro. Lo que evita
+perder trabajo es lo de siempre: guardar antes y después de cada tanda —Premiere recupera lo guardado— y
+reiniciar Premiere antes de una tanda grande.

@@ -979,6 +979,107 @@ if (!cuerpoEditar) {
   }
 }
 
+/*
+ * LA MOTION EN TANDA Y EL CONTADOR DE LA SESIÓN (2026-09-27). Premiere se cayó en la escritura 57 de
+ * una tanda de `fijar` espaciada 1,2 s (un reporte de uso): desde MCP no había otra forma de escribir la
+ * Motion de 46 capas. `aplicarMotion` se EJECUTA contra una Motion de mentira: lee la pista una vez,
+ * valida TODO antes de escribir, no parte las acciones de un clip, no pasa de 20 por transacción y
+ * avisa del animado. Y `contarEn` se ejecuta sobre un proyecto de mentira: cuenta, y dice que NO
+ * cuenta cuando la envoltura no entra, en vez de devolver un cero que se leería como sesión limpia.
+ */
+{
+  const fuentes = ["async function aplicarMotion(", "async function getComponente(", "function getParametro(",
+    "function contarKeyframes(", "function pistaDeVideo("].map((f) => cuerpoDeFuncion(srcComandos, f));
+  const consts = (srcComandos.match(/const TOPE_MOTION = \d+;\nconst ACCIONES_POR_TX = \d+;/) || [""])[0];
+  const cont = (() => {
+    const a = srcComandos.indexOf("const SESION = {");
+    const b = srcComandos.indexOf("async function getProyecto()");
+    return a === -1 || b === -1 ? "" : srcComandos.slice(a, b);
+  })();
+  const casos = (() => {
+    if (fuentes.some((f) => !f) || !consts || !cont) return { error: "falta aplicarMotion, sus helpers, sus topes o el contador" };
+    const guion = `
+      const vm = require("vm"), fuentes = ${JSON.stringify(fuentes)}, consts = ${JSON.stringify(consts)}, cont = ${JSON.stringify(cont)};
+      const mundo = (n, animado) => {
+        const txs = [], lecturasPista = { n: 0 };
+        const clip = (i) => {
+          const val = { "Scale": 100, "Position": [0.5, 0.5], "Rotation": 0 };
+          const param = (nom) => ({ displayName: nom,
+            createKeyframe: (v) => ({ v }),
+            createSetValueAction: (kf) => () => { val[nom] = kf.v && kf.v.x !== undefined ? [kf.v.x, kf.v.y] : kf.v; },
+            getKeyframeListAsTickTimes: () => (animado && i === 1 && nom === "Rotation" ? [1, 2] : []) });
+          const ps = ["Scale", "Position", "Rotation"].map(param);
+          const motion = { getDisplayName: async () => "Motion", getParamCount: () => ps.length, getParam: (k) => ps[k] };
+          return { val, getComponentChain: async () => ({ getComponentCount: async () => 1, getComponentAtIndex: async () => motion }) };
+        };
+        const items = Array.from({ length: n }, (_, i) => clip(i));
+        const sequence = { name: "S", getVideoTrackCount: async () => 3,
+          getVideoTrack: async () => ({ getTrackItems: async () => { lecturasPista.n++; return items; } }) };
+        const project = { lockedAccess: (f) => f(),
+          executeTransaction: (cb) => { const l = []; cb({ addAction: (x) => l.push(x) }); txs.push(l.length); l.forEach((f) => f()); return true; } };
+        return { items, sequence, project, txs, lecturasPista };
+      };
+      const correr = async (w, params) => {
+        const ctx = { ppro: { PointF: function (x, y) { this.x = x; this.y = y; }, Constants: { TrackItemType: { CLIP: "CLIP" } } },
+          getProyectoYSecuencia: async () => ({ project: w.project, sequence: w.sequence }), esperarEntreTx: async () => {},
+          sumarEscrituras: (n) => { w.extra = (w.extra || 0) + n; } };
+        try {
+          vm.runInNewContext(consts + "\\n" + fuentes.join("\\n") + "\\nthis.f = aplicarMotion;", ctx);
+          const r = await ctx.f(params);
+          return { r: { escritos: r.escritos, animados: r.animados.length, transacciones: r.transacciones }, txs: w.txs, pista: w.lecturasPista.n,
+                   vals: w.items.map((x) => x.val), extra: w.extra || 0 };
+        } catch (e) { return { error: String(e.message || e).slice(0, 160), txs: w.txs }; }
+      };
+      const contar = (mutar) => {
+        const proto = { executeTransaction(cb) { cb({ addAction() {} }); return true; } };
+        if (mutar) Object.freeze(proto);
+        const project = Object.create(proto);
+        const ctx = {};
+        vm.runInNewContext(cont + "\\ncontarEn(project); project.executeTransaction(() => {}); project.executeTransaction(() => {});" +
+          "\\nthis.r = { contando: SESION.contando, tx: SESION.transacciones, texto: textoSesion() };", Object.assign(ctx, { project }));
+        return ctx.r;
+      };
+      const pedidos = (n) => Array.from({ length: n }, (_, i) => ({ indice: i, escala: 80, x: 0.4, y: 0.6, rotacion: 5 }));
+      (async () => console.log(JSON.stringify({
+        tanda: await correr(mundo(12, false), { pista: "V2", clips: pedidos(12) }),
+        animado: await correr(mundo(3, true), { pista: "V2", clips: [{ indice: 1, rotacion: 9 }] }),
+        repetido: await correr(mundo(3, false), { pista: "V2", clips: [{ indice: 1, escala: 90 }, { indice: 1, escala: 70 }] }),
+        soloX: await correr(mundo(3, false), { pista: "V2", clips: [{ indice: 0, x: 0.3 }] }),
+        vacio: await correr(mundo(3, false), { pista: "V2", clips: [{ indice: 0 }] }),
+        fuera: await correr(mundo(3, false), { pista: "V2", clips: [{ indice: 7, escala: 50 }] }),
+        muchos: await correr(mundo(40, false), { pista: "V2", clips: pedidos(31) }),
+        cuenta: contar(false), congelado: contar(true)
+      })))();`;
+    try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
+    catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
+  })();
+  const { tanda, animado, repetido, soloX, vacio, fuera, muchos, cuenta, congelado } = casos;
+  const rebotoSinEscribir = (c) => c && c.error && c.txs && c.txs.length === 0;
+  const cDisp = cuerpoDeFuncion(srcComandos, "async function ejecutar(") || "";
+  if (casos.error || (tanda && tanda.error)) {
+    mal("`aplicarMotion` o el contador no se pudieron ejecutar", casos.error || tanda.error);
+  } else if (tanda.txs.length + tanda.extra !== tanda.txs.reduce((a, n) => a + n, 0)) {
+    mal("`aplicarMotion` no le suma al contador de la sesión las escrituras de más de cada transacción",
+        "una de sus transacciones lleva hasta 18: contarla como una deja el aviso de sesión pesada ciego · " + JSON.stringify({ txs: tanda.txs, extra: tanda.extra }));
+  } else if (tanda.pista !== 1 || tanda.r.escritos.length !== 12 || tanda.txs.some((n) => n > 20 || n % 3) ||
+             !tanda.vals.every((v) => v.Scale === 80 && v.Position[0] === 0.4 && v.Position[1] === 0.6 && v.Rotation === 5)) {
+    mal("`aplicarMotion` no escribe la tanda como se midió", "una lectura de pista, hasta 20 acciones por transacción, sin partir un clip · " + JSON.stringify(tanda).slice(0, 200));
+  } else if (animado.error || animado.r.animados !== 1) {
+    mal("`aplicarMotion` no avisa del param ANIMADO", "ahí la escritura va al valor base y los keyframes la tapan");
+  } else if (![repetido, soloX, vacio, fuera, muchos].every(rebotoSinEscribir)) {
+    mal("`aplicarMotion` escribe algo antes de rebotar un pedido mal armado", "un índice repetido, x sin y, un clip sin pedido, uno fuera de la pista, más de 30");
+  } else if (!cuenta || cuenta.contando !== true || cuenta.tx !== 2 || !congelado || congelado.contando !== false || !/NO se pudieron contar/.test(congelado.texto)) {
+    mal("el contador de la sesión no cuenta, o devuelve un número cuando no puede contar", JSON.stringify({ cuenta, congelado }));
+  } else if (/\.addAction\s*=(?!=)/.test(srcComandos.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, ""))) {
+    mal("se le asigna una propiedad a un objeto de la API (`addAction`)",
+        "medido el 2026-09-27: la asignación no entra ni cuenta nada, y toca memoria nativa en medio de crashes de memoria");
+  } else if (!/cmd === "estado" \|\| SESION\.transacciones > txAntes/.test(cDisp)) {
+    mal("el despachador no pone el contador en `estado` y en los verbos que transaccionaron");
+  } else {
+    ok("`aplicarMotion` escribe la tanda con una lectura de pista y lotes de hasta 20 acciones, y el contador de la sesión dice cuando no cuenta");
+  }
+}
+
 /* ---------- marcar cuantiza al frame, como `cortar` ---------- */
 
 titulo("marcar cuantiza al frame de la secuencia e informa cuanto movio el marcador");
@@ -2994,7 +3095,7 @@ titulo("Un `entrada` inventado adentro de un fragmento NO se descarta en silenci
   } else {
     /* que la guarda se ejecute ANTES de tocar nada */
     const iGuarda = src.indexOf("const CLAVES_DE_OBJETO");
-    const iVerbo  = src.indexOf("return await fn(p);");
+    const iVerbo  = src.search(/(?:return|const r =) await fn\(p\);/);
     const antes = iGuarda > 0 && iVerbo > iGuarda;
     /* y que las claves declaradas sean las que el verbo LEE de verdad */
     const declaradas = {};
