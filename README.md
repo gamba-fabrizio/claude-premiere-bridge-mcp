@@ -152,7 +152,7 @@ claude mcp add premiere-bridge --scope user -- node /RUTA/A/TU/COPIA/premiere-br
 | `premiere_subclip` | Un pedazo con nombre de un medio, en el panel; verifica que el item aparezca |
 | `premiere_desactivar` | Apaga o prende el ojito DE UN CLIP, o de una pista entera, con TODOS los streams del audio vinculado y en lotes de 10 acciones; existe para dejar los suplentes a la vista sin que tapen el corte |
 | `premiere_renombrar_pista` | Le pone nombre a una pista de video o audio; relee para confirmar |
-| `premiere_exportar` | Renderiza la secuencia con un preset `.epr`; comprueba que el archivo aparezca |
+| `premiere_exportar` | Renderiza la secuencia con un preset `.epr`. `modo` es obligatorio: `ya` bloquea y comprueba que el archivo aparezca; `ame` lo encola en Media Encoder, sin confirmar, y con un `.mov` no admite rango |
 | `premiere_limpiar_rangos` | Saca los in/out de la secuencia (el Opt+X): `exportSequence` los RESPETA y un out viejo estira el export con negro al final |
 | `premiere_quitar_efecto` | Saca un efecto de un clip; el simétrico de agregar |
 | `premiere_abrir_proyecto` | Abre un .prproj por su ruta, o trae al frente uno ya abierto (no lo recarga) |

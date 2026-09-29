@@ -582,7 +582,15 @@ el bridge: cada una es una medición contra Premiere, no una deducción del nomb
 **Exportar, transcribir y eventos**
 
 - `exportSequence(secuencia, ExportType, salida, preset)`: el tipo va SEGUNDO; en otro orden
-  devuelve `false` sin escribir nada.
+  devuelve `false` sin escribir nada. Si el usuario cancela el render, tira `Error: User has
+  cancelled the export` y deja un parcial legible con timecode 0.
+- Con `QUEUE_TO_APP` devuelve `false` con las tres formas, con ProRes y con H.264 (26.5.1).
+- Con `QUEUE_TO_AME`, un preset QuickTime **ignora los in/out** y exporta la secuencia entera, sea
+  ProRes o H.264; H.264 `.mp4` y MXF los respetan. El tipo del preset está en el `.epr`,
+  `<ExporterFileType>`, un fourcc en decimal: 1299148630 es MooV, 1211250228 H264, 1347246150 PMXF.
+- `createSetInPointAction` + `createSetOutPointAction` de la SECUENCIA en UNA transacción: el out se
+  aplica primero, y un out antes del in actual descarta el in. En transacciones separadas se acepta
+  hasta un in pasado del out.
 - En `EncoderManager`, `getExportFileExtension` e `isAMEInstalled` figuran en el reflejo y no son
   funciones.
 - `launchEncoder()` devuelve `true` antes de que Media Encoder esté listo; `startBatchEncode()`

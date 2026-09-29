@@ -3671,6 +3671,138 @@ titulo("exportar lee los in/out de la secuencia aunque no se le pida rango");
   }
 }
 
+/*
+ * EXPORTAR: EL MODO SIN DEFAULT, EL .mov EN COLA, LA CANCELACIÓN Y LA REPOSICIÓN (2026-09-29). Dos
+ * reportes de uso, reproducidos en el proyecto de prueba: una cancelación del editor que el verbo siguió
+ * reintentando y que salteaba la reposición del in/out, y un .mov por Media Encoder que ignoró el rango.
+ * Y lo que apareció midiendo: la reposición en UNA transacción perdía el in cuando la marca vieja estaba
+ * entera ANTES del rango. `exportar` se EJECUTA contra una API de mentira con la regla medida de los
+ * in/out —en una transacción el out va primero, y un out antes del in actual descarta el in—, y cada
+ * error se pasa por `A_MEDIAS.limpiar`, como hace el despachador.
+ */
+titulo("exportar: modo sin default, .mov en cola, cancelación y reposición en dos transacciones");
+{
+  const fuentes = ["async function exportar(", "async function tipoDePreset("].map((f) => cuerpoDeFuncion(srcComandos, f));
+  const casos = (() => {
+    if (fuentes.some((f) => !f)) return { error: "falta `exportar` o `tipoDePreset`" };
+    const guion = `
+      const vm = require("vm"), fuentes = ${JSON.stringify(fuentes)};
+      const T = 254016000000, SENT = -400000, PRESET = "/p.epr", SALIDA = "/s.mov";
+      const tk = (s) => ({ ticks: String(Math.round(s * T)) }), sg = (t) => Number(t.ticks) / T;
+      const correr = async ({ marca, formas, params, tipo, parcial }) => {
+        const st = { in: marca[0], out: marca[1] }, txs = [], llamadas = [], archivos = new Set();
+        const sequence = { name: "S",
+          getInPoint: async () => tk(st.in), getOutPoint: async () => tk(st.out), getEndTime: async () => tk(3),
+          createSetInPointAction: (t) => ({ tipo: "in", v: sg(t) }),
+          createSetOutPointAction: (t) => ({ tipo: "out", v: sg(t) }) };
+        const project = { lockedAccess: (f) => f(),
+          executeTransaction: (cb) => {
+            const acts = []; cb({ addAction: (a) => acts.push(a) });
+            txs.push(acts.map((a) => a.tipo).join("+"));
+            const outs = acts.filter((a) => a.tipo === "out"), ins = acts.filter((a) => a.tipo === "in");
+            if (outs.length && ins.length) {
+              for (const o of outs) st.out = o.v;
+              if (st.out < st.in) st.in = SENT; else for (const i of ins) st.in = i.v;
+            } else for (const a of acts) st[a.tipo] = a.v;
+            return true;
+          } };
+        const em = { isAMEInstalled: true,
+          getExportFileExtension: () => { throw new Error("is not a function"); },
+          exportSequence: async () => {
+            const f = formas[llamadas.length]; llamadas.push(1);
+            if (f instanceof Error) { if (parcial) archivos.add(SALIDA); throw f; }
+            if (f === true) archivos.add(SALIDA);
+            return f;
+          },
+          launchEncoder: async () => true, startBatchEncode: async () => true };
+        const getEntryWithUrl = async (url) => {
+          const ruta = url.replace(/^file:/, "");
+          if (ruta === PRESET) return { read: async () => "<x><ExporterFileType>" + tipo + "</ExporterFileType></x>" };
+          if (archivos.has(ruta)) return { read: async () => "" };
+          throw new Error("no existe");
+        };
+        const ctx = {
+          ppro: { Constants: { ExportType: { IMMEDIATELY: 0, QUEUE_TO_AME: 1, QUEUE_TO_APP: 2 } },
+                  EncoderManager: { getManager: () => em }, TickTime: { createWithTicks: (t) => ({ ticks: t }) } },
+          uxp: { storage: { localFileSystem: { getEntryWithUrl } } },
+          getProyectoYSecuencia: async () => ({ project, sequence }),
+          aSegundos: sg, aTick: tk, A_MEDIAS: {}, setTimeout: (f) => f()
+        };
+        vm.runInNewContext(fuentes.join("\\n") + "\\nthis.f = exportar;", ctx);
+        const out = { txs, llamadas: 0 };
+        try {
+          const r = await ctx.f(Object.assign({ preset: PRESET, salida: SALIDA }, params));
+          out.resumen = r.resumen; out.volvioBien = r.volvioBien;
+        } catch (e) {
+          out.error = String(e.message || e).slice(0, 400);
+          const am = ctx.A_MEDIAS.exportar;
+          out.aMedias = !!am;
+          if (am) out.limpio = await am.limpiar();
+        }
+        out.llamadas = llamadas.length;
+        out.final = [st.in, st.out];
+        return out;
+      };
+      const H264 = 1211250228, MOOV = 1299148630, CANCEL = new Error("Error: User has cancelled the export");
+      (async () => console.log(JSON.stringify({
+        sinModo: await correr({ marca: [SENT, SENT], formas: [true], params: {}, tipo: H264 }),
+        lote: await correr({ marca: [SENT, SENT], formas: [true], params: { modo: "lote" }, tipo: H264 }),
+        movEnCola: await correr({ marca: [SENT, SENT], formas: [true], params: { modo: "ame", desde: 1, hasta: 2 }, tipo: MOOV }),
+        cancelado: await correr({ marca: [1, 2], formas: [CANCEL, true, true], params: { modo: "ya", desde: 2.4, hasta: 2.9 },
+                                  tipo: MOOV, parcial: true }),
+        otroError: await correr({ marca: [1, 2], formas: [new Error("Disk full"), true, true],
+                                  params: { modo: "ya", desde: 2.4, hasta: 2.9 }, tipo: H264 }),
+        firma: await correr({ marca: [SENT, SENT], formas: [new Error("Illegal Parameter type"), true], params: { modo: "ya" }, tipo: H264 }),
+        espejo: await correr({ marca: [1, 2], formas: [true], params: { modo: "ya", desde: 2.4, hasta: 2.9 }, tipo: H264 }),
+        despues: await correr({ marca: [2, 2.84], formas: [true], params: { modo: "ya", desde: 0.5, hasta: 1 }, tipo: H264 }),
+        sentinel: await correr({ marca: [SENT, SENT], formas: [true], params: { modo: "ya", desde: 1, hasta: 2 }, tipo: H264 }),
+        movSinRango: await correr({ marca: [1, 2], formas: [true], params: { modo: "ame" }, tipo: MOOV })
+      })))();`;
+    try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
+    catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
+  })();
+  const { sinModo, lote, movEnCola, cancelado, otroError, firma, espejo, despues, sentinel, movSinRango } = casos;
+  const noToco = (c) => c && c.error && c.txs.length === 0 && c.llamadas === 0;
+  const igual = (a, b) => Array.isArray(a) && Math.abs(a[0] - b[0]) < 0.01 && Math.abs(a[1] - b[1]) < 0.01;
+  const srv = fs.readFileSync(path.join(raiz, "server/index.js"), "utf8");
+  const iHerr = srv.indexOf('"premiere_exportar"');
+  const bloqueHerr = iHerr === -1 ? "" : srv.slice(iHerr, srv.indexOf("server.registerTool(", iHerr));
+  if (casos.error) {
+    mal("`exportar` no se pudo ejecutar contra la API de mentira", casos.error);
+  } else if (!noToco(sinModo) || !/Falta `modo`/.test(sinModo.error)) {
+    mal("`exportar` sin `modo` no rebota antes de tocar nada",
+        "fue `ame` por defecto mientras USO.md decía `ya`, y los dos tienen su trampa · " + JSON.stringify(sinModo).slice(0, 200));
+  } else if (!/modo: z\.enum\(\["ya", "ame"\]\)\.describe\(/.test(bloqueHerr)) {
+    mal("`premiere_exportar` no exige `modo`, o todavía ofrece `lote`", "desde MCP el default volvería a elegir por quien llama");
+  } else if (!noToco(lote) || !/`lote` no exporta/.test(lote.error)) {
+    mal("`exportar` acepta `lote`", "medido el 2026-09-29: exportSequence con QUEUE_TO_APP devuelve false con las tres formas y no escribe nada");
+  } else if (!noToco(movEnCola) || !/QuickTime/.test(movEnCola.error)) {
+    mal("un .mov en cola con rango no rebota antes de tocar nada",
+        "Media Encoder exporta la secuencia ENTERA: medido con ProRes y con H.264 en .mov · " + JSON.stringify(movEnCola).slice(0, 200));
+  } else if (!cancelado.error || !/CANCELADO/.test(cancelado.error) || cancelado.llamadas !== 1 || !/PARCIAL/.test(cancelado.error)) {
+    mal("una cancelación no corta los intentos, o no dice que quedó un archivo PARCIAL",
+        "el editor canceló a los ~49 min y el verbo siguió probando formas: una que entrara relanzaba el render · " + JSON.stringify(cancelado).slice(0, 240));
+  } else if (!cancelado.aMedias || !igual(cancelado.final, [1, 2]) || !/REPUESTOS/.test(cancelado.limpio || "")) {
+    mal("tras la cancelación el in/out del editor no vuelve", "quedaba el rango del export, y el `exportar` siguiente lo leía como `inOutPrevio` · " + JSON.stringify(cancelado).slice(0, 240));
+  } else if (!otroError.error || otroError.llamadas !== 1 || !/FALL/.test(otroError.error) || !igual(otroError.final, [1, 2])) {
+    mal("un error del export que no es de firma sigue probando formas, o no repone el in/out", JSON.stringify(otroError).slice(0, 240));
+  } else if (firma.error || firma.llamadas !== 2) {
+    mal("una firma equivocada (\"Illegal Parameter type\") ya no pasa a la forma siguiente", JSON.stringify(firma).slice(0, 200));
+  } else if (espejo.error || !espejo.volvioBien || !igual(espejo.final, [1, 2]) || espejo.txs.some((t) => t.includes("+"))) {
+    mal("la reposición pierde el in cuando la marca vieja queda entera ANTES del rango",
+        "medido el 2026-09-29 en UNA transacción: de 2,40–2,90 a 1,00–2,00 quedó −400000–2,00 · " + JSON.stringify(espejo).slice(0, 240));
+  } else if (despues.error || !igual(despues.final, [2, 2.84]) || sentinel.error || !igual(sentinel.final, [-400000, -400000]) ||
+             !/volvió a no tenerlos/.test(sentinel.resumen || "")) {
+    mal("la reposición en dos transacciones no devuelve la marca vieja DESPUÉS del rango, o el sentinel",
+        JSON.stringify({ despues, sentinel }).slice(0, 300));
+  } else if (movSinRango.error || !/IGNORA/.test(movSinRango.resumen || "") || /los RESPETA/.test(movSinRango.resumen || "")) {
+    mal("con un .mov en cola el resumen promete que se respeta el in/out que ya tenía la secuencia",
+        "medido: la cola lo ignora y sale la secuencia entera");
+  } else {
+    ok("sin `modo` y con `lote` rebota, un .mov en cola con rango rebota, una cancelación corta y repone, y la reposición va en dos transacciones");
+  }
+}
+
 /* ---------- colocar_fragmentos: colision de nombres entre carpetas de material ---------- */
 
 titulo("colocar_fragmentos compara la RUTA, no solo el nombre, antes de importar");

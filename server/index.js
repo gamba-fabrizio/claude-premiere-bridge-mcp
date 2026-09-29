@@ -1832,13 +1832,17 @@ server.registerTool(
     description:
       "Renderiza la secuencia activa con un preset `.epr`. Era el único hueco real del bridge: " +
       "se podía armar un corte y no había forma de sacarlo.\n\n" +
-      "Tres modos. `ame` (por defecto) lo encola en Media Encoder y vuelve al instante; `lote` lo " +
-      "encola en el render interno de Premiere; **`ya` bloquea hasta terminar** y es el único que " +
-      "permite confirmar el resultado.\n\n" +
-      "**La verificación es que el ARCHIVO APAREZCA en disco**, no que la llamada no tire. En los " +
-      "modos de cola eso no se puede comprobar —lo escribe otro proceso después— y el verbo lo " +
-      "dice en vez de fingir que confirmó. Y si el archivo YA EXISTÍA, avisa que no puede afirmar " +
-      "que se reescribió.\n\n" +
+      "**`modo` es OBLIGATORIO y no tiene default, a propósito**: los dos tienen una trampa.\n" +
+      "- `ya` renderiza en el momento, bloquea Premiere y CONFIRMA el archivo en disco. Pero esta " +
+      "llamada deja de esperar a los 30 min y el render SIGUE: si vence, no lo relances, mirá el disco.\n" +
+      "- `ame` lo encola en Media Encoder y vuelve al instante, pero NO confirma nada: medí el archivo. " +
+      "Y con un preset QuickTime (.mov) Media Encoder IGNORA el rango y exporta la secuencia entera " +
+      "(medido): esa combinación rebota antes de tocar nada.\n" +
+      "Corto: `ya`; largo: `ame`. `lote` no existe más: no exportaba nada.\n\n" +
+      "**La verificación es que el ARCHIVO APAREZCA en disco**, no que la llamada no tire. En la " +
+      "cola eso no se puede comprobar —lo escribe otro proceso después— y el verbo lo dice en vez de " +
+      "fingir que confirmó. Y si el archivo YA EXISTÍA, avisa que no puede afirmar que se reescribió. " +
+      "Si el export se CANCELA o falla, lo dice y NO reintenta.\n\n" +
       "Premiere trae ~1000 presets en `Contents/MediaIO/systempresets`; para H.264 sirve " +
       "\"00 - Match Source - High bitrate.epr\".",
     inputSchema: soloEstas({
@@ -1852,7 +1856,7 @@ server.registerTool(
         ),
       preset: z.string().describe("Ruta absoluta a un .epr."),
       salida: z.string().describe("Ruta absoluta del archivo a escribir."),
-      modo: z.enum(["ame", "lote", "ya"]).optional().describe("`ame` encola en Media Encoder (por defecto), `lote` en el render de Premiere, `ya` bloquea hasta terminar y es el único verificable."),
+      modo: z.enum(["ya", "ame"]).describe("OBLIGATORIO. `ya` bloquea hasta terminar y confirma el archivo (la llamada espera hasta 30 min); `ame` encola en Media Encoder, vuelve al instante y no confirma nada, y con un preset .mov no admite rango."),
       desde: z.number().optional().describe("Segundo donde empieza el rango a exportar. Pone el IN de la secuencia y lo repone al terminar."),
       hasta: z.number().optional().describe("Segundo donde termina. Sin `desde` ni `hasta` se exporta la secuencia entera."),
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada.")

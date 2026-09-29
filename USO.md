@@ -85,10 +85,13 @@ en `CLAUDE.md`.
 - **`copiarEfecto` NO copia: COMPARTE la instancia.** Tocar el destino cambia el origen, en otra
   secuencia y sin aviso. Para una copia independiente, `clonar` (el clip entero) o Cmd+C / Cmd+V.
   Opacity y Blend Mode viven en el componente Opacity y se fijan aparte.
-- **`exportar` en modo `ya`**, que es el único que se confirma. El preset H.264 va de la carpeta
-  `4E49434B_48323634`: el mismo nombre en la de QuickTime escribe `.mov`. Respeta los in/out de la
-  secuencia, que `limpiarRangos` saca. Y el archivo se mide de afuera: duración por stream y
-  paquetes de video.
+- **`exportar` pide `modo` siempre, sin default**: `ya` es el único que se confirma, pero la llamada
+  espera 30 min —si vence, el render sigue: no lo relances, mirá el disco—; `ame` vuelve al instante
+  y no confirma nada, y **con un preset `.mov` la cola ignora el rango** y exporta la secuencia
+  entera, así que esa combinación rebota. `lote` no exporta. Si el export se cancela o falla, lo
+  dice, no reintenta y repone el in/out. El preset H.264 va de la carpeta `4E49434B_48323634`: el
+  mismo nombre en la de QuickTime escribe `.mov`. Respeta los in/out de la secuencia, que
+  `limpiarRangos` saca. Y el archivo se mide de afuera: duración por stream y paquetes de video.
 - **La escala de un medio que ya está en la secuencia se lee con `leerEscalas`**, no se calcula de
   las dimensiones del archivo. `escalaFija` va de a 30 clips (`limite` y `siguiente`): sin tope,
   sobre material 4K pesado, tiró Premiere.

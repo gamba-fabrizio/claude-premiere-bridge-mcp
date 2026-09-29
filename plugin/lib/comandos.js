@@ -18,6 +18,28 @@ const ppro = require("premierepro");
 const uxp = require("uxp");
 
 /**
+ * El tipo de exportador de un preset, leído del .epr (2026-09-29). `<ExporterFileType>` es un fourcc
+ * en decimal —1299148630 es "MooV" (QuickTime), 1211250228 "H264", 1347246150 "PMXF" (MXF)— y es el
+ * mismo número que forma la segunda mitad del nombre de las carpetas de presets de sistema
+ * (…_4D6F6F56, …_48323634, …_504D5846). Se lee del archivo y no de la ruta: una copia del preset con
+ * ID propio vive en cualquier carpeta y con cualquier nombre, pero conserva el tipo. Si no se puede
+ * leer, lo dice en `error` en vez de adivinar.
+ */
+async function tipoDePreset(ruta) {
+  try {
+    const entry = await uxp.storage.localFileSystem.getEntryWithUrl("file:" + ruta);
+    const txt = String(await entry.read());
+    const m = /<ExporterFileType>\s*(\d+)\s*</.exec(txt);
+    if (!m) return { fourcc: null, numero: null, error: "el .epr no tiene <ExporterFileType>" };
+    const n = Number(m[1]);
+    const fourcc = [24, 16, 8, 0].map((s) => String.fromCharCode((n >>> s) & 255)).join("");
+    return { fourcc: fourcc, numero: n, error: null };
+  } catch (e) {
+    return { fourcc: null, numero: null, error: e && e.message ? e.message : String(e) };
+  }
+}
+
+/**
  * Exportar la secuencia activa. Era el único hueco real del bridge: se podía
  * armar un corte y no había forma de renderizarlo.
  *
@@ -26,10 +48,10 @@ const uxp = require("uxp");
  * `encodeFile`, `encodeProjectItem` y eventos de progreso. Apareció leyendo el
  * mapa de cobertura de otro proyecto de MCP, y se confirmó reflejando la API.
  *
- * Tres modos, con los IDs que devuelve `Constants.ExportType`:
+ * Dos modos, con los IDs que devuelve `Constants.ExportType`, y sin default (abajo, por qué):
  *   · `ya` (IMMEDIATELY) — Premiere renderiza y BLOQUEA hasta terminar
  *   · `ame` (QUEUE_TO_AME) — lo encola en Media Encoder y vuelve al instante
- *   · `lote` (QUEUE_TO_APP) — lo encola en el render interno de Premiere
+ * `lote` (QUEUE_TO_APP) rebota: no exporta nada.
  *
  * La verificación es que el ARCHIVO APAREZCA, no que la llamada no tire: en modo
  * `ya` se relee el disco al terminar. En los modos de cola no puede verificarse
@@ -43,8 +65,45 @@ async function exportar(params) {
   if (!preset) throw new Error("Falta `preset`: la ruta a un .epr. Premiere trae ~1000 en Contents/MediaIO/systempresets.");
   if (!salida) throw new Error("Falta `salida`: la ruta del archivo a escribir.");
 
+  /*
+   * EL MODO NO TIENE DEFAULT, A PROPÓSITO (2026-09-29). Fue `ame` desde el primer día mientras la
+   * bitácora y USO.md decían que el de siempre era `ya`: quien no lo pasaba recibía el que no se
+   * confirma. Y ninguno sirve de default, porque los dos tienen una trampa que quien llama no ve:
+   *
+   *   · `ya` renderiza en el momento, bloquea Premiere y CONFIRMA el archivo en disco. Pero por MCP la
+   *     llamada deja de esperar a los 30 min y el render sigue: relanzarlo es un segundo render.
+   *   · `ame` encola en Media Encoder y vuelve al instante, pero NO confirma nada, y con un preset
+   *     QuickTime ignora el rango (abajo).
+   *
+   * Así que se elige en cada llamada, y se valida ANTES de tocar la secuencia. `lote` (QUEUE_TO_APP)
+   * rebota: medido el 2026-09-29, `exportSequence` devuelve false con las tres formas, con ProRes y con
+   * H.264, y no escribe nada.
+   */
+  const MODOS = {
+    ya: ppro.Constants.ExportType.IMMEDIATELY,
+    ame: ppro.Constants.ExportType.QUEUE_TO_AME
+  };
+  if (params.modo === "lote") {
+    throw new Error("`lote` no exporta: medido el 2026-09-29, exportSequence con QUEUE_TO_APP devuelve false con las tres " +
+      "formas, con ProRes y con H.264, y no escribe nada. Usá `ya` o `ame`. NO se tocó nada.");
+  }
+  // Por la CLAVE y no por el valor: un ExportType que valiera 0 haría rebotar a `ya`.
+  if (!params.modo || !Object.prototype.hasOwnProperty.call(MODOS, params.modo)) {
+    throw new Error(`Falta \`modo\`${params.modo ? ` (vino "${params.modo}")` : ""}, y no tiene default a propósito: ` +
+      "`ya` renderiza en el momento, bloquea Premiere y CONFIRMA el archivo en disco, pero por MCP la llamada deja de " +
+      "esperar a los 30 min y el render sigue —no lo relances—; `ame` lo encola en Media Encoder y vuelve al instante, " +
+      "pero NO confirma nada —medí el archivo— y con un preset QuickTime (.mov) ignora el rango. Corto: `ya`; " +
+      "largo: `ame`. NO se tocó nada.");
+  }
+  const modo = params.modo;
+
   const em = ppro.EncoderManager.getManager();
   if (!em) throw new Error("EncoderManager.getManager() devolvió vacío.");
+  let ame = null;
+  try { ame = await em.isAMEInstalled; } catch (e) { ame = null; }
+  if (modo === "ame" && ame === false) {
+    throw new Error('El modo "ame" necesita Media Encoder y isAMEInstalled dio false. Probá con modo "ya". NO se tocó nada.');
+  }
 
   /*
    * RANGO. `exportSequence` no toma tiempos: lo único que hay son los in/out de la
@@ -58,8 +117,91 @@ async function exportar(params) {
    * devuelven Promises que pasan cualquier guarda (ver `cortar` en CLAUDE.md).
    */
   const hayRango = params.desde !== undefined || params.hasta !== undefined;
+
+  /*
+   * EN LA COLA, UN PRESET QUICKTIME IGNORA EL RANGO (2026-09-29, un reporte de uso). Un horneado en ProRes
+   * .mov por `ame`, con el in/out puesto en 17,64–235,12, salió con la secuencia ENTERA —269,04 s—
+   * tras ~75 min de render. Reproducido en el proyecto de prueba, rango 1–2 s sobre 3 s:
+   *
+   *     cola, H.264 .mp4 (familia H264)      1,000 s    respeta, como el 2026-09-11
+   *     cola, ProRes MXF (familia PMXF)      1,000 s    respeta
+   *     cola, ProRes .mov (familia MooV)     3,000 s    la secuencia ENTERA
+   *     cola, H.264 .mov (familia MooV)      3,000 s    la secuencia ENTERA
+   *     `ya`, ProRes .mov                     1,000 s    respeta
+   *
+   * O sea que no es el códec: es QuickTime EN LA COLA, y el in/out que ya tuviera la secuencia
+   * tampoco cuenta. El tipo se lee del .epr —`<ExporterFileType>`, un fourcc: MooV es QuickTime—, que
+   * una copia del preset con ID propio conserva, en vez de deducirlo del nombre o de la carpeta. Y se
+   * rebota ANTES de tocar nada: ese pedido nunca sale como se pidió.
+   */
+  const tipo = await tipoDePreset(preset);
+  const movEnCola = modo === "ame" && tipo.fourcc === "MooV";
+  if (movEnCola && hayRango) {
+    throw new Error("Con un preset QuickTime (.mov), Media Encoder IGNORA el rango y exporta la secuencia ENTERA: " +
+      "medido el 2026-09-29 con ProRes y con H.264 en .mov —rango 1–2 s, archivo de 3 s—. Usá modo `ya`, que en " +
+      ".mov sí lo respeta; un preset MXF o H.264 (.mp4), que en cola lo respetan; o exportá sin rango. NO se tocó nada.");
+  }
+
   let inViejo = null, outViejo = null, rangoPuesto = null, rangoError = null, aplico = null;
   const esperarUn = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  /*
+   * SE REPONEN LOS IN/OUT DEL USUARIO PASE LO QUE PASE (2026-09-29, un reporte de uso): la llama el final
+   * del verbo y, si algo tira en el medio, el despachador por `A_MEDIAS`. Estaba en línea al final, y
+   * cualquier throw la salteaba: una cancelación del editor dejó la secuencia marcada con el rango del
+   * export, y el `exportar` siguiente lo leyó como `inOutPrevio`. Reproducido en el de prueba con un
+   * `lote` que no exportó: la marca del editor quedó pisada por el rango.
+   *
+   * Y EN DOS TRANSACCIONES, como al ponerlos. Iba en UNA, y medido el mismo día eso pierde el in
+   * cuando la marca vieja queda entera ANTES del rango exportado: de 2,40–2,90 a 1,00–2,00 quedó
+   * −400000–2,00. Es la regla del 2026-08-19: dentro de una transacción Premiere aplica el OUT primero,
+   * y un out que cae antes del in actual invierte el rango y descarta el in, en silencio. Con la marca
+   * vieja DESPUÉS del rango volvió bien aun en una sola, y ese era el único caso que se había mirado.
+   * En transacciones separadas se aceptó hasta un in pasado del out; igual se ordenan para no pasar
+   * nunca por el rango invertido.
+   */
+  async function reponerInOut() {
+    const r = { rangoRepuesto: null, noHabiaInOut: false, inOutFinal: null, inOutOriginal: null, volvioBien: null };
+    /*
+     * "NO HABÍA IN/OUT" SE DETECTA POR EL SENTINEL: sin marca los getters devuelven −400000, no 0 y
+     * el final (medido el 2026-08-28 en cuatro secuencias), y el sentinel SE PUEDE REESCRIBIR, así que
+     * el estado "sin marca" vuelve. Lo que sí es una marca real es `0 → final`.
+     */
+    try {
+      r.noHabiaInOut = Math.abs(aSegundos(inViejo)) > 1e5 || Math.abs(aSegundos(outViejo)) > 1e5;
+    } catch (e) { r.noHabiaInOut = false; }
+    let outActual = null;
+    try { outActual = aSegundos(await sequence.getOutPoint()); } catch (e) { outActual = null; }
+    // Si el in viejo cae después del out que está puesto, primero el out.
+    const outPrimero = outActual !== null && !r.noHabiaInOut && aSegundos(inViejo) >= outActual;
+    const pasos = outPrimero
+      ? [["out", () => sequence.createSetOutPointAction(outViejo)], ["in", () => sequence.createSetInPointAction(inViejo)]]
+      : [["in", () => sequence.createSetInPointAction(inViejo)], ["out", () => sequence.createSetOutPointAction(outViejo)]];
+    r.rangoRepuesto = true;
+    for (const [cual, accion] of pasos) {
+      await esperarUn(1200);
+      try {
+        project.lockedAccess(() => {
+          if (!project.executeTransaction((a) => { a.addAction(accion()); }, `reponer ${cual} de exportación`)) r.rangoRepuesto = false;
+        });
+      } catch (e) { r.rangoRepuesto = false; }
+    }
+    /* Y SE RELEE: que executeTransaction devuelva true no prueba que el in/out haya vuelto. */
+    try {
+      const i2 = await sequence.getInPoint(), o2 = await sequence.getOutPoint();
+      r.inOutFinal = { desde: aSegundos(i2), hasta: aSegundos(o2) };
+      r.inOutOriginal = { desde: aSegundos(inViejo), hasta: aSegundos(outViejo) };
+      r.volvioBien = Math.abs(r.inOutFinal.desde - r.inOutOriginal.desde) < 0.05 &&
+                     Math.abs(r.inOutFinal.hasta - r.inOutOriginal.hasta) < 0.05;
+    } catch (e) { r.inOutFinal = null; }
+    return r;
+  }
+  const textoReposicion = (r) => r.volvioBien
+    ? "in/out de la secuencia REPUESTOS y releídos"
+    : (r.inOutFinal
+        ? `OJO: in/out MAL REPUESTOS, quedaron ${r.inOutFinal.desde.toFixed(2)}–${r.inOutFinal.hasta.toFixed(2)}s` +
+          (r.noHabiaInOut ? " y no había marca: se saca con Opt+X" : "")
+        : "OJO: los in/out NO se pudieron releer después de reponerlos");
 
   /*
    * LOS IN/OUT SE LEEN SIEMPRE, no sólo cuando se pide un rango.
@@ -111,6 +253,17 @@ async function exportar(params) {
      * dos juntas, un solo booleano tapaba que una fallara.
      */
     let ok = false, okIn = null, okOut = null;
+    /*
+     * La reposición se anota ANTES de la primera transacción del rango: si algo tira desde acá —una
+     * cancelación, un rango que no entró, un export que falla—, el despachador la corre y el error lo
+     * dice. Es el mismo `A_MEDIAS` de `armarSecuencia`, y se borra al reponer.
+     */
+    if (inViejo && outViejo) {
+      A_MEDIAS.exportar = {
+        describir: () => `el rango ${desde.toFixed(2)}–${hasta.toFixed(2)}s llegó a ponerse en la secuencia`,
+        limpiar: async () => textoReposicion(await reponerInOut())
+      };
+    }
     try {
       project.lockedAccess(() => {
         ok = project.executeTransaction((a) => {
@@ -139,19 +292,6 @@ async function exportar(params) {
     // "rango 1–6" sobre un archivo que empieza en 0 es mentir con un número.
     aplico = { in: okIn, out: okOut };
     await esperarUn(1200);   // no encadenar transacciones con lo que viene
-  }
-
-  let ame = null;
-  try { ame = await em.isAMEInstalled; } catch (e) { ame = null; }
-
-  const MODOS = {
-    ya: ppro.Constants.ExportType.IMMEDIATELY,
-    ame: ppro.Constants.ExportType.QUEUE_TO_AME,
-    lote: ppro.Constants.ExportType.QUEUE_TO_APP
-  };
-  const modo = params.modo && MODOS[params.modo] ? params.modo : "ame";
-  if (modo !== "ya" && ame === false) {
-    throw new Error(`El modo "${modo}" necesita Media Encoder y isAMEInstalled dio false. Probá con modo "ya".`);
   }
 
   // ¿ya existía el archivo? Sin esto, un export que no hace nada sobre un archivo
@@ -201,17 +341,46 @@ async function exportar(params) {
    * Y se guarda lo que DEVUELVE cada una, que antes se descartaba.
    */
   const devoluciones = [];
-  let ahora = null;
+  let ahora = null, detenido = null;
   for (const [etiqueta, fn] of formas) {
     let dev;
     try { dev = await fn(); }
-    catch (e) { intentos.push(etiqueta + ": " + (e && e.message ? e.message : e)); continue; }
+    catch (e) {
+      const msg = e && e.message ? e.message : String(e);
+      intentos.push(etiqueta + ": " + msg);
+      /*
+       * SÓLO UNA FIRMA EQUIVOCADA PASA A LA FORMA SIGUIENTE (2026-09-29, un reporte de uso). El editor canceló
+       * a los ~49 min y el verbo siguió con las otras dos: devolvieron false, pero si una hubiera entrado
+       * RELANZABA una hora de render que se acababa de cancelar a propósito. Las formas equivocadas de
+       * este método no tiran —devuelven false, medido el 2026-08-19—, y en esta API una firma equivocada
+       * que tira dice "Illegal Parameter type". Cualquier otro error es del export —cancelación, disco,
+       * códec— y se corta ahí, sin depender de cómo escriba "cancel" cada versión.
+       */
+      if (/illegal parameter/i.test(msg)) continue;
+      detenido = msg;
+      break;
+    }
     devoluciones.push(etiqueta + " → " + (dev === undefined ? "undefined" : JSON.stringify(dev)));
     // `false` es un NO explícito: la firma equivocada contesta eso sin tirar.
     if (dev === false) { intentos.push(etiqueta + ": devolvió false"); continue; }
     if (modo !== "ya") { via = etiqueta; break; }
     if (await existe(salida)) { via = etiqueta; ahora = true; break; }
     intentos.push(etiqueta + ": no tiró pero NO escribió el archivo");
+  }
+  if (detenido) {
+    /* Tira, y `A_MEDIAS` repone el rango antes de que el error llegue. Lo que quedó en disco se dice
+     * como es: el parcial de una cancelación es legible pero sale con timecode 0, y si el archivo ya
+     * existía no se sabe si es el viejo o un parcial. */
+    const quedo = await existe(salida);
+    throw new Error(
+      (/cancel/i.test(detenido) ? `CANCELADO por el usuario (${detenido})` : `el export FALLÓ: ${detenido}`) +
+      ". NO se probaron las otras formas: relanzar un export que se cortó es repetir el render." +
+      (quedo
+        ? (habia
+            ? ` En "${salida}" hay un archivo, pero YA EXISTÍA antes: puede ser el viejo o un parcial.`
+            : ` Quedó un archivo PARCIAL en "${salida}": no es el export.`)
+        : "")
+    );
   }
   if (!via) {
     throw new Error(
@@ -279,62 +448,17 @@ async function exportar(params) {
     }
   }
   /*
-   * Se reponen los in/out del usuario pase lo que pase con el export.
-   *
-   * PERO NO SE PUEDEN LIMPIAR. `Sequence` sólo expone createSetInPointAction y
-   * createSetOutPointAction: no hay un createClearInOutPointsAction como el de
-   * ClipProjectItem. Así que si la secuencia NO tenía in/out, los getters
-   * devuelven 0 y el final, y reponer esos valores deja un in/out visible
-   * abarcando todo donde antes no había ninguno.
-   *
-   * Se detecta y se AVISA, en vez de informar "repuesto" y dejarle al usuario una
-   * marca que él no puso. Limpiarlo es Opt+X en Premiere.
+   * Se reponen los in/out del usuario con `reponerInOut`, arriba: dos transacciones y la relectura.
+   * NO se pueden LIMPIAR —`Sequence` no tiene un createClearInOutPointsAction como el de
+   * ClipProjectItem—, pero no hace falta: sin marca los getters dan el sentinel, y reponerlo devuelve
+   * el estado "sin marca". Si no vuelve, el resumen lo avisa, y limpiarlo es Opt+X.
    */
   let rangoRepuesto = null, noHabiaInOut = false;
   let inOutFinal = null, inOutOriginal = null, volvioBien = null;
   if (hayRango && inViejo && outViejo) {
-    /*
-     * "NO HABIA IN/OUT" SE DETECTA POR EL SENTINEL, y esto estaba escrito al revés.
-     *
-     * El CLAUDE.md afirmaba que sin marca los getters devuelven 0 y el final, y sobre esa premisa
-     * se construyó el aviso de que reponer deja una marca donde no la había. Medido el 2026-08-28
-     * en el proyecto de prueba, cuatro secuencias por la misma vía:
-     *
-     *     VERTICAL, Nested 01, Nested 02   ->  -400000 / -400000   (sin marca)
-     *     HORIZONTAL FHD                   ->   499.88 /  499.92   (marca real)
-     *
-     * O sea que sin marca devuelven un SENTINEL, no 0 y el final. Y el sentinel SE PUEDE
-     * REESCRIBIR: el export de un multicamara del 2026-08-27 lo repuso y la relectura dio -400000 otra vez,
-     * así que el estado "sin marca" vuelve y no hay nada que avisar.
-     *
-     * Lo que sí es una marca real es `0 → final`: abarca todo, pero alguien la puso.
-     */
-    try {
-      noHabiaInOut = Math.abs(aSegundos(inViejo)) > 1e5 || Math.abs(aSegundos(outViejo)) > 1e5;
-    } catch (e) { noHabiaInOut = false; }
-    await esperarUn(1200);
-    try {
-      project.lockedAccess(() => {
-        project.executeTransaction((a) => {
-          a.addAction(sequence.createSetInPointAction(inViejo));
-          a.addAction(sequence.createSetOutPointAction(outViejo));
-        }, "reponer in/out");
-      });
-      rangoRepuesto = true;
-    } catch (e) { rangoRepuesto = false; }
-    /*
-     * Y SE RELEE. Que executeTransaction devuelva true no prueba que el in/out
-     * haya vuelto a donde estaba: es el modo de fallar nº1 de CLAUDE.md. Se
-     * informa lo que había, lo que quedó, y si coinciden.
-     */
-    try {
-      const i2 = await sequence.getInPoint(), o2 = await sequence.getOutPoint();
-      inOutFinal = { desde: aSegundos(i2), hasta: aSegundos(o2) };
-      inOutOriginal = { desde: aSegundos(inViejo), hasta: aSegundos(outViejo) };
-      volvioBien = Math.abs(inOutFinal.desde - inOutOriginal.desde) < 0.05 &&
-                   Math.abs(inOutFinal.hasta - inOutOriginal.hasta) < 0.05;
-    } catch (e) { inOutFinal = null; }
+    ({ rangoRepuesto, noHabiaInOut, inOutFinal, inOutOriginal, volvioBien } = await reponerInOut());
   }
+  delete A_MEDIAS.exportar;   // ya se repuso: el despachador no tiene que volver a hacerlo
 
   return {
     resumen:
@@ -344,6 +468,11 @@ async function exportar(params) {
           (aplico && aplico.in === false ? " · OJO: el IN NO SE APLICÓ, el export arranca en 0" : "") +
           (aplico && aplico.out === false ? " · OJO: el OUT NO SE APLICÓ" : "") +
           (rangoRepuesto === false ? " · OJO: NO se pudieron reponer los in/out viejos" : "") +
+          /* En cola el rango está medido con dos familias; con otra, se avisa en vez de prometer. */
+          (modo === "ame" && !["H264", "PMXF"].includes(tipo.fourcc)
+            ? ` · OJO: en cola el rango se respetó con H.264 (.mp4) y MXF, y con este preset ` +
+              `(${tipo.fourcc || "tipo no leído: " + tipo.error}) no está medido: medí el largo del archivo`
+            : "") +
           (noHabiaInOut
             ? (inOutFinal && Math.abs(inOutFinal.desde) > 1e5
                 ? " · la secuencia no tenía in/out y volvió a no tenerlos (sentinel repuesto y releído)"
@@ -354,8 +483,10 @@ async function exportar(params) {
         : (marca === "RECORTA"
             ? ` · OJO: NO se pidió rango pero la secuencia YA TIENE in/out ` +
               `${inOutPrevio.desde.toFixed(2)}–${inOutPrevio.hasta.toFixed(2)}s (termina en ` +
-              `${inOutPrevio.finSecuencia.toFixed(2)}s), y exportSequence los RESPETA: eso define ` +
-              `el largo del archivo. Se sacan con Opt+X.`
+              `${inOutPrevio.finSecuencia.toFixed(2)}s), ` +
+              (movEnCola
+                ? "pero en cola un preset QuickTime los IGNORA: sale la secuencia ENTERA (medido el 2026-09-29)."
+                : "y exportSequence los RESPETA: eso define el largo del archivo. Se sacan con Opt+X.")
             : (inOutPrevio
                 ? ` · in/out de la secuencia: ${inOutPrevio.desde.toFixed(2)}–${inOutPrevio.hasta.toFixed(2)}s (${marca})`
                 : " · los in/out de la secuencia NO se pudieron leer"))) +
@@ -381,7 +512,7 @@ async function exportar(params) {
           " · el archivo lo escribe otro proceso, ESTO NO CONFIRMA que se haya exportado") +
       (intentos.length ? ` · descartadas: ${intentos.length} forma(s)` : ""),
     secuencia: sequence.name, salida: salida, modo: modo, via: via, arranqueDeCola: arranque,
-    extensionDelPreset: ext, errorDeExtension: extError, devoluciones: devoluciones, ameInstalado: ame,
+    extensionDelPreset: ext, errorDeExtension: extError, tipoDePreset: tipo, devoluciones: devoluciones, ameInstalado: ame,
     rangoPuesto: rangoPuesto, rangoRepuesto: rangoRepuesto, noHabiaInOut: noHabiaInOut, aplico: aplico,
     inOutPrevio: inOutPrevio, marcaPrevia: marca,
     inOutOriginal: inOutOriginal, inOutFinal: inOutFinal, volvioBien: volvioBien,
