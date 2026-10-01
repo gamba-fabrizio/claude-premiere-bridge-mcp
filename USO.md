@@ -154,6 +154,9 @@ en `CLAUDE.md`.
 - **Y con el protector puesto el panel DEJA DE LATIR**: una tanda desatendida de más de media hora se
   corta con "el panel no latió" y parece un crash. Mientras dure, `caffeinate -d`; y antes de dar a
   Premiere por caído, mirá si el proceso sigue.
+- **A Media Encoder no se lo cierra mientras arranca**: un `quit` a los 21 s de abrirlo lo tiró, y ya
+  arrancado cierra limpio con el `quit` común. Que el proceso se haya ido no prueba que cerró bien: mirá
+  si quedó un `.ips` nuevo en `~/Library/Logs/DiagnosticReports`.
 
 ## Las herramientas
 
