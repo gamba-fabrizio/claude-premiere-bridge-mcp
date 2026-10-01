@@ -36,9 +36,15 @@ en `CLAUDE.md`.
   punto: puede ser uno viejo del mismo medio.
 - **`frame` es la mejor verificación: mirá en vez de deducir.** Y cuando importa, MEDÍ el cuadro
   (la media): un negro y un vacío se ven iguales, y el visor muestra un PNG transparente como
-  blanco.
+  blanco. Una opacidad se mide en el ALFA del PNG: la luminancia no la ve.
 - **`revisar` después de cada tanda**: ceros, solapes, huecos en cuadros, juntas, y pistas con la
   salida apagada. Verificar cada paso no verifica la tanda.
+- **Un clip FUERA DE ORDEN en la lista de su pista no se dibuja ni sale en el export**, aunque `clips`
+  lo lea en su lugar. Lo dejaba `cortar` hasta el 2026-09-30, y lo deja cualquier movimiento por API que
+  pasa por encima de un vecino —`editar` ahora lo rebota—. `revisar` lo marca `FUERA DE ORDEN`. Se
+  repara DUPLICANDO la secuencia, si no está anidada en otra: medido con `duplicarSecuencia`, que no es
+  herramienta MCP a propósito, así que se corre por el transporte directo, o lo hace el editor
+  con Duplicar. Mover el clip a mano en Premiere también lo reordena.
 - **Un parámetro inventado rebota** nombrando los que acepta. Antes de concluir que un verbo está
   roto, leé su firma; y si el editor dice que "siempre funcionó", el problema es la llamada.
 - **Un dato que está en la respuesta y no en el resumen también cuenta**: `medios` tiene tope de 60
@@ -48,6 +54,10 @@ en `CLAUDE.md`.
 
 - **`fijar` fija un valor; `keyframe` ANIMA** en el playhead. Sobre un param ya animado, `fijar`
   escribe el valor base y la animación lo tapa.
+- **A `keyframe`, `agregar_efecto` y `motion` nombrales el clip** (`pista` + `indice`): con Selection
+  Follows Playhead —prendido en esta máquina— mover el playhead SELECCIONA el clip de abajo, y sin
+  nombrarlo operan sobre ése. En `keyframe`, un punto que cae fuera del clip rebota sin escribir nada;
+  `motion` avisa si el playhead no está sobre el clip, porque lo animado se lee en el borde.
 - **`editar salida` es un punto de FUENTE, no una duración.** Un PNG o un Transparent Video entran
   con in-point ~3600: leé la `entrada` real y sumale la duración. Y **`editar entrada` además
   MUEVE el clip**: la entrada en una llamada y `desde` en otra.
@@ -75,19 +85,25 @@ en `CLAUDE.md`.
   insertarlo en una secuencia descartable.
 - **La cola de `cortar` es un CLON**: trae efectos, nombre, apagado y el mismo audio en las mismas
   pistas, y no pisa nada. Con audio vinculado queda SIN VÍNCULO en Premiere —la API no crea
-  vínculos—: el bridge la sigue emparejando, y a mano es Cmd+L. A otra velocidad que 1x rebota.
+  vínculos—: el bridge la sigue emparejando, y a mano es Cmd+L. A otra velocidad que 1x rebota. Cada
+  corte borra por dentro un clon estacionado, con su propio tope: 15 por minuto, medido sin problemas a 23.
+  `sacar_rangos` va de a ~7 rangos por minuto y, si el tope no alcanza para el rango siguiente, frena limpio:
+  los que faltan quedan sin tocar y se piden de nuevo tal cual. `borrar` suelto sigue en 5.
 - **`borrar_secuencia` elige por el nombre EXACTO**; si coinciden varias rebota, y dos con el mismo
   nombre se eligen con `duracion`. Dos gemelas —mismo nombre y mismo largo— se borran a mano.
 - **`marcar` cuantiza al cuadro.** Con `clip`, el marcador va al MEDIO: `segundos` es tiempo de
   fuente y aparece en toda instancia de ese material.
 - **`transicion` es solo video** —el crossfade de audio va a mano— y no se puede releer: el conteo
   prueba que apareció, no que esté bien puesta.
+- **Con dos efectos del mismo nombre** —dos Lumetri—, pasá `indiceEfecto`: 0 el primero, y `efectos` los
+  marca #0, #1. Sin él, las escrituras rebotan y las lecturas leen el primero y lo avisan.
 - **`copiarEfecto` NO copia: COMPARTE la instancia.** Tocar el destino cambia el origen, en otra
   secuencia y sin aviso. Para una copia independiente, `clonar` (el clip entero) o Cmd+C / Cmd+V.
   Opacity y Blend Mode viven en el componente Opacity y se fijan aparte.
 - **`exportar` pide `modo` siempre, sin default**: `ya` es el único que se confirma, pero la llamada
-  espera 30 min —si vence, el render sigue: no lo relances, mirá el disco—; `ame` vuelve al instante
-  y no confirma nada, y **con un preset `.mov` la cola ignora el rango** y exporta la secuencia
+  espera 30 min —si vence, el render sigue: no lo relances, mirá el disco—; `ame` no confirma nada y
+  arranca la cola SÓLO si estaba parada: el play de Media Encoder alterna, así que con la cola corriendo
+  el ítem entra a su turno y en pausa queda esperando. Y **con un preset `.mov` la cola ignora el rango** y exporta la secuencia
   entera, así que esa combinación rebota. `lote` no exporta. Si el export se cancela o falla, lo
   dice, no reintenta y repone el in/out. El preset H.264 va de la carpeta `4E49434B_48323634`: el
   mismo nombre en la de QuickTime escribe `.mov`. Respeta los in/out de la secuencia, que

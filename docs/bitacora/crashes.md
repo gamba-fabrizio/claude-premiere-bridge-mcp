@@ -10,8 +10,9 @@
   distintas. → «Los regímenes que tiran Premiere»
 - **Una ráfaga de transacciones tira Premiere.** El espaciado real es `PAUSA + MS_POLL` y tiene que
   dar 500 ms o más; `test.js` lo exige. → «El espaciado real es la SUMA»
-- **El borde se mueve con el peso del proyecto y con la acción.** → «El umbral depende del PESO»,
-  «El borde también depende de la ACCIÓN»
+- **El borde se mueve con el peso del proyecto y con la acción**: ~205 ms mató uno pesado, y uno chico
+  y uno intermedio aguantaron. → «El umbral depende del PESO», «El tercer peso», «El borde también
+  depende de la ACCIÓN»
 - **Menos transacciones antes que menos espera**: `porTransaccion` hasta `TOPE_LOTE` (10).
   → «Agrupar por transacción gana MÁS»
 - **Un verbo con su propio bucle de lotes necesita su propia pausa entre lotes.** → «Y un verbo que
@@ -185,6 +186,26 @@ y un solo verbo. Si aparece un proyecto más pesado, 505 ms puede no alcanzar.
 **Y la conclusión de diseño vale más que el número: si el borde se mueve con el peso, una
 constante fija es la forma equivocada.** El peso se lee barato; lo correcto sería que la
 herramienta lo mire y escale sola. Con dos muestras no alcanza para escribir esa fórmula.
+
+## El tercer peso: un proyecto intermedio aguanta al ritmo mínimo del transporte (2026-10-01)
+
+Faltaba un tercer peso de proyecto para la curva del espaciado. Se midió en un proyecto de prueba
+—122 medios, 10 secuencias—, que queda entre el chico de 15 clips y el pesado de arriba (216 clips,
+1.284 medios, 68 secuencias), con la misma prueba: `editar salida` con `vinculados: true`, 150
+escrituras sobre una secuencia de 50 clips, sin pausa del lado del llamador, en una sesión de
+Premiere recién abierta.
+
+```
+espaciado real   proyecto                     resultado
+   ~203 ms       intermedio                   aguantó 150, todas quedaron, revisar limpio
+   ~203 ms       intermedio, sesión nueva     aguantó 150, todas quedaron, revisar limpio
+```
+
+Ningún crash. **La fórmula igual no sale**: 203 ms es el ritmo MÍNIMO del transporte —el panel mira
+cada `MS_POLL`, 200 ms—, así que en el chico y en el intermedio el borde queda por debajo de lo que el
+bridge puede pedir, y sólo el pesado cae dentro del rango. Lo que sí dice: el peso empieza a importar
+del lado de los proyectos grandes, y el espaciado de 500 ms le deja 2,4 veces de margen al único borde
+medido. Un proyecto más pesado que el de arriba sigue siendo el caso sin medir.
 
 ## El borde también depende de la ACCIÓN
 

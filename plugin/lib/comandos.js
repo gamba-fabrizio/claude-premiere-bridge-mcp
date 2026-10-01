@@ -39,6 +39,136 @@ async function tipoDePreset(ruta) {
   }
 }
 
+/*
+ * EL ESTADO DE LA COLA DE MEDIA ENCODER (2026-10-01, un reporte de uso). `startBatchEncode` no ARRANCA la cola:
+ * hace lo que su botón de play, que con la cola corriendo la PAUSA y con la cola en pausa la reanuda.
+ * `exportar` lo pedía cuatro veces en 16 s, convencido de que repetirlo era inofensivo, y en un proyecto real dejó la
+ * cola en PAUSA con los dos exports adentro —y de paso reanudó un minuto el export de otro proyecto que el
+ * editor había pausado—.
+ *
+ * La API no dice en qué estado está la cola, y de los eventos del EncoderManager no llega ninguno —medido—.
+ * Lo dice el log de Media Encoder: una línea «Queue Started», «Resumed», «Paused» o «Stopped»
+ * por cada cambio. Medido sobre el log de esta máquina, 1.274 archivos: al terminar escribe «File
+ * Successfully Encoded» y después «Queue Stopped»; «Paused» sale de una pausa de verdad; y «Resumed» seguido
+ * de «Stopped» es un arranque sin nada listo.
+ */
+const ESTADO_COLA_AME = { Started: "corriendo", Resumed: "corriendo", Paused: "pausada", Stopped: "parada" };
+
+/** Dónde está el log de Media Encoder: en la carpeta de versión más nueva que lo tenga. */
+async function rutaLogAME() {
+  const fsl = uxp.storage.localFileSystem;
+  let casa = null;
+  try { casa = String(require("os").homedir() || "") || null; } catch (e) { casa = null; }
+  if (!casa) {
+    // Respaldo: la casa sale de la ruta del propio plugin, que vive adentro de ~/Library.
+    try {
+      const m = /^(\/Users\/[^/]+)\//.exec(String((await fsl.getPluginFolder()).nativePath));
+      casa = m ? m[1] : null;
+    } catch (e) { casa = null; }
+  }
+  if (!casa) return { ruta: null, error: "no se pudo saber cuál es la carpeta del usuario" };
+  const base = casa + "/Documents/Adobe/Adobe Media Encoder";
+  let entradas = null;
+  try { entradas = await (await fsl.getEntryWithUrl("file:" + base)).getEntries(); }
+  catch (e) { return { ruta: null, error: `no se pudo leer "${base}"` }; }
+  const partes = (v) => v.split(".").map(Number);
+  const versiones = entradas.filter((x) => x && x.isFolder && /^\d+(\.\d+)*$/.test(String(x.name))).map((x) => String(x.name))
+    .sort((a, b) => {
+      const x = partes(a), y = partes(b);
+      for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (y[i] || 0) - (x[i] || 0); if (d) return d; }
+      return 0;
+    });
+  for (const v of versiones) {
+    const ruta = `${base}/${v}/AMEEncodingLog.txt`;
+    try { await fsl.getEntryWithUrl("file:" + ruta); return { ruta: ruta, error: null }; } catch (e) { /* la versión anterior */ }
+  }
+  return { ruta: null, error: `no hay un AMEEncodingLog.txt en "${base}"` };
+}
+
+/*
+ * Los cambios de estado de la cola que tiene el log. Con `desde` —un largo en bytes de una lectura anterior—,
+ * sólo los que se escribieron DESPUÉS: así se sabe si un pedido hizo algo sin comparar con el reloj de AME,
+ * que escribe la hora en su formato. Sin `desde`, el último. El log es UTF-16LE con BOM —medido—, y se
+ * decodifica a mano y sólo lo que hace falta: TextDecoder no está garantizado en UXP, y el archivo pesa 1,5 MB.
+ */
+async function leerLogAME(ruta, desde) {
+  try {
+    const entry = await uxp.storage.localFileSystem.getEntryWithUrl("file:" + ruta);
+    const bytes = new Uint8Array(await entry.read({ format: uxp.storage.formats.binary }));
+    const largo = bytes.length;
+    if (typeof desde === "number" && largo < desde) {
+      return { ok: false, largo: largo, error: "el log se ACHICÓ: Media Encoder lo empezó de nuevo" };
+    }
+    const utf16 = largo >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe;
+    const texto = (inicio) => {
+      let i = Math.max(utf16 ? 2 : 0, inicio);
+      if (utf16 && i % 2) i++;
+      const trozos = [];
+      for (let k = i; k < largo; k += 16384) {
+        const fin = Math.min(largo, k + 16384), codigos = [];
+        if (utf16) for (let j = k; j + 1 < fin; j += 2) codigos.push(bytes[j] | (bytes[j + 1] << 8));
+        else for (let j = k; j < fin; j++) codigos.push(bytes[j]);
+        trozos.push(String.fromCharCode.apply(null, codigos));
+      }
+      return trozos.join("");
+    };
+    const estados = (t) => {
+      const r = [], re = /(\d\d\/\d\d\/\d{4} \d\d:\d\d:\d\d [AP]M) : Queue (Started|Resumed|Paused|Stopped)/g;
+      let m;
+      while ((m = re.exec(t))) r.push({ hora: m[1], que: m[2], estado: ESTADO_COLA_AME[m[2]] });
+      return r;
+    };
+    if (typeof desde === "number") return { ok: true, largo: largo, nuevos: estados(texto(desde)) };
+    // El último: primero en la cola del archivo, y si ahí no hay ninguno, en el archivo entero.
+    let todos = estados(texto(largo - 65536));
+    if (!todos.length) todos = estados(texto(0));
+    return { ok: true, largo: largo, ultimo: todos.length ? todos[todos.length - 1] : null };
+  } catch (e) {
+    return { ok: false, largo: null, error: e && e.message ? e.message : String(e) };
+  }
+}
+
+/** Lo que `exportar` dice de la cola de Media Encoder, desde lo que registró su log. */
+function textoDeCola(a) {
+  const n = a.intentos.length;
+  const ant = a.antes && typeof a.antes === "object" ? a.antes : null;
+  const ult = a.nuevos && a.nuevos.length ? a.nuevos[a.nuevos.length - 1] : null;
+  /* «Según el log», y no «la cola corre»: el log no registra cuándo se abre o se cierra Media Encoder, así que
+     con AME cerrado su última línea es de la sesión anterior (chequeo del 2026-10-01). */
+  if (a.decision === "corriendo") {
+    return ` · según el log de Media Encoder la cola CORRE («Queue ${ant.que}» ${ant.hora}): NO se pidió arrancarla —con la ` +
+      "cola andando, el pedido la PAUSA— y el ítem entra a su turno. El log no registra si Media Encoder se cerró: si la " +
+      "cola no está corriendo, arrancala a mano";
+  }
+  if (a.decision === "pausada") {
+    return ` · según el log de Media Encoder la cola está EN PAUSA («Queue Paused» ${ant.hora}): NO se pidió arrancarla ` +
+      "—reanudaría también lo que alguien pausó—. El ítem quedó encolado: arrancala a mano en Media Encoder";
+  }
+  if (typeof a.antes === "string" && /^ilegible/.test(a.antes)) {
+    return ` · no se pudo leer el log de Media Encoder (${a.log}): se pidió arrancar la cola UNA vez, sin poder ver si ` +
+      `arrancó${a.error ? ` (${a.error})` : ""}. Mirala en Media Encoder`;
+  }
+  if (a.nuevos === null) return ` · se pidió arrancar la cola ${n} vez/veces y el log de Media Encoder no se pudo releer: mirala`;
+  const arranco = a.nuevos.filter((x) => x.que === "Started");
+  if (arranco.length) {
+    const primero = arranco[0], tras = a.nuevos.slice(a.nuevos.lastIndexOf(arranco[arranco.length - 1]) + 1);
+    const paro = tras.find((x) => x.que === "Stopped"), pauso = tras.find((x) => x.que === "Paused");
+    return ` · cola ARRANCADA: Media Encoder registró «Queue Started» a las ${primero.hora}, tras ${n} pedido(s)` +
+      (pauso ? ` · OJO: después quedó EN PAUSA (${pauso.hora}): reanudala a mano` : "") +
+      (paro && !pauso ? ` · y ya volvió a pararse a las ${paro.hora}: terminó o se canceló, medí el archivo` : "");
+  }
+  if (a.nuevos.length && a.nuevos.every((x) => x.que === "Resumed" || x.que === "Stopped")) {
+    return ` · Media Encoder contestó ${a.nuevos.filter((x) => x.que === "Resumed").length} vez/veces que no había nada listo ` +
+      `(«Queue Resumed» y enseguida «Stopped»), en ${n} pedido(s): el ítem NO arrancó. Arrancalo a mano en Media Encoder`;
+  }
+  if (ult) {
+    return ` · OJO: tras ${n} pedido(s) la cola quedó ${ult.estado === "pausada" ? "EN PAUSA" : "PARADA"} (log: «Queue ${ult.que}» ` +
+      `${ult.hora}): arrancala a mano en Media Encoder`;
+  }
+  return ` · se pidió arrancar la cola ${n} vez/veces y Media Encoder NO registró ningún cambio: puede no haber arrancado, ` +
+    `mirala${a.error ? ` (${a.error})` : ""}`;
+}
+
 /**
  * Exportar la secuencia activa. Era el único hueco real del bridge: se podía
  * armar un corte y no había forma de renderizarlo.
@@ -182,7 +312,7 @@ async function exportar(params) {
       await esperarUn(1200);
       try {
         project.lockedAccess(() => {
-          if (!project.executeTransaction((a) => { a.addAction(accion()); }, `reponer ${cual} de exportación`)) r.rangoRepuesto = false;
+          if (!transaccion(project, (a) => { a.addAction(accion()); }, `reponer ${cual} de exportación`)) r.rangoRepuesto = false;
         });
       } catch (e) { r.rangoRepuesto = false; }
     }
@@ -266,14 +396,14 @@ async function exportar(params) {
     }
     try {
       project.lockedAccess(() => {
-        ok = project.executeTransaction((a) => {
+        ok = transaccion(project, (a) => {
           a.addAction(sequence.createSetInPointAction(aTick(desde)));
         }, "in de exportación");
       });
       try { okIn = Math.abs(aSegundos(await sequence.getInPoint()) - desde) < 0.05; } catch (e) { okIn = null; }
       await esperarUn(1200);
       project.lockedAccess(() => {
-        ok = project.executeTransaction((a) => {
+        ok = transaccion(project, (a) => {
           a.addAction(sequence.createSetOutPointAction(aTick(hasta)));
         }, "out de exportación") && ok;
       });
@@ -411,39 +541,73 @@ async function exportar(params) {
    */
   let arranque = null;
   if (modo !== "ya") {
-    arranque = { lanzo: null, intentos: [], arranco: null, error: null };
+    arranque = { lanzo: null, intentos: [], log: null, antes: null, nuevos: null, decision: null, arranco: null, error: null };
+    /*
+     * PRIMERO SE MIRA LA COLA (2026-10-01, un reporte de uso). Con la cola corriendo, pedir el arranque la PAUSA;
+     * con la cola en pausa, la reanuda, y con ella lo que el editor pausó. En los dos casos no se pide: el
+     * ítem nuevo entra a su turno, o espera a que alguien la reanude. Se pide sólo con la cola parada, o sin
+     * un registro que diga otra cosa.
+     */
+    const logAme = await rutaLogAME();
+    arranque.log = logAme.ruta || logAme.error;
+    const colaAntes = logAme.ruta ? await leerLogAME(logAme.ruta) : { ok: false, error: logAme.error };
+    arranque.antes = colaAntes.ok ? (colaAntes.ultimo || "sin registros") : "ilegible: " + colaAntes.error;
+    const estadoPrevio = colaAntes.ok && colaAntes.ultimo ? colaAntes.ultimo.estado : null;
+    const nuevosDesde = async () => {
+      const n = await leerLogAME(logAme.ruta, colaAntes.largo);
+      return n.ok ? n.nuevos : null;
+    };
     try { arranque.lanzo = await em.launchEncoder(); }
     catch (e) { arranque.lanzo = "no se pudo: " + (e && e.message ? e.message : e); }
 
-    /*
-     * SE PIDE VARIAS VECES, Y ESO NO ES PARANOIA: es lo medido el 2026-09-21.
-     *
-     * `launchEncoder()` devuelve `true` AL INSTANTE, pero AME tarda en estar listo. Con AME
-     * cerrado, el `startBatchEncode()` que iba pegado devolvio `true` **y no arranco nada**: el
-     * item quedo en la cola con estado `Ready` y AME diciendo "Not currently encoding" — visto
-     * en pantalla, no deducido. Con AME ya abierto, la MISMA llamada arranco la cola y el
-     * archivo aparecio en 5 segundos.
-     *
-     * Eso explica por que la medicion del 2026-09-11 dio positivo: ahi AME ya estaba abierto, y
-     * de ese caso se generalizo a los dos. El modo de fallar nº3 de este archivo.
-     *
-     * No se espera UN numero porque no se midio cuanto tarda AME en estar listo, y un numero
-     * inventado falla el dia que la maquina esta cargada. Se pide varias veces con espaciado
-     * creciente, que converge sin tener que acertarlo. Pedir arrancar una cola que YA arranco es
-     * inofensivo: AME lo ignora.
-     *
-     * Y el booleano sigue sin valer: los intentos se informan, pero el veredicto es el ARCHIVO.
-     */
-    for (const ms of [0, 3000, 5000, 8000]) {
-      if (ms) await esperarUn(ms);
-      try {
-        const v = await em.startBatchEncode();
-        arranque.intentos.push({ tras: ms, devolvio: v });
-        arranque.arranco = v;
-      } catch (e) {
-        const msg = e && e.message ? e.message : String(e);
-        arranque.intentos.push({ tras: ms, error: msg });
-        arranque.error = msg;
+    if (estadoPrevio === "corriendo" || estadoPrevio === "pausada") {
+      arranque.decision = estadoPrevio;
+    } else {
+      /*
+       * SE PUEDE TENER QUE PEDIR MÁS DE UNA VEZ: `launchEncoder()` devuelve `true` al instante, pero AME tarda
+       * en estar listo, y con AME cerrado el primer `startBatchEncode()` contestó `true` sin arrancar nada
+       * (medido el 2026-09-21: el ítem quedó `Ready` y AME decía "Not currently encoding"). Pero REPETIRLO
+       * sobre una cola que ya arrancó la pausa, así que antes de cada pedido nuevo se mira el log cada 2 s
+       * —cada mirada lee el archivo entero, 1,5 MB—, y con cualquier cambio registrado no se pide más. La
+       * última mirada cae justo antes del pedido siguiente. Sin log no hay cómo mirar: UNA vez.
+       * El booleano de la llamada no vale; el veredicto es lo que registró Media Encoder.
+       */
+      /*
+       * Y UN «Resumed → Stopped» NO CORTA (chequeo del 2026-10-01, y medido en el log): es lo que escribe
+       * Media Encoder cuando le piden arrancar SIN NADA LISTO —el ítem recién encolado todavía no llegó—. Las
+       * 40 «Resumed» del log van seguidas de «Stopped», y en 14 de 15 rachas el «Started» llegó entre 3 y 21
+       * s después del primer pedido. La cola sigue PARADA, y pedir sobre una cola parada no alterna nada:
+       * se vuelve a pedir. Corta un «Started» o un «Paused», en cualquier orden: con uno «Started → Stopped»
+       * un export corto ya arrancó y terminó entre dos miradas, y mirar sólo el último lo daba por no
+       * arrancado.
+       */
+      const real = (lista) => lista.some((x) => x.que === "Started" || x.que === "Paused");
+      const esperas = colaAntes.ok ? [0, 6000, 8000, 8000] : [0];
+      for (let i = 0; i < esperas.length; i++) {
+        if (esperas[i]) {
+          let vio = null;
+          for (let t = 0; t < esperas[i] && vio === null; t += 2000) {
+            await esperarUn(2000);
+            const n = await nuevosDesde();
+            if (n === null) vio = "ilegible"; else if (real(n)) vio = n;
+          }
+          if (vio !== null) break;
+        }
+        try {
+          const v = await em.startBatchEncode();
+          arranque.intentos.push({ tras: esperas[i], devolvio: v });
+        } catch (e) {
+          const msg = e && e.message ? e.message : String(e);
+          arranque.intentos.push({ tras: esperas[i], error: msg });
+          arranque.error = msg;
+        }
+      }
+      // Lo que registró Media Encoder: se le dan hasta 6 s para escribir un cambio que cuente.
+      if (colaAntes.ok) {
+        let n = await nuevosDesde();
+        for (let t = 0; t < 6000 && n !== null && !real(n); t += 2000) { await esperarUn(2000); n = await nuevosDesde(); }
+        arranque.nuevos = n;
+        arranque.arranco = n === null ? null : n.some((x) => x.que === "Started");
       }
     }
   }
@@ -500,15 +664,7 @@ async function exportar(params) {
           /* El arranque de la cola VA EN EL RESUMEN. Antes el verbo decia "encolado" y punto,
            * y el item se quedaba esperando que alguien apretara play: desde aca eso se lee
            * como "esta tardando". Ahora dice si la cola ARRANCO, que es lo que cambia. */
-          (arranque
-            ? (arranque.arranco === true
-                ? ` · se pidió arrancar la cola ${arranque.intentos.length} vez/veces a lo largo de 16s ` +
-                  "(launchEncoder devuelve true ANTES de que AME esté listo, medido: con AME cerrado la " +
-                  "primera llamada contesta true y NO arranca nada)"
-                : ` pero la cola NO arrancó: startBatchEncode devolvió ${JSON.stringify(arranque.arranco)}` +
-                  (arranque.error ? ` (${arranque.error})` : "") +
-                  ` · launchEncoder: ${JSON.stringify(arranque.lanzo)} · arrancala a mano en Media Encoder`)
-            : "") +
+          (arranque ? textoDeCola(arranque) : "") +
           " · el archivo lo escribe otro proceso, ESTO NO CONFIRMA que se haya exportado") +
       (intentos.length ? ` · descartadas: ${intentos.length} forma(s)` : ""),
     secuencia: sequence.name, salida: salida, modo: modo, via: via, arranqueDeCola: arranque,
@@ -571,7 +727,7 @@ async function limpiarRangos() {
   let ok = false, escribirError = null;
   try {
     project.lockedAccess(() => {
-      ok = project.executeTransaction((a) => {
+      ok = transaccion(project, (a) => {
         a.addAction(sequence.createSetInPointAction(aTick(SENTINEL)));
         a.addAction(sequence.createSetOutPointAction(aTick(SENTINEL)));
       }, "limpiar in/out");
@@ -612,34 +768,27 @@ async function limpiarRangos() {
  * una tanda de `fijar` espaciada 1,2 s, en una sesión que ya venía con cientos (un reporte de uso). Medido
  * ese día, tirándolo a propósito trece veces: se cae por lo ACUMULADO en la sesión, en siete lugares
  * distintos del puente de scripts, y el punto varía mucho. Para que el próximo crash quede MEDIDO y no
- * estimado, se cuentan las transacciones que corrieron desde que arrancó el panel, envolviendo
- * `executeTransaction` en el PROTOTIPO del proyecto —una función de JavaScript, no un objeto nativo—.
- * No arregla nada. Si la envoltura no entra, se dice: un cero que no cuenta se leería como sesión limpia.
+ * estimado, se cuentan las transacciones que corrieron desde que arrancó el panel: todas pasan por
+ * `transaccion`, abajo. No arregla nada.
  */
-const SESION = { desde: Date.now(), transacciones: 0, escrituras: 0, contando: null };
+const SESION = { desde: Date.now(), transacciones: 0, escrituras: 0, contando: true };
 /* Una transacción de `fijar` es UNA escritura y una de `aplicarMotion` hasta 18: los verbos en tanda
    suman las suyas de más (`sumarEscrituras`). NO hay umbral de aviso a propósito: lo medido el
    2026-09-27 va de ~200 escrituras de una tanda seguida a ~630 de `fijar` espaciado antes de caer, en
    la misma máquina y el mismo proyecto, y un aviso a las N daría una seguridad que no hay. El número
    está para que el próximo crash quede MEDIDO. */
 function sumarEscrituras(n) { if (SESION.contando && n > 0) SESION.escrituras += n; }
-function contarEn(project) {
-  if (SESION.contando !== null || !project) return;
-  try {
-    const proto = Object.getPrototypeOf(project);
-    const orig = proto && proto.executeTransaction;
-    if (typeof orig !== "function") { SESION.contando = false; return; }
-    /* Solo transacciones. Las ACCIONES no se cuentan: envolver el `addAction` del objeto de Premiere
-       no entra —la asignación no tira pero no queda, medido el 2026-09-27— y tocar las propiedades de
-       un objeto nativo es justo lo que no se hace mientras se buscan crashes de memoria. */
-    const envoltorio = function (fn, nombre) {
-      const r = orig.call(this, fn, nombre);
-      if (r) { SESION.transacciones++; SESION.escrituras++; }
-      return r;
-    };
-    proto.executeTransaction = envoltorio;
-    SESION.contando = proto.executeTransaction === envoltorio;
-  } catch (e) { SESION.contando = false; }
+/*
+ * TODAS las transacciones pasan por acá, y así se cuentan SIN TOCAR LA API (2026-09-30). Hasta ese día
+ * el contador envolvía `executeTransaction` en el PROTOTIPO del proyecto —una función de JavaScript, pero
+ * asignada sobre un objeto de la API—, y la regla del repo es que a un objeto de la API no se le asigna
+ * nada: el chequeo diario lo marcó como una variable sin controlar entre los nueve crashes de la noche
+ * del 2026-09-29. `test.js` exige que no quede ninguna llamada directa fuera de ésta.
+ */
+function transaccion(project, fn, nombre) {
+  const r = project.executeTransaction(fn, nombre);
+  if (r) { SESION.transacciones++; SESION.escrituras++; }
+  return r;
 }
 function textoSesion() {
   const min = Math.round((Date.now() - SESION.desde) / 60000);
@@ -651,7 +800,6 @@ function textoSesion() {
 async function getProyecto() {
   const project = await ppro.Project.getActiveProject();
   if (!project) throw new Error("No hay un proyecto abierto en Premiere.");
-  contarEn(project);
   return project;
 }
 
@@ -893,10 +1041,27 @@ async function copiarEfecto(params) {
 
   /* El testigo se lee ANTES en los dos lados: sin el valor de origen no hay con que comparar, y
      sin el del destino no se sabe si ya estaba igual por casualidad. */
-  const leer = async (clip) => {
+  /* `cualEs` dice QUÉ aparición se lee: la elegida en el origen, y en el destino la ÚLTIMA, que es
+   * la que agrega `createAppendComponentAction`. Hasta el 2026-09-30 leía con `getComponente`, que
+   * agarra la PRIMERA con ese nombre: con dos Lumetri e `indiceEfecto: 1`, comparaba el primero de
+   * los dos lados —ya copiado, e instancia compartida— y decía «EL VALOR VIAJÓ» sin haber mirado el
+   * segundo (un reporte de uso). */
+  const aparicionesDe = async (clip) => {
+    const ch = await clip.getComponentChain();
+    const n = await ch.getComponentCount();
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const c = await ch.getComponentAtIndex(i);
+      if (String(await c.getDisplayName()).toLowerCase() === buscado.toLowerCase()) out.push({ c: c, i: i });
+    }
+    return out;
+  };
+  const leer = async (clip, cualEs) => {
     if (!paramTestigo) return null;
     try {
-      const c = await getComponente(clip, buscado);
+      const todas = await aparicionesDe(clip);
+      const ap = cualEs === "ultima" ? todas[todas.length - 1] : todas[cualEs];
+      const c = ap ? ap.c : null;
       if (!c) return null;
       const i = indiceDe(project, c, paramTestigo);
       if (i === -1) return "el param no existe en ese componente";
@@ -917,15 +1082,15 @@ async function copiarEfecto(params) {
       return aNumero(v);
     } catch (e) { return "no se pudo leer: " + (e && e.message ? e.message : String(e)); }
   };
-  const testigoOrigen = await leer(orig.clip);
-  const testigoDestinoAntes = await leer(dest.clip);
+  const testigoOrigen = await leer(orig.clip, cual === null ? 0 : cual);
+  const testigoDestinoAntes = await leer(dest.clip, "ultima");
 
   const chainD = await dest.clip.getComponentChain();
   const antes = await chainD.getComponentCount();
   let ok = false, error = null;
   try {
     project.lockedAccess(() => {
-      ok = project.executeTransaction((a) => { a.addAction(chainD.createAppendComponentAction(comp)); },
+      ok = transaccion(project, (a) => { a.addAction(chainD.createAppendComponentAction(comp)); },
                                       "copiar componente");
     });
   } catch (e) { error = e && e.message ? e.message : String(e); }
@@ -933,9 +1098,10 @@ async function copiarEfecto(params) {
   await new Promise((r) => setTimeout(r, 600));
   const chainD2 = await dest.clip.getComponentChain();
   const despues = await chainD2.getComponentCount();
-  const testigoDestinoDespues = await leer(dest.clip);
+  const testigoDestinoDespues = await leer(dest.clip, "ultima");
 
-  const viajo = paramTestigo && typeof testigoOrigen === "number" &&
+  /* Con el conteo quieto la "última" del destino es una vieja: no hay copia que comparar. */
+  const viajo = paramTestigo && despues > antes && typeof testigoOrigen === "number" &&
                 typeof testigoDestinoDespues === "number" &&
                 Math.abs(testigoOrigen - testigoDestinoDespues) < 0.001;
 
@@ -983,21 +1149,34 @@ async function quitarEfecto(params) {
   const chain = await ubic.clip.getComponentChain();
   const antes = await chain.getComponentCount();
   const nombres = [];
-  let idx = -1;
+  const iguales = [];
   for (let i = 0; i < antes; i++) {
     const n = String(await (await chain.getComponentAtIndex(i)).getDisplayName());
     nombres.push(n);
-    if (idx === -1 && n.toLowerCase() === buscado.toLowerCase()) idx = i;
+    if (n.toLowerCase() === buscado.toLowerCase()) iguales.push(i);
   }
-  if (idx === -1) {
+  if (!iguales.length) {
     throw new Error(`"${String(await ubic.clip.getName())}" no tiene un efecto "${buscado}". Tiene: ${nombres.join(", ")}.`);
   }
+  /* CON DOS IGUALES, CUÁL (2026-10-01): quitaba el primero, y su relectura —«sigue ahí» si quedaba alguno con
+     ese nombre— daba una falsa alarma al quitar uno de dos. Se elige con `indiceEfecto` y se cuentan. */
+  let k = 0;
+  if (params.indiceEfecto !== undefined && params.indiceEfecto !== null) {
+    k = Number(params.indiceEfecto);
+    if (!Number.isInteger(k) || k < 0 || k >= iguales.length) {
+      throw new Error(`indiceEfecto ${JSON.stringify(params.indiceEfecto)}: el clip tiene ${iguales.length} "${buscado}" (0 a ${iguales.length - 1}). NO se tocó nada.`);
+    }
+  } else if (iguales.length > 1) {
+    throw new Error(`"${String(await ubic.clip.getName())}" tiene ${iguales.length} "${buscado}". Pasá \`indiceEfecto\` (0 = el primero, ` +
+      "en el orden de la cadena) para decir cuál quitar. NO se tocó nada.");
+  }
+  const idx = iguales[k];
 
   const comp = await chain.getComponentAtIndex(idx);
   let ok = false, error = null;
   try {
     project.lockedAccess(() => {
-      ok = project.executeTransaction((a) => { a.addAction(chain.createRemoveComponentAction(comp)); },
+      ok = transaccion(project, (a) => { a.addAction(chain.createRemoveComponentAction(comp)); },
                                       "quitar efecto");
     });
   } catch (e) { error = e && e.message ? e.message : String(e); }
@@ -1008,13 +1187,15 @@ async function quitarEfecto(params) {
   const despues = await chain2.getComponentCount();
   const quedan = [];
   for (let i = 0; i < despues; i++) quedan.push(String(await (await chain2.getComponentAtIndex(i)).getDisplayName()));
-  const sigue = quedan.some((n) => n.toLowerCase() === buscado.toLowerCase());
+  const quedanIguales = quedan.filter((n) => n.toLowerCase() === buscado.toLowerCase()).length;
+  const sigue = quedanIguales >= iguales.length;
 
   return {
     resumen:
       `"${buscado}" en "${String(await ubic.clip.getName())}": efectos ${antes} → ${despues}` +
       (error ? ` · TIRÓ: ${error}` : ` · transacción ${JSON.stringify(ok)}`) +
       (sigue ? " · OJO: EL EFECTO SIGUE AHÍ" : " · se fue") +
+      (iguales.length > 1 ? ` · era el ${k} de ${iguales.length} "${buscado}"; quedan ${quedanIguales}` : "") +
       ` · quedan: ${quedan.join(", ")}`,
     antes: antes, despues: despues, seFue: !sigue, quedan: quedan, error: error
   };
@@ -1167,6 +1348,50 @@ async function getComponente(clip, nombre) {
     if (String(await c.getDisplayName()) === nombre) return c;
   }
   return null;
+}
+
+/*
+ * EL MISMO EFECTO MÁS DE UNA VEZ (2026-10-01). Un clip puede tener dos
+ * `Lumetri Color` —el editor los apila—, y `getComponente` devuelve el PRIMERO: `param`, `fijar`, `keyframe`,
+ * los de keyframe y `quitarEfecto` leían, escribían o borraban en él sin avisar. `indiceEfecto` elige la
+ * aparición, 0 la primera en el orden de la cadena, como en `copiarEfecto`. Las escrituras rebotan si hay más
+ * de una y no se eligió; las lecturas leen la primera y lo dicen.
+ */
+async function aparicionesDelEfecto(clip, nombre) {
+  const chain = await clip.getComponentChain();
+  const n = await chain.getComponentCount();
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const c = await chain.getComponentAtIndex(i);
+    if (String(await c.getDisplayName()) === nombre) out.push({ comp: c, enCadena: i });
+  }
+  return out;
+}
+async function componenteElegido(clip, nombre, indiceEfecto) {
+  const ap = await aparicionesDelEfecto(clip, nombre);
+  if (indiceEfecto !== undefined && indiceEfecto !== null) {
+    const k = Number(indiceEfecto);
+    if (!Number.isInteger(k) || k < 0) {
+      throw new Error(`\`indiceEfecto\` es cuál de los "${nombre}" del clip, 0 el primero: vino ${JSON.stringify(indiceEfecto)}. NO se tocó nada.`);
+    }
+    if (k >= ap.length) {
+      throw new Error(`indiceEfecto ${k}: el clip tiene ${ap.length} "${nombre}"${ap.length ? ` (0 a ${ap.length - 1})` : ""}. NO se tocó nada.`);
+    }
+    return { comp: ap[k].comp, aparicion: k, total: ap.length, elegido: true };
+  }
+  return { comp: ap.length ? ap[0].comp : null, aparicion: ap.length ? 0 : null, total: ap.length, elegido: false };
+}
+/** Para las ESCRITURAS: con dos o más iguales y sin `indiceEfecto`, se rebota. */
+function exigirUnaAparicion(e, nombre, nombreClip) {
+  if (!e.elegido && e.total > 1) {
+    throw new Error(`"${nombreClip}" tiene ${e.total} "${nombre}". Pasá \`indiceEfecto\` (0 = el primero, en el orden de la ` +
+      "cadena) para decir en cuál: elegir por vos escribiría en uno sin saber cuál. NO se tocó nada.");
+  }
+}
+function avisoDeAparicion(e, nombre) {
+  if (!e || e.total <= 1) return "";
+  return e.elegido ? ` · el "${nombre}" ${e.aparicion} de ${e.total} (indiceEfecto)`
+    : ` · OJO: hay ${e.total} "${nombre}" y se leyó el PRIMERO: los otros, con \`indiceEfecto\``;
 }
 
 /**
@@ -1912,11 +2137,18 @@ async function efectos(params) {
     const nombre = String(await c.getDisplayName());
     salida.push({ indice: i, nombre: nombre, params: listarParams(project, c) });
   }
+  /* Con dos del mismo nombre, cada uno lleva su `indiceEfecto`: es lo que piden los verbos que leen o escriben
+     un efecto por nombre, y sin verlo acá no hay cómo saber cuál es cuál. */
+  const cuenta = {};
+  for (const e of salida) cuenta[e.nombre] = (cuenta[e.nombre] || 0) + 1;
+  const visto = {};
+  for (const e of salida) if (cuenta[e.nombre] > 1) { e.indiceEfecto = visto[e.nombre] || 0; visto[e.nombre] = e.indiceEfecto + 1; }
 
   return {
     resumen:
       `"${nombreClip}" tiene ${salida.length} efectos: ` +
-      salida.map((e) => `${e.nombre} (${e.params.length} params)`).join(", "),
+      salida.map((e) => `${e.nombre}${e.indiceEfecto !== undefined ? ` #${e.indiceEfecto}` : ""} (${e.params.length} params)`).join(", ") +
+      (Object.keys(cuenta).some((k) => cuenta[k] > 1) ? " · los #n son el `indiceEfecto` de los repetidos" : ""),
     clip: nombreClip,
     efectos: salida
   };
@@ -1951,7 +2183,8 @@ async function param(params) {
   const nombreClip = String(await sel.clip.getName());
   const nombreEfecto = params.efecto || "Motion";
 
-  const comp = await getComponente(sel.clip, nombreEfecto);
+  const ef = await componenteElegido(sel.clip, nombreEfecto, params.indiceEfecto);
+  const comp = ef.comp;
   if (!comp) {
     const chain = await sel.clip.getComponentChain();
     const n = await chain.getComponentCount();
@@ -2018,7 +2251,8 @@ async function param(params) {
         `${nombreEfecto} > ${params.param} en "${nombreClip}": ` +
         `${JSON.stringify(salida.valor)}${nivel && numero !== null ? ` (${textoDb(numero)})` : ""} · ${tiempos.length} keyframes` +
         (tiempos.length ? ` en ${tiempos.join("s, ")}s` : "") +
-        (nivel ? ` · ${ESCALA_NIVEL}` : ""),
+        (nivel ? ` · ${ESCALA_NIVEL}` : "") + avisoDeAparicion(ef, nombreEfecto),
+      indiceEfecto: ef.aparicion, iguales: ef.total,
     },
     salida
   );
@@ -2131,7 +2365,7 @@ async function catalogo(params) {
 }
 
 /**
- * Le agrega un efecto al clip seleccionado.
+ * Le agrega un efecto a un clip: el que se nombra con `pista` e `indice` (o `nombre`), o si no el seleccionado.
  *
  * Acepta el nombre visible o el match name: pedirle al usuario que sepa que el
  * Transform es "AE.ADBE Geometry2" sería inútil.
@@ -2142,8 +2376,17 @@ async function catalogo(params) {
  */
 async function agregarEfecto(params) {
   const { project, sequence } = await getProyectoYSecuencia();
-  const sel = await exigirClip(sequence);
+  /*
+   * EL CLIP SE PUEDE NOMBRAR (2026-10-01), como en `keyframe`: sólo tomaba el seleccionado, y con «Selection
+   * Follows Playhead» —prendido en esta máquina— mover el playhead selecciona el clip que queda debajo.
+   * `quirurgico.js` ya tenía que seleccionar antes y comprobar después dónde había caído el efecto.
+   */
+  const sel = await clipPedidoOSeleccionado(sequence, params);
   const nombreClip = String(await sel.clip.getName());
+  const rango = await tiemposDe(sel.clip);
+  const donde = (typeof sel.indice === "number" ? `${sel.pista}[${sel.indice}]`
+    : "el SELECCIONADO" + (typeof sel.trackIndex === "number" && sel.trackIndex >= 0 ? `, en V${sel.trackIndex + 1}` : "")) +
+    `, de ${rango.desde} a ${rango.hasta}s`;
 
   const pedido = String(params.efecto || "");
   if (!pedido) throw new Error("Falta `efecto`: el nombre visible o el match name.");
@@ -2181,25 +2424,30 @@ async function agregarEfecto(params) {
   const n0 = await chain.getComponentCount();
   for (let i = 0; i < n0; i++) antes.push(String(await (await chain.getComponentAtIndex(i)).getDisplayName()));
 
+  /* Si el clip ya tenía este efecto, el nuevo entra ÚLTIMO: es la aparición `previas`. Buscarlo por nombre
+     devolvía el viejo, y listaba sus params como si fueran del recién puesto. */
+  const previas = antes.filter((x) => x === nombreVisible).length;
+
   const componente = await ppro.VideoFilterFactory.createComponent(matchName);
   if (!componente) throw new Error(`createComponent devolvió nada para "${matchName}".`);
 
   let ok = false;
   project.lockedAccess(() => {
-    ok = project.executeTransaction((acciones) => {
+    ok = transaccion(project, (acciones) => {
       acciones.addAction(chain.createAppendComponentAction(componente));
     }, "agregar " + nombreVisible);
   });
 
   // Recién insertado puede no responder todavía: se reintenta unas pocas veces
   // antes de darlo por perdido.
-  let puesto = null;
+  let puesto = null, sinParams = false;
   for (let intento = 0; intento < 5 && !puesto; intento++) {
-    const c = await getComponente(sel.clip, nombreVisible);
+    let c = null;
+    try { c = (await componenteElegido(sel.clip, nombreVisible, previas)).comp; } catch (e) { c = null; }
     if (c) {
       let cuantos = 0;
       try { project.lockedAccess(() => { cuantos = c.getParamCount(); }); } catch (e) { cuantos = 0; }
-      if (cuantos > 0) puesto = c;
+      if (cuantos > 0) puesto = c; else sinParams = true;
     }
     if (!puesto) await new Promise((r) => setTimeout(r, 60));
   }
@@ -2211,12 +2459,18 @@ async function agregarEfecto(params) {
 
   return {
     resumen:
-      `"${nombreVisible}" en "${nombreClip}": ${antes.length} → ${despues.length} efectos` +
+      `"${nombreVisible}" en "${nombreClip}" (${donde}): ${antes.length} → ${despues.length} efectos` +
       (despues.length > antes.length
-        ? ` · params: ${puesto ? listarParams(project, puesto).join(", ") : "<no respondió a tiempo>"}`
+        /* El índice del nuevo va ANTES de la lista de params: Lumetri trae 130, y detrás de ellos se perdía. */
+        ? (previas ? ` · ya había ${previas} "${nombreVisible}": el nuevo es el \`indiceEfecto\` ${previas}` : "") +
+          ` · params: ${puesto ? listarParams(project, puesto).join(", ")
+            : sinParams ? "ninguno: el efecto no expone params, o no respondió en 0,3 s" : "<no respondió a tiempo>"}`
         : " · NO SE AGREGÓ NADA" + (ok ? " (la transacción dijo que sí)" : "")),
     clip: nombreClip,
+    pista: typeof sel.indice === "number" ? sel.pista : null,
+    indice: typeof sel.indice === "number" ? sel.indice : null,
     efecto: nombreVisible,
+    indiceEfecto: previas,
     matchName: matchName,
     efectosAntes: antes,
     efectosDespues: despues,
@@ -2566,7 +2820,7 @@ async function devolverInOut(project, tocados, titulo) {
     vias: Array.from(new Set(tocados.filter((t) => t.inOutPrevio).map((t) => t.inOutPrevio.via))) };
   if (!tocados.length) { r.corrio = true; return r; }
   project.lockedAccess(() => {
-    r.corrio = project.executeTransaction((a) => {
+    r.corrio = transaccion(project, (a) => {
       for (const t of tocados) {
         a.addAction(t.inOutPrevio
           ? t.clipItem.createSetInOutPointsAction(t.inOutPrevio.entrada, t.inOutPrevio.salida)
@@ -2659,7 +2913,7 @@ async function inOutMedio(params) {
   }
   let corrio = false;
   project.lockedAccess(() => {
-    corrio = project.executeTransaction((a) => {
+    corrio = transaccion(project, (a) => {
       a.addAction(clipItem.createSetInOutPointsAction(aTick(params.entrada), aTick(params.salida)));
     }, "in/out del medio");
   });
@@ -2831,12 +3085,12 @@ async function armarSecuencia(params) {
     const m = await resolver(f.medio || params.medio);
     try {
       project.lockedAccess(() => {
-        project.executeTransaction((a) => {
+        transaccion(project, (a) => {
           a.addAction(m.clipItem.createSetInOutPointsAction(aTick(f.desde), aTick(f.hasta)));
         }, "entrada y salida del fragmento " + (i + 1));
       });
       project.lockedAccess(() => {
-        project.executeTransaction((a) => {
+        transaccion(project, (a) => {
           // el 4º argumento es la pista de AUDIO: A1 explícito, no -1
           a.addAction(editor.createOverwriteItemAction(m.medio, aTick(cursor), 0, 0));
         }, "pegar fragmento " + (i + 1));
@@ -2947,12 +3201,12 @@ async function armarSecuencia(params) {
        */
       const fuenteDesde = typeof c.desde === "number" ? c.desde : 0;
       project.lockedAccess(() => {
-        project.executeTransaction((a) => {
+        transaccion(project, (a) => {
           a.addAction(mc.clipItem.createSetInOutPointsAction(aTick(fuenteDesde), aTick(fuenteDesde + c.dura)));
         }, "duración de la capa " + (i + 1));
       });
       project.lockedAccess(() => {
-        project.executeTransaction((a) => {
+        transaccion(project, (a) => {
           /* El CUARTO argumento se venía pasando en -1 y nunca se supo qué era.
            * Con -1 el audio de TODAS las capas cae en A1 y se pisan entre sí:
            * quince capas dejaban un solo audio audible. Se prueba pasarle el
@@ -3003,7 +3257,7 @@ async function armarSecuencia(params) {
             if (acciones.length) {
               try {
                 project.lockedAccess(() => {
-                  project.executeTransaction((a) => { for (const f of acciones) a.addAction(f()); }, "nombre y estado de la capa " + (i + 1));
+                  transaccion(project, (a) => { for (const f of acciones) a.addAction(f()); }, "nombre y estado de la capa " + (i + 1));
                 });
               } catch (e) { extras = e && e.message ? e.message : String(e); }
             }
@@ -3224,7 +3478,7 @@ async function unaSecuencia(lista, buscado, duracion) {
     if (n === q) exactas.push(i); else if (n.indexOf(q) !== -1) parciales.push(i);
   }
   let cand = exactas.length ? exactas : parciales;
-  if (!cand.length) throw new Error(`No hay ninguna secuencia que coincida con "${buscado}". Hay: ${nombres.join(", ")}.`);
+  if (!cand.length) throw new Error(`No hay ninguna secuencia que coincida con "${buscado}". Hay: ${nombres.length ? nombres.join(", ") : "ninguna, el proyecto no tiene secuencias"}.`);
 
   // La duración se lee sólo de las candidatas: son getters baratos, pero no se barre el proyecto.
   const largo = async (i) => {
@@ -3343,7 +3597,7 @@ async function secuencias(params) {
       elegida = parciales[0] || null;
     }
     if (!elegida) {
-      throw new Error(`No hay ninguna secuencia que coincida con "${params.nombre}". Hay: ${nombres.join(", ")}.`);
+      throw new Error(`No hay ninguna secuencia que coincida con "${params.nombre}". Hay: ${nombres.length ? nombres.join(", ") : "ninguna, el proyecto no tiene secuencias"}.`);
     }
     // openSequence además la trae al frente en el timeline; setActiveSequence
     // sola puede dejarla activa sin que se vea. Se hacen las dos.
@@ -3393,7 +3647,7 @@ async function renombrar(params) {
   let ok = false, error = null;
   try {
     project.lockedAccess(() => {
-      ok = project.executeTransaction((a) => {
+      ok = transaccion(project, (a) => {
         a.addAction(encontrado.clip.createSetNameAction(params.nuevo));
       }, "renombrar el clip");
     });
@@ -3497,7 +3751,7 @@ async function asegurarBin(project, ruta) {
       try {
         let dentroDelLock = null;
         project.lockedAccess(() => {
-          project.executeTransaction((a) => {
+          transaccion(project, (a) => {
             const accion = fn();
             dentroDelLock = accion ? "ok" : "devolvió " + describirValor(accion);
             if (accion) a.addAction(accion);
@@ -3606,7 +3860,7 @@ async function moverABin(project, destino, items) {
         // contesta "Requires locked access".
         let estado = null;
         project.lockedAccess(() => {
-          project.executeTransaction((a) => {
+          transaccion(project, (a) => {
             const accion = accionDe(primero, etiqueta);
             estado = accion ? "ok" : "devolvió " + describirValor(accion);
             if (accion) a.addAction(accion);
@@ -3638,7 +3892,7 @@ async function moverABin(project, destino, items) {
   if (restantes.length) {
     try {
       project.lockedAccess(() => {
-        project.executeTransaction((a) => {
+        transaccion(project, (a) => {
           for (const it of restantes) {
             const accion = accionDe(it, viaMover);
             if (accion) a.addAction(accion);
@@ -3911,7 +4165,7 @@ async function insertar(params) {
   let excepcion = null;
   try {
     project.lockedAccess(() => {
-      ok = project.executeTransaction((acciones) => {
+      ok = transaccion(project, (acciones) => {
         /* El 4º argumento es la PISTA DE AUDIO, y con -1 cae siempre en A1.
          * Insertando en V3 el audio se iba a A1 y PISABA lo que hubiera ahí,
          * porque el overwrite no solapa: borra. Espeja el video salvo que se
@@ -4227,7 +4481,7 @@ async function enLotes(project, grupos, nombre) {
     try {
       let ok = false;
       project.lockedAccess(() => {
-        ok = project.executeTransaction((a) => {
+        ok = transaccion(project, (a) => {
           for (const f of lotes[i]) a.addAction(f());
         }, nombre + (lotes.length > 1 ? ` (${i + 1}/${lotes.length})` : ""));
       });
@@ -4372,6 +4626,46 @@ function borradoPermitido() {
 
 function anotarBorrado() { BORRADOS_RECIENTES.push(Date.now()); }
 
+/*
+ * EL CLON ESTACIONADO DE `cortar` TIENE SU PROPIO TOPE (2026-10-01). Contaba en el de `borrar` —5 en 60 s—, que
+ * nació de un barrido sobre una pista con 119 SOLAPES que tiró Premiere en el séptimo borrado. El estacionado es
+ * otra cosa: un clon aislado, pasado el final de la secuencia, sin solapes. Medido en el proyecto de prueba con el
+ * tope levantado —sólo en la copia instalada, y repuesto—: 38 cortes a 22,8 por minuto en dos sesiones, sin crash,
+ * sin desorden en la lista y con las colas visibles. Queda en 15, con margen para un proyecto pesado, que no se
+ * midió. El pedazo que saca `sacarRangos` sigue en el tope de `borrar`.
+ */
+const ESTACIONADO_TOPE = 15;
+const ESTACIONADOS_RECIENTES = [];
+/* `cuantos`: `sacarRangos` necesita lugar para DOS —los dos cortes de un rango— antes de empezar el rango. */
+function estacionadoPermitido(cuantos) {
+  const n = typeof cuantos === "number" && cuantos > 0 ? cuantos : 1;
+  const ahoraMs = Date.now();
+  while (ESTACIONADOS_RECIENTES.length && ahoraMs - ESTACIONADOS_RECIENTES[0] > BORRAR_VENTANA_MS) ESTACIONADOS_RECIENTES.shift();
+  if (ESTACIONADOS_RECIENTES.length + n <= ESTACIONADO_TOPE) return { ok: true, libreEn: 0 };
+  const clave = ESTACIONADOS_RECIENTES[Math.min(ESTACIONADOS_RECIENTES.length + n - ESTACIONADO_TOPE, ESTACIONADOS_RECIENTES.length) - 1];
+  return { ok: false, libreEn: Math.ceil((BORRAR_VENTANA_MS - (ahoraMs - clave)) / 1000) };
+}
+function anotarEstacionado() { ESTACIONADOS_RECIENTES.push(Date.now()); }
+
+/*
+ * EL PEDAZO QUE SACA `sacarRangos` TAMBIÉN TIENE SU VENTANA (2026-10-01). Contaba en la de `borrar`, que es una guarda
+ * contra BARRER una pista —tiró Premiere dos veces: 176 clips con solapes, y 8 seguidos en un proyecto pesado,
+ * cuando `borrar` todavía dejaba el clip borrado en la selección—. El pedazo es otra cosa: lo dejan entre dos cortes
+ * los propios cortes del rango, pegado a sus vecinos y sin solapes. Medido en el proyecto de prueba con el tope
+ * levantado: 40 borrados con ripple y audio vinculado a 57,5 por minuto, en dos sesiones, sin crash. Queda en 8, que
+ * con dos cortes por rango en la ventana de 15 del estacionado no es el que frena: el ritmo real es de ~7 rangos por
+ * minuto, contra 5. `borrar` suelto sigue en 5: un proyecto pesado no se midió, y ahí fue el crash de los 8.
+ */
+const PIEZA_TOPE = 8;
+const PIEZAS_RECIENTES = [];
+function piezaPermitida() {
+  const ahoraMs = Date.now();
+  while (PIEZAS_RECIENTES.length && ahoraMs - PIEZAS_RECIENTES[0] > BORRAR_VENTANA_MS) PIEZAS_RECIENTES.shift();
+  if (PIEZAS_RECIENTES.length < PIEZA_TOPE) return { ok: true, libreEn: 0 };
+  return { ok: false, libreEn: Math.ceil((BORRAR_VENTANA_MS - (ahoraMs - PIEZAS_RECIENTES[0])) / 1000) };
+}
+function anotarPieza() { PIEZAS_RECIENTES.push(Date.now()); }
+
 /**
  * Saca un clip del timeline.
  *
@@ -4383,25 +4677,37 @@ function anotarBorrado() { BORRADOS_RECIENTES.push(Date.now()); }
  * hace ripple: todo lo que está a la derecha se corre. El default es el que no
  * sorprende, igual que overwrite en `insertar`.
  */
-async function borrar(params) {
+async function borrar(params, ventana) {
   /*
    * ANTES QUE NADA, incluso antes de resolver el proyecto: una llamada que va a rebotar no tiene
    * que ejecutar ni las comprobaciones. Es el mismo orden que la tabla de params y el prevuelo.
+   *
+   * `ventana` es INTERNA: sólo `sacarRangos` pasa "pieza", para el pedazo que dejaron sus propios cortes, que
+   * cuenta en su ventana medida. El despachador llama a los verbos con un argumento, así que desde MCP o el
+   * transporte no se puede pedir: todo `borrar` de afuera pasa por la guarda del barrido.
    */
   const ahoraMs = Date.now();
-  while (BORRADOS_RECIENTES.length && ahoraMs - BORRADOS_RECIENTES[0] > BORRAR_VENTANA_MS) {
-    BORRADOS_RECIENTES.shift();
-  }
-  if (BORRADOS_RECIENTES.length >= BORRAR_TOPE) {
-    const van = Math.round((ahoraMs - BORRADOS_RECIENTES[0]) / 1000);
-    const libre = Math.ceil((BORRAR_VENTANA_MS - (ahoraMs - BORRADOS_RECIENTES[0])) / 1000);
-    throw new Error(
-      `RÁFAGA DE BORRADOS: van ${BORRADOS_RECIENTES.length} en ${van}s y NO se ejecutó nada. ` +
-      "Vaciar una pista se hace SELECCIONÁNDOLA Y APRETANDO DELETE: es nativo, instantáneo y sin " +
-      "riesgo. `borrar` es para clips puntuales — barrer de a uno ya tiró Premiere dos veces " +
-      "(176 clips con solapes, y 8 seguidos). " +
-      `La ventana se libera sola en ${libre}s.`
-    );
+  if (ventana === "pieza") {
+    const cupo = piezaPermitida();
+    if (!cupo.ok) {
+      throw new Error(`NO SE SACÓ EL PEDAZO: van ${PIEZA_TOPE} en ${BORRAR_VENTANA_MS / 1000} s, el tope medido de \`sacarRangos\`. ` +
+        `La ventana se libera en ${cupo.libreEn} s.`);
+    }
+  } else {
+    while (BORRADOS_RECIENTES.length && ahoraMs - BORRADOS_RECIENTES[0] > BORRAR_VENTANA_MS) {
+      BORRADOS_RECIENTES.shift();
+    }
+    if (BORRADOS_RECIENTES.length >= BORRAR_TOPE) {
+      const van = Math.round((ahoraMs - BORRADOS_RECIENTES[0]) / 1000);
+      const libre = Math.ceil((BORRAR_VENTANA_MS - (ahoraMs - BORRADOS_RECIENTES[0])) / 1000);
+      throw new Error(
+        `RÁFAGA DE BORRADOS: van ${BORRADOS_RECIENTES.length} en ${van}s y NO se ejecutó nada. ` +
+        "Vaciar una pista se hace SELECCIONÁNDOLA Y APRETANDO DELETE: es nativo, instantáneo y sin " +
+        "riesgo. `borrar` es para clips puntuales — barrer de a uno ya tiró Premiere dos veces " +
+        "(176 clips con solapes, y 8 seguidos). " +
+        `La ventana se libera sola en ${libre}s.`
+      );
+    }
   }
 
   const { project, sequence } = await getProyectoYSecuencia();
@@ -4491,7 +4797,7 @@ async function borrar(params) {
     try {
       let ok = false;
       project.lockedAccess(() => {
-        ok = project.executeTransaction((acciones) => {
+        ok = transaccion(project, (acciones) => {
           acciones.addAction(formas[i][1]());
         }, "sacar " + encontrado.nombre);
       });
@@ -4557,7 +4863,7 @@ async function borrar(params) {
    * Recién ACÁ se anota, con el borrado ya confirmado por el conteo. Ver el bloque de
    * BORRADOS_RECIENTES: se cuenta lo que salió, no lo que se intentó.
    */
-  BORRADOS_RECIENTES.push(Date.now());
+  if (ventana === "pieza") anotarPieza(); else BORRADOS_RECIENTES.push(Date.now());
 
   return {
     resumen:
@@ -4738,6 +5044,48 @@ async function tiemposDe(clip) {
  *
  * Todo va en UNA transacción para que se deshaga con un solo Cmd+Z.
  */
+/**
+ * Qué clips quedarían FUERA DE ORDEN en la lista de su pista si se movieran `deltaTicks` (2026-09-30).
+ *
+ * `createMoveAction` cambia el tiempo de un clip pero NO su lugar en la lista de la pista, y Premiere
+ * dibuja y exporta suponiendo que la lista está en el orden del tiempo: un clip que pasa a un vecino
+ * deja de verse —o lo deja de ver el vecino—, aunque `clips` lo lea donde se lo puso. Medido en el
+ * proyecto de prueba: un clip llevado de 8 a 30 s por encima de otro que arrancaba en 12 no se dibujó
+ * (un reporte de uso). Se compara cada movido contra sus VECINOS DE LISTA, con los tiempos que van a tener:
+ * si el anterior arranca después o el siguiente antes, el movimiento rompe el orden. Los movidos se
+ * reconocen por identidad, como en `buscarVinculados`. Sólo lee tiempos.
+ */
+async function rompeElOrden(sequence, movidos, deltaTicks) {
+  const TOL = TICKS_POR_SEGUNDO / 2000;
+  const grupos = [
+    { letra: "V", cuantas: await sequence.getVideoTrackCount(), traer: (i) => sequence.getVideoTrack(i) },
+    { letra: "A", cuantas: await sequence.getAudioTrackCount(), traer: (i) => sequence.getAudioTrack(i) }
+  ];
+  const rotos = [];
+  for (const g of grupos) {
+    for (let t = 0; t < g.cuantas; t++) {
+      const track = await g.traer(t);
+      if (!track) continue;
+      const items = await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
+      if (!items.some((x) => movidos.includes(x))) continue;
+      const inicios = [];
+      for (const x of items) {
+        const ini = x ? Number((await x.getStartTime()).ticks) : null;
+        inicios.push(ini === null ? null : (movidos.includes(x) ? ini + deltaTicks : ini));
+      }
+      for (let k = 0; k < items.length; k++) {
+        if (!movidos.includes(items[k]) || inicios[k] === null) continue;
+        const prev = k > 0 ? inicios[k - 1] : null, sig = k + 1 < items.length ? inicios[k + 1] : null;
+        if ((prev !== null && inicios[k] < prev - TOL) || (sig !== null && inicios[k] > sig + TOL)) {
+          rotos.push({ pista: g.letra + (t + 1), indice: k,
+            vecino: prev !== null && inicios[k] < prev - TOL ? { indice: k - 1, segundos: prev / TICKS_POR_SEGUNDO } : { indice: k + 1, segundos: sig / TICKS_POR_SEGUNDO } });
+        }
+      }
+    }
+  }
+  return rotos;
+}
+
 async function editar(params) {
   const { project, sequence } = await getProyectoYSecuencia();
   const encontrado = await ubicarClip(sequence, params);
@@ -4791,6 +5139,16 @@ async function editar(params) {
 
   if (typeof params.desde === "number") {
     const delta = aTick(params.desde - antes.desde);
+    /* Un movimiento que pasa a un vecino deja el clip FUERA DE ORDEN en la lista de su pista, y
+       Premiere no lo dibuja ni lo exporta: ver `rompeElOrden`. Se rebota ANTES de tocar nada. */
+    const rotos = await rompeElOrden(sequence, [clip].concat(vinculados), Number(delta.ticks));
+    if (rotos.length) {
+      throw new Error(`Mover "${encontrado.nombre}" a ${params.desde}s lo pasa por encima de ` +
+        rotos.map((r) => `${r.pista}[${r.vecino.indice}] (en ${r.vecino.segundos.toFixed(2)}s)`).join(", ") +
+        ": el clip quedaría FUERA DE ORDEN en la lista de su pista, y Premiere no lo dibuja ni lo exporta aunque " +
+        "`clips` lo lea en su lugar (medido el 2026-09-30). Para llevarlo entre otros clips: `clonar` a la posición " +
+        "nueva —el clon entra en orden— y `borrar` el original, o moverlo a mano en Premiere. NO se movió nada.");
+    }
     aTodos((c) => c.createMoveAction(delta));
     pedido.push(`mover a ${params.desde}s (delta ${(params.desde - antes.desde).toFixed(3)}s)`);
   }
@@ -4820,7 +5178,7 @@ async function editar(params) {
   let excepcion = null;
   try {
     project.lockedAccess(() => {
-      project.executeTransaction((a) => {
+      transaccion(project, (a) => {
         for (let i = 0; i < acciones.length; i++) a.addAction(acciones[i]());
       }, "editar " + encontrado.nombre);
     });
@@ -5079,10 +5437,15 @@ async function estado() {
   };
 }
 
-async function motion() {
+async function motion(params) {
   const { project, sequence } = await getProyectoYSecuencia();
-  const sel = await exigirClip(sequence);
+  /* El clip se puede nombrar (2026-10-01), como en `keyframe`: con «Selection Follows Playhead», mover el
+     playhead cambia la selección. */
+  const sel = await clipPedidoOSeleccionado(sequence, params);
   const nombreClip = String(await sel.clip.getName());
+  const rango = await tiemposDe(sel.clip);
+  const donde = typeof sel.indice === "number" ? `${sel.pista}[${sel.indice}]`
+    : "el SELECCIONADO" + (typeof sel.trackIndex === "number" && sel.trackIndex >= 0 ? `, en V${sel.trackIndex + 1}` : "");
 
   const comp = await getComponente(sel.clip, "Motion");
   if (!comp) throw new Error(`El clip "${nombreClip}" no tiene componente Motion.`);
@@ -5112,7 +5475,12 @@ async function motion() {
    * `param` ya lo hacía bien y era la referencia a la mano.
    */
   const reloj = await relojDelClip(sel.clip);
-  const playhead = reloj.aMaterial(await sequence.getPlayerPosition());
+  const enSecuencia = await sequence.getPlayerPosition();
+  const playhead = reloj.aMaterial(enSecuencia);
+  /* Y con el clip nombrado, el playhead puede no estar sobre él: un param animado leído fuera del clip da el
+     valor del BORDE —el primer o el último keyframe—, que no es el de ningún instante del clip. */
+  const segPlayhead = Number(aSegundos(enSecuencia).toFixed(3));
+  const fuera = segPlayhead < rango.desde || segPlayhead > rango.hasta;
   const salida = {};
 
   /*
@@ -5140,10 +5508,14 @@ async function motion() {
   const pos = salida.Position && salida.Position.valor;
   return {
     resumen:
-      `"${nombreClip}" · pos ${pos ? `(${pos.x.toFixed(3)}, ${pos.y.toFixed(3)})` : "?"} · ` +
+      `"${nombreClip}" (${donde}, de ${rango.desde} a ${rango.hasta}s) · pos ${pos ? `(${pos.x.toFixed(3)}, ${pos.y.toFixed(3)})` : "?"} · ` +
       `${escala} ${salida[escala] ? salida[escala].valor : "?"} · ` +
-      `keyframes pos/escala ${salida.Position ? salida.Position.keyframes : "?"}/${salida[escala] ? salida[escala].keyframes : "?"}`,
+      `keyframes pos/escala ${salida.Position ? salida.Position.keyframes : "?"}/${salida[escala] ? salida[escala].keyframes : "?"}` +
+      (fuera ? ` · OJO: el playhead (${segPlayhead}s) está FUERA del clip: lo animado se lee en su borde, no en un instante del clip` : ""),
     clip: nombreClip,
+    pista: typeof sel.indice === "number" ? sel.pista : null,
+    indice: typeof sel.indice === "number" ? sel.indice : null,
+    playheadFueraDelClip: fuera,
     // Cómo se llama la escala acá, para que quien vaya a escribir use ese nombre
     // y no el del otro caso.
     paramDeEscala: escala,
@@ -5167,12 +5539,23 @@ async function motion() {
  */
 async function keyframe(params) {
   const { project, sequence } = await getProyectoYSecuencia();
-  const sel = await exigirClip(sequence);
+  /*
+   * EL CLIP SE PUEDE NOMBRAR (2026-10-01). Sólo tomaba el seleccionado, y con «Selection Follows Playhead» prendido
+   * —en esta máquina lo está: `MZ.Prefs.SelectionFollowsPlayhead` en las prefs de 26.0— mover el playhead
+   * SELECCIONA el clip que queda debajo. Medido en el proyecto de prueba: se seleccionó V1[1] (3–6 s), se movió el
+   * playhead a 1 s y el keyframe se escribió en V1[0]. Con `pista` e `indice`, o `nombre`, el destino no depende
+   * de la selección; sin ellos se sigue usando, y el resumen dice qué clip era y dónde está.
+   */
+  const sel = await clipPedidoOSeleccionado(sequence, params);
   const nombreClip = String(await sel.clip.getName());
+  const donde = typeof sel.indice === "number" ? `${sel.pista}[${sel.indice}]`
+    : "el SELECCIONADO" + (typeof sel.trackIndex === "number" && sel.trackIndex >= 0 ? `, en V${sel.trackIndex + 1}` : "");
   const nombreEfecto = params.efecto || "Motion";
   const nombreParam = params.param;
 
-  const comp = await getComponente(sel.clip, nombreEfecto);
+  const ef = await componenteElegido(sel.clip, nombreEfecto, params.indiceEfecto);
+  const comp = ef.comp;
+  if (comp) exigirUnaAparicion(ef, nombreEfecto, nombreClip);
   if (!comp) {
     const chain = await sel.clip.getComponentChain();
     const n = await chain.getComponentCount();
@@ -5225,8 +5608,47 @@ async function keyframe(params) {
     puntos.push({ valor: valor, tick: reloj.aMaterial(aTick(seg)), segundos: seg });
   }
 
+  /*
+   * LOS PUNTOS TIENEN QUE CAER ADENTRO DEL CLIP (2026-09-30, un reporte de uso). Un PNG recortado de cabeza
+   * —el editor le había sacado 6 s del principio— recibió una lista con 17 puntos ANTES de su comienzo:
+   * Premiere los escribió en el borde, el último pisó a los demás y el verbo no dijo nada, así que la
+   * barra arrancó en otra x. Escribir fuera del clip nunca es lo pedido: se rebota ANTES de escribir,
+   * nombrando los puntos. Medio cuadro de tolerancia en los bordes, para no rechazar el último cuadro.
+   */
+  let tpf = null;
+  try { tpf = Number(await sequence.getTimebase()); } catch (e) { tpf = null; }
+  const medioCuadro = isFinite(tpf) && tpf > 0 ? tpf / 2 : TICKS_POR_SEGUNDO / 100;
+  const rango = await tiemposDe(sel.clip);
+  const margen = medioCuadro / TICKS_POR_SEGUNDO;
+  const afuera = puntos.filter((x) => x.segundos < rango.desde - margen || x.segundos > rango.hasta + margen);
+  if (afuera.length) {
+    const enLista = Array.isArray(params.lista) && params.lista.length;
+    throw new Error((enLista
+      ? `${afuera.length} de ${puntos.length} keyframe(s) caen FUERA de "${nombreClip}", que va de ${rango.desde} a ` +
+        `${rango.hasta}s en la secuencia: ${afuera.slice(0, 6).map((x) => x.segundos + "s").join(", ")}` +
+        `${afuera.length > 6 ? ` y ${afuera.length - 6} más` : ""}. Premiere los escribiría en el borde y el último pisaría ` +
+        "a los demás. NO se escribió nada: sacalos de la lista, o estirá el clip primero."
+      : `El playhead está en ${Number(afuera[0].segundos.toFixed(3))}s, FUERA de "${nombreClip}" (${rango.desde} a ` +
+        `${rango.hasta}s): el keyframe caería en el borde del clip. NO se escribió nada: poné el playhead adentro, o pasá \`segundos\`.`));
+  }
+
   const antes = contarKeyframes(project, p);
   let excepcion = null;
+
+  /*
+   * QUÉ TIEMPOS YA TENÍAN KEYFRAME. Escribir sobre uno existente lo REEMPLAZA y el conteo no se
+   * mueve, así que el veredicto por conteo decía «NO SE ESCRIBIÓ NADA» sobre 54 keyframes
+   * sobrescritos (un reporte de uso, 2026-09-30): el falso negativo que invita a repetir la escritura. Se
+   * leen los TIEMPOS —una lectura, sin valores— y se emparejan a medio cuadro, como `borrarKeyframe`.
+   */
+  let previos = [];
+  try {
+    project.lockedAccess(() => {
+      const ts = p.getKeyframeListAsTickTimes();
+      if (ts) for (let i = 0; i < ts.length; i++) previos.push(Number(ts[i].ticks));
+    });
+  } catch (e) { previos = null; }
+  const ocupados = previos === null ? [] : puntos.filter((x) => previos.some((t) => Math.abs(t - Number(x.tick.ticks)) <= medioCuadro));
 
   /*
    * Activar keyframes es una transacción SEPARADA de agregarlos, así que el
@@ -5237,10 +5659,11 @@ async function keyframe(params) {
    * usuario con medio cambio puesto y creyendo que lo sacó entero.
    */
   let transacciones = 0;
+  let puso = false;
 
   try {
     project.lockedAccess(() => {
-      const activo = project.executeTransaction((acciones) => {
+      const activo = transaccion(project, (acciones) => {
         acciones.addAction(p.createSetTimeVaryingAction(true));
       }, "activar keyframes");
       if (activo) transacciones++;
@@ -5253,7 +5676,7 @@ async function keyframe(params) {
     for (let i = 0; i < creados.length; i++) creados[i].position = puntos[i].tick;
 
     project.lockedAccess(() => {
-      const puso = project.executeTransaction((acciones) => {
+      puso = transaccion(project, (acciones) => {
         for (let i = 0; i < creados.length; i++) acciones.addAction(p.createAddKeyframeAction(creados[i]));
       }, puntos.length === 1 ? "agregar keyframe" : "agregar " + puntos.length + " keyframes");
       if (puso) transacciones++;
@@ -5263,6 +5686,32 @@ async function keyframe(params) {
   }
 
   const despues = contarKeyframes(project, p);
+
+  /*
+   * LOS REEMPLAZADOS SE COMPRUEBAN POR VALOR, pero de a pocos: dos lecturas como mucho, la primera
+   * y la última. Leer valores en volumen tiró Premiere, y una lista de 54 lo sería.
+   * Las dos prueban que la transacción escribió; que las 54 hayan entrado lo sigue diciendo el
+   * booleano de la transacción, y se dice así.
+   */
+  const comprobados = [];
+  if (!excepcion && ocupados.length) {
+    const muestra = ocupados.length > 1 ? [ocupados[0], ocupados[ocupados.length - 1]] : [ocupados[0]];
+    for (const x of muestra) {
+      let leido = null;
+      try { leido = await valorEnTiempo(project, p, x.tick); } catch (e) { leido = null; }
+      const pt = aPunto(leido), num = aNumero(leido);
+      const pedido = x.valor;
+      let igual = null;
+      if (pedido && typeof pedido === "object" && pt) igual = Math.abs(pt.x - pedido.x) < 1e-4 && Math.abs(pt.y - pedido.y) < 1e-4;
+      else if (typeof pedido === "number" && num !== null && num !== undefined) igual = Math.abs(Number(num) - pedido) < 1e-4;
+      else if (typeof pedido === "boolean") igual = aBooleano(leido) === pedido;
+      comprobados.push({ segundos: x.segundos, igual: igual });
+    }
+  }
+  const nuevos = Math.max(0, despues - antes);
+  const reemplazoConfirmado = comprobados.length > 0 && comprobados.every((c) => c.igual === true);
+  const reemplazoDudoso = comprobados.some((c) => c.igual === false);
+  const escribio = nuevos > 0 || (ocupados.length > 0 && puso && !reemplazoDudoso);
 
   // Releer DÓNDE quedaron, no solo cuántos: un keyframe en el tiempo equivocado
   // cuenta igual que uno bien puesto, y es el error que el reloj del material
@@ -5277,9 +5726,18 @@ async function keyframe(params) {
 
   return {
     resumen:
-      `${nombreEfecto} > ${nombreParam} en "${nombreClip}": keyframes ${antes} → ${despues}` +
-      (excepcion ? ` (excepción: ${excepcion})` : "") +
-      (despues > antes
+      `${nombreEfecto} > ${nombreParam} en "${nombreClip}" (${donde}, de ${rango.desde} a ${rango.hasta}s): keyframes ${antes} → ${despues}` +
+      (excepcion ? ` (excepción: ${excepcion})` : "") + avisoDeAparicion(ef, nombreEfecto) +
+      (ocupados.length
+        ? ` · ${ocupados.length} de ${puntos.length} caían sobre un keyframe que YA estaba: se REEMPLAZAN y el conteo no los muestra` +
+          (comprobados.length
+            ? (reemplazoConfirmado ? ` · releído el valor en ${comprobados.map((c) => c.segundos).join("s y ")}s: ES EL PEDIDO`
+              : reemplazoDudoso ? ` · OJO: releído en ${comprobados.map((c) => c.segundos + "s " + (c.igual ? "bien" : "DISTINTO")).join(", ")}: NO QUEDÓ COMO SE PIDIÓ`
+              : ` · el valor no se pudo comparar`)
+            : "") +
+          ` · transacción ${JSON.stringify(puso)}`
+        : "") +
+      (escribio
         ? ` en ${quedaron.join("s, ")}s` +
           (reloj.velocidad !== 1 ? ` (clip a ${reloj.velocidad}x)` : "") +
           ` · se deshace con ${transacciones} Cmd+Z` +
@@ -5287,6 +5745,8 @@ async function keyframe(params) {
         : " · NO SE ESCRIBIÓ NADA") +
       (nivel ? ` · pedidos en ${puntos.map((x) => textoDb(x.valor)).join(", ")} · ${ESCALA_NIVEL}` : ""),
     clip: nombreClip,
+    pista: typeof sel.indice === "number" ? sel.pista : null,
+    indice: typeof sel.indice === "number" ? sel.indice : null,
     efecto: nombreEfecto,
     param: nombreParam,
     pedidos: puntos.map((x) => x.segundos),
@@ -5297,7 +5757,11 @@ async function keyframe(params) {
     velocidadDelClip: reloj ? reloj.velocidad : null,
     keyframesAntes: antes,
     keyframesDespues: despues,
-    escribio: despues > antes,
+    escribio: escribio,
+    nuevos: nuevos,
+    reemplazados: ocupados.map((x) => x.segundos),
+    comprobados: comprobados,
+    transaccion: puso,
     excepcion: excepcion
   };
 }
@@ -5355,7 +5819,9 @@ async function objetivoDeKeyframes(params, quien) {
   const nombreClip = enc.nombre !== undefined ? enc.nombre : String(await enc.clip.getName());
   const nombreEfecto = params.efecto || "Motion";
 
-  const comp = await getComponente(enc.clip, nombreEfecto);
+  const ef = await componenteElegido(enc.clip, nombreEfecto, params.indiceEfecto);
+  const comp = ef.comp;
+  if (comp) exigirUnaAparicion(ef, nombreEfecto, nombreClip);
   if (!comp) {
     const chain = await enc.clip.getComponentChain();
     const n = await chain.getComponentCount();
@@ -5398,7 +5864,7 @@ async function objetivoDeKeyframes(params, quien) {
   }
 
   const reloj = await relojDelClip(enc.clip);
-  return { project, sequence, enc, nombreClip, nombreEfecto, nombreParam, comp, p, reloj };
+  return { project, sequence, enc, nombreClip, nombreEfecto, nombreParam, comp, p, reloj, aparicion: ef };
 }
 
 /**
@@ -5461,7 +5927,7 @@ async function borrarKeyframe(params) {
   let excepcion = null, transacciones = 0;
   try {
     o.project.lockedAccess(() => {
-      const hizo = o.project.executeTransaction((acciones) => {
+      const hizo = transaccion(o.project, (acciones) => {
         for (let i = 0; i < aBorrar.length; i++) acciones.addAction(o.p.createRemoveKeyframeAction(aBorrar[i].tick));
       }, aBorrar.length === 1 ? "borrar keyframe" : "borrar " + aBorrar.length + " keyframes");
       if (hizo) transacciones++;
@@ -5578,7 +6044,7 @@ async function moverKeyframe(params) {
     creado.position = tickDestino;
     o.project.lockedAccess(() => {
       /* Las dos mitades en UNA transacción: así un Cmd+Z devuelve el keyframe a su lugar. */
-      const hizo = o.project.executeTransaction((acciones) => {
+      const hizo = transaccion(o.project, (acciones) => {
         acciones.addAction(o.p.createAddKeyframeAction(creado));
         acciones.addAction(o.p.createRemoveKeyframeAction(origen.tick));
       }, "mover keyframe");
@@ -5714,7 +6180,7 @@ async function curvaKeyframe(params) {
   try {
     /* UNA transacción para todos: una ráfaga de transacciones tira Premiere (SIGSEGV). */
     o.project.lockedAccess(() => {
-      const hizo = o.project.executeTransaction((acciones) => {
+      const hizo = transaccion(o.project, (acciones) => {
         for (let i = 0; i < objetivo.length; i++) {
           acciones.addAction(o.p.createSetInterpolationAtKeyframeAction(objetivo[i].tick, valorModo));
         }
@@ -5821,19 +6287,35 @@ function pngCompleto(buffer) {
     b[n - 4] === 0xAE && b[n - 3] === 0x42 && b[n - 2] === 0x60 && b[n - 1] === 0x82;
 }
 
-/** UXP no tiene btoa ni Buffer: el base64 se arma a mano. */
+/**
+ * UXP no tiene btoa ni Buffer: el base64 se arma a mano.
+ *
+ * DE A PEDAZOS Y CON `join`, no con `+=` (2026-09-30, un reporte de uso). Concatenar de a cuatro caracteres
+ * deja en V8 una cuerda —un ConsString— de cientos de miles de nodos para un PNG de ~1 MB, que nadie
+ * aplana hasta que `JSON.stringify` arma la respuesta. Premiere se cayó justo ahí, en `SlowFlatten` →
+ * `WriteToFlat`, en un `frame {ancho: 960}` con la sesión cargada; con `ancho: 160` el PNG pesa unos KB
+ * y no pasaba. `join` arma cada pedazo como un string plano, y el `join` final otro.
+ */
 function aBase64(buffer) {
   const bytes = new Uint8Array(buffer);
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  let out = "";
-  for (let i = 0; i < bytes.length; i += 3) {
-    const b0 = bytes[i], b1 = bytes[i + 1], b2 = bytes[i + 2];
-    const n = (b0 << 16) | ((b1 || 0) << 8) | (b2 || 0);
-    out += chars[(n >> 18) & 63] + chars[(n >> 12) & 63];
-    out += (b1 === undefined) ? "=" : chars[(n >> 6) & 63];
-    out += (b2 === undefined) ? "=" : chars[n & 63];
+  const PEDAZO = 3 * 4096;   // múltiplo de 3: sólo el último pedazo puede llevar relleno
+  const pedazos = [];
+  for (let base = 0; base < bytes.length; base += PEDAZO) {
+    const fin = Math.min(bytes.length, base + PEDAZO);
+    const sal = new Array(Math.ceil((fin - base) / 3) * 4);
+    let j = 0;
+    for (let i = base; i < fin; i += 3) {
+      const b1 = i + 1 < fin ? bytes[i + 1] : undefined, b2 = i + 2 < fin ? bytes[i + 2] : undefined;
+      const n = (bytes[i] << 16) | ((b1 || 0) << 8) | (b2 || 0);
+      sal[j++] = chars[(n >> 18) & 63];
+      sal[j++] = chars[(n >> 12) & 63];
+      sal[j++] = (b1 === undefined) ? "=" : chars[(n >> 6) & 63];
+      sal[j++] = (b2 === undefined) ? "=" : chars[n & 63];
+    }
+    pedazos.push(sal.join(""));
   }
-  return out;
+  return pedazos.join("");
 }
 
 async function frame(params) {
@@ -6026,7 +6508,7 @@ async function vaciarSecuencia(project, sequence) {
 
   const editor = ppro.SequenceEditor.getEditor(sequence);
   project.lockedAccess(() => {
-    project.executeTransaction((a) => {
+    transaccion(project, (a) => {
       a.addAction(editor.createRemoveItemsAction(seleccion, false, ppro.Constants.MediaType.ANY));
     }, "vaciar la secuencia");
   });
@@ -6361,8 +6843,12 @@ async function analizar(params) {
  *
  * **La API no tiene razor**, así que se emula, y LA COLA ES UN CLON DEL CLIP (2026-09-25). Se clona
  * el clip —y cada uno de sus socios— pasado el final de la secuencia, al clon se le recorta el
- * inicio hasta el punto de corte, al original el final, y el clon se corre a su lugar. Todo en
- * tiempo de SECUENCIA: no se tocan los in/out del medio, no se pisa nada y no se borra nada.
+ * inicio hasta el punto de corte, al original el final, el clon recortado se CLONA a su lugar y el
+ * estacionado se saca. Todo en tiempo de SECUENCIA: no se tocan los in/out del medio ni se pisa nada.
+ *
+ * Hasta el 2026-09-30 el estacionado se MOVÍA a su lugar, y eso lo dejaba fuera de orden en la
+ * lista de la pista: Premiere no lo dibujaba ni lo exportaba (el paso 4, abajo). Clonarlo lo pone
+ * en orden, y cuesta un borrado por dentro, que cuenta en el tope de `borrar`.
  *
  * Hasta ese día la cola se REINSERTABA: `createOverwriteItemAction` con el medio entero. Eso no es
  * el clip, es una instancia NUEVA del medio, y se pagó en un podcast, en un reporte de uso: partir una ISO
@@ -6586,6 +7072,16 @@ async function cortar(params) {
   };
   const estacionados = (n) => `quedaron ${n} clon(es) ESTACIONADOS en ${seg(parqueTicks)}s, pasado el final de la secuencia`;
 
+  /*
+   * El estacionado se BORRA al final (paso 5), y cuenta en su propio tope —`ESTACIONADO_TOPE`, medido—, no en el
+   * de `borrar`. Se mira ANTES de tocar nada: frenar con la cabeza ya cortada dejaría un hueco.
+   */
+  const cupo = estacionadoPermitido();
+  if (!cupo.ok) {
+    throw new Error(`NO SE PARTIÓ "${encontrado.nombre}": \`cortar\` borra por dentro el clon estacionado, y van ` +
+      `${ESTACIONADO_TOPE} en ${BORRAR_VENTANA_MS / 1000} s, el tope medido. Pedilo de nuevo en ${cupo.libreEn} s. NO se tocó nada.`);
+  }
+
   // 1) Clonar el grupo, estacionado.
   const ed = ppro.SequenceEditor.getEditor(sequence);
   const offTicks = parqueTicks - inicioTicks;
@@ -6628,17 +7124,60 @@ async function cortar(params) {
       estacionados(clones.length));
   }
 
-  // 4) Correr la cola a su lugar, con el delta que sale del inicio RELEÍDO de cada clon.
+  /*
+   * 4) La cola se CLONA a su lugar, no se MUEVE (2026-09-30, un reporte de uso). Mover el estacionado lo
+   * dejaba último en la LISTA de la pista con un tiempo de en medio, y Premiere no dibuja ni exporta
+   * un clip fuera de orden en su lista: medido en el proyecto de prueba, de cinco colas se veía sólo
+   * la del último clip —la única que no rompía el orden—, con material real y sintético, a 25 y a 50
+   * fps; `clips` las leía en su lugar, el export salía sin ellas, y el orden queda GUARDADO en el
+   * .prproj, así que reiniciar no lo cura. Un clon, en cambio, entra en la lista en su lugar (medido
+   * igual), y el del estacionado ya trae el recorte, los efectos y el nombre. Se lo busca por su
+   * inicio: después de recortar la cabeza, lo único que arranca en el corte es la cola.
+   */
   await esperarEntreTx();
-  const r4 = await correr(clones.map((c, i) => () => c.createMoveAction(tk(corteTicks - iniciosCola[i]))), "cortar: pegar la cola");
+  const r4 = await correr(clones.map((c, i) => () => ed.createCloneTrackItemAction(c, tk(corteTicks - iniciosCola[i]), 0, 0)),
+    "cortar: pegar la cola");
+  const colasItem = [];
+  for (const m of miembros) {
+    let aca = null;
+    for (const x of await deClips(m.pista)) {
+      if (x && cerca(Number((await x.getStartTime()).ticks), corteTicks)) { aca = x; break; }
+    }
+    colasItem.push(aca);
+  }
   const colas = [];
-  for (const c of clones) colas.push(await tiemposDe(c));
-  const malPegados = miembros.filter((m, i) => !(Math.abs(colas[i].desde - t) < 0.001 && Math.abs(colas[i].hasta - antes.hasta) < 0.001))
-    .map((m, i) => m.pista);
+  for (const c of colasItem) colas.push(c ? await tiemposDe(c) : null);
+  const malPegados = miembros.filter((m, i) => !(colas[i] && Math.abs(colas[i].desde - t) < 0.001 && Math.abs(colas[i].hasta - antes.hasta) < 0.001))
+    .map((m) => m.pista);
   if (malPegados.length) {
     fallar(`la cola no quedó en ${t}–${antes.hasta}s en ${malPegados.join(", ")}` + (r4.errores.length ? ` (${r4.errores.join(" | ")})` : ""),
-      `OJO: la cabeza ya está cortada, así que entre ${t} y ${antes.hasta}s puede haber un HUECO`);
+      `OJO: la cabeza ya está cortada, así que entre ${t} y ${antes.hasta}s puede haber un HUECO · ` + estacionados(clones.length));
   }
+
+  /*
+   * 5) Se saca el estacionado. Es un borrado por dentro: la selección se vacía después —el patrón
+   * que tiró Premiere el 2026-09-24— y cuenta en el tope de `borrar`, que se miró arriba. Si no sale,
+   * la cola igual está bien puesta: queda el estacionado pasado el final, estirando la secuencia, y
+   * se dice.
+   */
+  await esperarEntreTx();
+  let sacado = false, seleccionLimpia = null;
+  try {
+    const sel = await sequence.getSelection();
+    const previos = await sel.getTrackItems();
+    for (let z = 0; z < previos.length; z++) sel.removeItem(previos[z]);
+    for (const c of clones) { try { sel.addItem(c, false); } catch (e) { /* sigue */ } }
+    const r5 = await correr([() => ed.createRemoveItemsAction(sel, false, ppro.Constants.MediaType.ANY)], "cortar: sacar el estacionado");
+    if (r5.corrieron > 0) anotarEstacionado();
+    seleccionLimpia = await vaciarSeleccion(sequence, sel, clones);
+  } catch (e) { /* lo dice la relectura de abajo */ }
+  let quedanEstacionados = 0;
+  for (const m of miembros) {
+    for (const x of await deClips(m.pista)) {
+      if (x && Number((await x.getStartTime()).ticks) >= parqueTicks - TOL) quedanEstacionados++;
+    }
+  }
+  sacado = quedanEstacionados === 0;
 
   /*
    * LA PRUEBA, releída y no deducida: la cabeza y la cola pegadas, la entrada de la cola donde
@@ -6650,7 +7189,7 @@ async function cortar(params) {
   const entradaEsperada = Number((antes.entrada + (t - antes.desde)).toFixed(3));
   const entradaBien = Math.abs(cola.entrada - entradaEsperada) < 0.001;
   const pegados = Math.abs(cola.desde - cabeza.hasta) < 0.001;
-  const nombreCola = String(await clones[0].getName());
+  const nombreCola = String(await colasItem[0].getName());
   const itemsDespues = (await contarItems(sequence)).total;
   const itemsEsperados = itemsAntes + miembros.length;
   const transicionesDespues = await contarTransiciones();
@@ -6668,6 +7207,8 @@ async function cortar(params) {
       (entradaBien ? "" : ` · OJO: la cola arranca en ${cola.entrada} del material y tocaba ${entradaEsperada}`) +
       " · la cola es un CLON: trae efectos, nombre y apagado del original" +
       (nombreCola === encontrado.nombre ? "" : ` · OJO: la cola se llama "${nombreCola}"`) +
+      (sacado ? "" : ` · OJO: quedaron ${quedanEstacionados} clon(es) ESTACIONADOS pasado el final, estirando la secuencia: borralos`) +
+      (seleccionLimpia === false ? " · OJO: la selección no quedó vacía después de sacar el estacionado" : "") +
       (soloVideo
         ? " · soloVideo: el audio sigue entero debajo"
         : duda
@@ -6704,6 +7245,8 @@ async function cortar(params) {
     itemsAntes: itemsAntes,
     itemsDespues: itemsDespues,
     itemsEsperados: itemsEsperados,
+    estacionadoSacado: sacado,
+    seleccionVaciada: seleccionLimpia,
     transacciones: transacciones
   };
 }
@@ -6746,46 +7289,84 @@ async function sacarRangos(params) {
   };
   const duracionAntes = await duracionDe();
 
+  /*
+   * LA TOLERANCIA ES MEDIO CUADRO DE ESTA SECUENCIA, más un margen para la coma flotante (2026-10-01). Era 0,02 s
+   * fijo —medio cuadro a 25 fps—: un borde a medio cuadro, que `cortar` ajusta al de al lado, quedaba a
+   * 0,0200000000000000018 del corte y el pedazo no aparecía. Medido en vivo: 3,02–3,22 cortado y sin sacar. Y a
+   * 50 fps 0,02 es un cuadro entero.
+   */
+  let tpfRangos = null;
+  try { tpfRangos = Number(await sequence.getTimebase()); } catch (e) { tpfRangos = null; }
+  const medioCuadro = (isFinite(tpfRangos) && tpfRangos > 0 ? tpfRangos / TICKS_POR_SEGUNDO : 0.04) / 2 + 1e-6;
+
   // El índice del clip que contiene un tiempo dado, en esta pista.
   const indiceEn = async (t) => {
     const track = await sequence.getVideoTrack(pistaIndex);
     const its = await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
     for (let i = 0; i < its.length; i++) {
       const x = await tiemposDe(its[i]);
-      if (t > x.desde + 0.02 && t < x.hasta - 0.02) return { indice: i, dentro: true, tiempos: x };
-      if (Math.abs(t - x.desde) <= 0.02) return { indice: i, dentro: false, tiempos: x };
+      if (t > x.desde + medioCuadro && t < x.hasta - medioCuadro) return { indice: i, dentro: true, tiempos: x };
+      if (Math.abs(t - x.desde) <= medioCuadro) return { indice: i, dentro: false, tiempos: x };
     }
     return null;
   };
 
   const hechos = [];
   const fallidos = [];
-  let frenado = false;
+  let frenado = false, frenadoPorTope = null;
 
   for (let i = 0; i < rangos.length; i++) {
     const r = rangos[i];
+    /*
+     * EL CUPO ENTERO ANTES DE TOCAR EL RANGO (2026-10-01). Un rango son dos cortes —dos estacionados— y el pedazo.
+     * Sin mirarlo antes, cuando se llenaba el tope en el medio el rango quedaba CORTADO Y SIN SACAR, y el bucle
+     * seguía con los demás: rangos a medias, uno tras otro. Ahora se frena limpio, y lo que falta se puede pedir
+     * de nuevo tal cual: se va del último al primero, así que los rangos que no se tocaron no se movieron.
+     */
+    const cupoCortes = estacionadoPermitido(2), cupoPieza = piezaPermitida();
+    if (!cupoCortes.ok || !cupoPieza.ok) {
+      frenadoPorTope = { quedan: rangos.slice(i), libreEn: Math.max(cupoCortes.libreEn, cupoPieza.libreEn) };
+      break;
+    }
     try {
       const a = await indiceEn(r.desde);
       if (!a) { fallidos.push(`${r.desde}-${r.hasta}s: no hay clip en ${r.desde}s`); continue; }
       const b = await indiceEn(r.hasta);
       if (!b) { fallidos.push(`${r.desde}-${r.hasta}s: no hay clip en ${r.hasta}s`); continue; }
-      if (a.indice !== b.indice) {
+      /* Un rango que TERMINA justo en un corte —«hasta el final de este clip»— encuentra en `hasta` el comienzo del
+         clip siguiente, y se lo daba por un rango que cruza (2026-10-01, medido: un rango ya cortado en 3,00 y 3,20
+         rebotaba así). Si `hasta` cae, a medio cuadro, en el final del clip donde empieza, es de ese clip. */
+      const terminaEnSuFinal = !b.dentro && Math.abs(a.tiempos.hasta - r.hasta) <= medioCuadro;
+      if (a.indice !== b.indice && !terminaEnSuFinal) {
         fallidos.push(`${r.desde}-${r.hasta}s: el rango cruza de un clip a otro (${a.indice} → ${b.indice}), no se toca`);
         continue;
       }
 
       // Partir en el inicio (si no cae justo en un borde).
-      let objetivo = a.indice;
-      if (a.dentro) {
-        await cortar({ pista: pista, indice: a.indice, segundos: r.desde });
-        objetivo = a.indice + 1;
-      }
+      if (a.dentro) await cortar({ pista: pista, indice: a.indice, segundos: r.desde });
       // Partir en el final del rango.
       const b2 = await indiceEn(r.hasta);
       if (b2 && b2.dentro) await cortar({ pista: pista, indice: b2.indice, segundos: r.hasta });
 
+      /*
+       * EL PEDAZO A SACAR SE BUSCA POR TIEMPO, no por índice (2026-09-30). Esto era `a.indice + 1`, que
+       * suponía la cola justo después de la cabeza en la lista de la pista. El `cortar` de clones la
+       * dejaba ÚLTIMA en la lista, así que en una pista de varios clips `a.indice + 1` era el clip
+       * SIGUIENTE: medido en el proyecto de prueba, sacar 2–3 s de [0–6, 6–12, 12–18] borró el 6–12 y
+       * dejó el 2–3, con el resumen diciendo «1 de 1 rangos». Con una pista de un solo clip coincidía, y
+       * así pasó la prueba del 2026-09-25. Se borra sólo si hay un clip que arranca en `desde` y termina
+       * en `hasta`.
+       */
+      const o = await indiceEn(r.desde);
+      if (!o || o.dentro || Math.abs(o.tiempos.hasta - r.hasta) > 2 * medioCuadro) {
+        fallidos.push(`${r.desde}-${r.hasta}s: después de cortar no quedó un clip de ${r.desde} a ${r.hasta}s` +
+          (o ? ` (en ${r.desde}s hay ${o.tiempos.desde}–${o.tiempos.hasta}s)` : "") + ": NO se borró nada");
+        continue;
+      }
+      const objetivo = o.indice;
+
       const antesBorrar = (await contarItems(sequence)).total;
-      await borrar({ pista: pista, indice: objetivo, dejarHueco: false });
+      await borrar({ pista: pista, indice: objetivo, dejarHueco: false }, "pieza");
       const despuesBorrar = (await contarItems(sequence)).total;
       if (despuesBorrar >= antesBorrar) { fallidos.push(`${r.desde}-${r.hasta}s: el borrado no sacó nada`); continue; }
 
@@ -6818,10 +7399,16 @@ async function sacarRangos(params) {
       (Math.abs(real - pedido) > 0.15 + hechos.length * 0.02 ? " · OJO: no coinciden" : "") +
       ` · items ${antesTotal} → ${despuesTotal}` +
       (fallidos.length ? ` · NO SE PUDO: ${fallidos.join(" | ")}` : "") +
-      (frenado ? " · SE FRENÓ: un corte quedó a medias y los rangos que seguían NO se tocaron" : ""),
+      (frenado ? " · SE FRENÓ: un corte quedó a medias y los rangos que seguían NO se tocaron" : "") +
+      (frenadoPorTope
+        ? ` · SE FRENÓ EN EL TOPE: ${frenadoPorTope.quedan.length} rango(s) sin tocar —van ~7 por minuto, el ritmo medido—: ` +
+          `pedilos de nuevo en ${frenadoPorTope.libreEn} s, tal cual (` +
+          frenadoPorTope.quedan.slice().reverse().map((x) => `${x.desde}–${x.hasta}`).join(", ") + ")"
+        : ""),
     hechos: hechos,
     fallidos: fallidos,
     frenado: frenado,
+    frenadoPorTope: frenadoPorTope ? frenadoPorTope.quedan.slice().reverse() : null,
     duracionAntes: Number(duracionAntes.toFixed(3)),
     duracionDespues: Number(duracionDespues.toFixed(3)),
     sacadoReal: Number(real.toFixed(3))
@@ -6876,7 +7463,7 @@ async function cerrarHuecos(params) {
        */
       const vinc = esAudio ? [] : await buscarVinculados(sequence, items[h.i]);
       project.lockedAccess(() => {
-        project.executeTransaction((a) => {
+        transaccion(project, (a) => {
           a.addAction(items[h.i].createSetEndAction(aTick(h.hasta)));
           for (let k = 0; k < vinc.length; k++) a.addAction(vinc[k].createSetEndAction(aTick(h.hasta)));
         }, "cerrar hueco");
@@ -7028,7 +7615,7 @@ async function ponerAjustes(project, sequence, params) {
         st.setVideoFrameRect(rect);
         let ok = false;
         project.lockedAccess(() => {
-          ok = project.executeTransaction((a) => { a.addAction(sequence.createSetSettingsAction(st)); },
+          ok = transaccion(project, (a) => { a.addAction(sequence.createSetSettingsAction(st)); },
             "resolución de la secuencia");
         });
         const ahora = await leerAjustes(sequence);
@@ -7090,7 +7677,7 @@ async function ponerAjustes(project, sequence, params) {
           st.setVideoFrameRate(valor);
           let ok = false;
           project.lockedAccess(() => {
-            ok = project.executeTransaction((a) => { a.addAction(sequence.createSetSettingsAction(st)); },
+            ok = transaccion(project, (a) => { a.addAction(sequence.createSetSettingsAction(st)); },
               "fps de la secuencia");
           });
           const ahora = await leerAjustes(sequence);
@@ -7136,7 +7723,7 @@ async function ponerAjustes(project, sequence, params) {
           st.setVideoDisplayFormat(valor);
           let ok = false;
           project.lockedAccess(() => {
-            ok = project.executeTransaction((a) => { a.addAction(sequence.createSetSettingsAction(st)); },
+            ok = transaccion(project, (a) => { a.addAction(sequence.createSetSettingsAction(st)); },
               "formato del reloj de la secuencia");
           });
           const ahora = await leerReloj((await leerAjustes(sequence)).st);
@@ -7256,7 +7843,7 @@ async function ajustarAlCuadro(params) {
       if (!ci) { fallidos.push(n + ": no se pudo castear"); continue; }
       let ok = false;
       project.lockedAccess(() => {
-        ok = project.executeTransaction((a) => { a.addAction(ci.createSetScaleToFrameSizeAction()); },
+        ok = transaccion(project, (a) => { a.addAction(ci.createSetScaleToFrameSizeAction()); },
           "ajustar al cuadro");
       });
       hechos.push({ medio: n, clips: medios[n].clips, transaccion: ok });
@@ -7400,7 +7987,7 @@ async function escalaFija(params) {
         if (via && formas[i][0] !== via) continue; // ya sabemos cuál sirve
         try {
           project.lockedAccess(() => {
-            project.executeTransaction((a) => { a.addAction(formas[i][1]()); }, "escala del clip");
+            transaccion(project, (a) => { a.addAction(formas[i][1]()); }, "escala del clip");
           });
           const leido = aNumero(await valorEnTiempo(project, p, await c.clip.getStartTime()));
           if (leido !== null && Math.abs(leido - valor) < 0.5) { puesto = true; via = formas[i][0]; }
@@ -7453,8 +8040,10 @@ async function fijar(params) {
   const nombreClip = encontrado.nombre;
 
   const efecto = params.efecto || "Motion";
-  const comp = await getComponente(encontrado.clip, efecto);
+  const ef = await componenteElegido(encontrado.clip, efecto, params.indiceEfecto);
+  const comp = ef.comp;
   if (!comp) throw new Error(`"${nombreClip}" no tiene el efecto "${efecto}".`);
+  exigirUnaAparicion(ef, efecto, nombreClip);
 
   let cual = params.param;
   let p = null, avisoAmbiguo = null;
@@ -7532,7 +8121,7 @@ async function fijar(params) {
   }
   let ok = false;
   project.lockedAccess(() => {
-    ok = project.executeTransaction((a) => { a.addAction(p.createSetValueAction(kf)); }, "fijar " + cual);
+    ok = transaccion(project, (a) => { a.addAction(p.createSetValueAction(kf)); }, "fijar " + cual);
   });
 
   const despues = await valorEnTiempo(project, p, await encontrado.clip.getStartTime());
@@ -7556,8 +8145,8 @@ async function fijar(params) {
       `${cual === "Position" ? JSON.stringify(aPunto(antes)) : esTexto ? JSON.stringify(antes) : conDb(aNumero(antes))} → ${conDb(leido)}` +
       (quedo ? "" : ` · NO QUEDÓ COMO SE PIDIÓ (${nivel && params.db !== undefined ? params.db + " dB" : JSON.stringify(esperado)}), transacción ${ok}`) +
       (nivel && params.db === undefined ? ` · ${ESCALA_NIVEL}` : "") +
-      (avisoAmbiguo ? ` · ${avisoAmbiguo}` : ""),
-    clip: nombreClip, param: cual, valor: leido, quedo: quedo,
+      (avisoAmbiguo ? ` · ${avisoAmbiguo}` : "") + avisoDeAparicion(ef, efecto),
+    clip: nombreClip, param: cual, valor: leido, quedo: quedo, indiceEfecto: ef.aparicion,
     db: nivel && typeof leido === "number" ? Number(crudoADb(leido).toFixed(2)) : undefined,
     ambiguo: avisoAmbiguo || null
   };
@@ -7618,14 +8207,14 @@ async function unirAudio(params) {
         for (let z = 0; z < prev.length; z++) sel.removeItem(prev[z]);
         sel.addItem(its[par], false);
         project.lockedAccess(() => {
-          project.executeTransaction((a) => {
+          transaccion(project, (a) => {
             a.addAction(editor.createRemoveItemsAction(sel, false, ppro.Constants.MediaType.ANY));
           }, "sacar el pedazo de audio");
         });
         anotarBorrado();
         if (!(await vaciarSeleccion(sequence, sel, [its[par]]))) seleccionSucia++;
         project.lockedAccess(() => {
-          project.executeTransaction((a) => {
+          transaccion(project, (a) => {
             a.addAction(its[par - 1].createSetEndAction(aTick(finalReal)));
           }, "estirar el audio anterior");
         });
@@ -7812,7 +8401,7 @@ async function aplicarMotion(params) {
     let corrio = false, error = null;
     try {
       project.lockedAccess(() => {
-        corrio = project.executeTransaction((a) => {
+        corrio = transaccion(project, (a) => {
           for (const g of lotes[l]) for (const f of g.acciones) a.addAction(f());
         }, `motion en tanda (${lotes[l].length} clip${lotes[l].length > 1 ? "s" : ""})`);
       });
@@ -7879,7 +8468,7 @@ async function aplicarEscalas(params) {
     if (!lote.length) return;
     let corrio = false;
     project.lockedAccess(() => {
-      corrio = project.executeTransaction((a) => {
+      corrio = transaccion(project, (a) => {
         for (const w of lote) {
           a.addAction(w.pEsc.createSetValueAction(w.kEsc));
           if (w.kPos) a.addAction(w.pPos.createSetValueAction(w.kPos));
@@ -8021,7 +8610,7 @@ async function aplicarZooms(params) {
     if (!lote.length) return;
     let okActivar = false, okAgregar = false;
     project.lockedAccess(() => {
-      okActivar = project.executeTransaction((a) => {
+      okActivar = transaccion(project, (a) => {
         for (const w of lote) {
           a.addAction(w.pEsc.createSetTimeVaryingAction(true));
           a.addAction(w.pPos.createSetTimeVaryingAction(true));
@@ -8029,7 +8618,7 @@ async function aplicarZooms(params) {
       }, `activar keyframes (${lote.length})`);
     });
     project.lockedAccess(() => {
-      okAgregar = project.executeTransaction((a) => {
+      okAgregar = transaccion(project, (a) => {
         for (const w of lote) {
           a.addAction(w.pEsc.createAddKeyframeAction(w.k1));
           a.addAction(w.pEsc.createAddKeyframeAction(w.k2));
@@ -8286,7 +8875,7 @@ async function aplicarAnim(params) {
     if (!lote.length) return;
     let okLimpiar = false, okEscribir = false, okAgregar = true;
     project.lockedAccess(() => {
-      okLimpiar = project.executeTransaction((a) => {
+      okLimpiar = transaccion(project, (a) => {
         for (const w of lote) {
           a.addAction(w.pEsc.createSetTimeVaryingAction(false));
           a.addAction(w.pPos.createSetTimeVaryingAction(false));
@@ -8294,7 +8883,7 @@ async function aplicarAnim(params) {
       }, `limpiar keyframes (${lote.length})`);
     });
     project.lockedAccess(() => {
-      okEscribir = project.executeTransaction((a) => {
+      okEscribir = transaccion(project, (a) => {
         for (const w of lote) {
           if (!w.anima) {
             a.addAction(w.pEsc.createSetValueAction(w.k1));
@@ -8309,7 +8898,7 @@ async function aplicarAnim(params) {
     const conAnim = lote.filter((w) => w.anima);
     if (conAnim.length) {
       project.lockedAccess(() => {
-        okAgregar = project.executeTransaction((a) => {
+        okAgregar = transaccion(project, (a) => {
           for (const w of conAnim) {
             a.addAction(w.pEsc.createAddKeyframeAction(w.k1));
             a.addAction(w.pEsc.createAddKeyframeAction(w.k2));
@@ -8450,14 +9039,14 @@ async function unirVideo(params) {
       for (const x of resto) { try { sel.addItem(x.item, false); } catch (e) { /* sigue */ } }
 
       project.lockedAccess(() => {
-        project.executeTransaction((a) => {
+        transaccion(project, (a) => {
           a.addAction(editor.createRemoveItemsAction(sel, false, ppro.Constants.MediaType.VIDEO));
         }, "sacar los pedazos a fusionar");
       });
       anotarBorrado();
       if (!(await vaciarSeleccion(sequence, sel, resto.map((x) => x.item)))) seleccionSucia++;
       project.lockedAccess(() => {
-        project.executeTransaction((a) => {
+        transaccion(project, (a) => {
           a.addAction(primero.item.createSetEndAction(aTick(r.hasta)));
         }, "estirar el primero");
       });
@@ -8520,7 +9109,7 @@ async function duplicarSecuencia(params) {
     try {
       let ok = false;
       project.lockedAccess(() => {
-        ok = project.executeTransaction((a) => { a.addAction(formas[i][1]()); }, "duplicar secuencia");
+        ok = transaccion(project, (a) => { a.addAction(formas[i][1]()); }, "duplicar secuencia");
       });
       const ahora = await project.getSequences();
       if (ahora.length > antes) { via = formas[i][0]; break; }
@@ -8595,7 +9184,7 @@ async function duplicarSecuencia(params) {
       }
 
       project.lockedAccess(() => {
-        project.executeTransaction((a) => { a.addAction(item.createSetNameAction(quiero)); }, "renombrar la copia");
+        transaccion(project, (a) => { a.addAction(item.createSetNameAction(quiero)); }, "renombrar la copia");
       });
       /* La prueba: releer la lista y mirar LA NUEVA —por guid—, no cualquiera que se llame así: una
          secuencia vieja con ese nombre confirmaba un renombre que no había pasado. */
@@ -8625,6 +9214,72 @@ async function duplicarSecuencia(params) {
     copia: renombrada || (nuevos[0] ? nuevos[0].nombre : null),
     secuencias: listaFinal
   };
+}
+
+/**
+ * Renombra una SECUENCIA (2026-09-30, un reporte de uso). `renombrar` renombra la INSTANCIA de un clip, y el único
+ * camino para una secuencia era `duplicarSecuencia` con `nuevoNombre`, que deja la original y cambia su
+ * identidad: una sesión le tuvo que pasar los nombres al editor para que renombrara cuatro a mano.
+ *
+ * La secuencia se elige como en `borrarSecuencia` y `duplicarSecuencia`, con `unaSecuencia`: `nombre` es el
+ * nombre o una parte, el exacto gana y ante dos rebota. Como en `duplicarSecuencia`, el renombre va por el
+ * ProjectItem —`Sequence` no tiene createSetNameAction— y se relee por guid.
+ *
+ * Y no deja un nombre repetido: `unaSecuencia` compara sin mayúsculas, así que con dos «Tema 1» —o un «Tema 1»
+ * y un «TEMA 1»— ningún verbo que elige por nombre puede volver a elegir una de las dos sin `duracion`.
+ */
+async function renombrarSecuencia(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No hay un proyecto abierto en Premiere.");
+  /* `nuevo`, como en `renombrar` y `renombrarPista`: son las dos herramientas de renombrar que se ven
+     desde MCP. `duplicarSecuencia` dice `nuevoNombre`, pero no es herramienta. */
+  const nuevo = typeof params.nuevo === "string" ? params.nuevo.trim() : "";
+  if (!nuevo) throw new Error("Falta `nuevo`: cómo se tiene que llamar la secuencia. NO se tocó nada.");
+
+  const lista = await project.getSequences();
+  const { seq: objetivo } = await unaSecuencia(lista, params.nombre, params.duracion);
+  const viejo = String(objetivo.name);
+  if (norm(viejo) === norm(nuevo)) {
+    return { resumen: `"${viejo}" ya se llama así: NO CAMBIÓ NADA`, antes: viejo, despues: viejo, renombrada: false, transacciones: 0 };
+  }
+  // `objetivo` es un elemento de `lista`, así que se excluye por identidad: un cambio sólo de mayúsculas no choca consigo.
+  const choca = lista.filter((sq) => sq !== objetivo && norm(String(sq.name)).toLowerCase() === norm(nuevo).toLowerCase());
+  if (choca.length) {
+    throw new Error(`Ya hay ${choca.length === 1 ? "una secuencia" : choca.length + " secuencias"} "${String(choca[0].name)}" ` +
+      "en el proyecto: con dos iguales, los verbos que eligen por nombre no pueden distinguirlas. NO se tocó nada.");
+  }
+
+  let item = null;
+  try { item = await objetivo.getProjectItem(); } catch (e) { item = null; }
+  if (!item || typeof item.createSetNameAction !== "function") {
+    throw new Error(`"${viejo}" no dio su ProjectItem, y sin él la API no la renombra. NO se tocó nada.`);
+  }
+  const guidDe = (sq) => { try { const g = String(sq.guid); return g && g !== "undefined" && g !== "null" ? g : null; } catch (e) { return null; } };
+  const guid = guidDe(objetivo);
+
+  let ok = false;
+  project.lockedAccess(() => {
+    ok = transaccion(project, (a) => { a.addAction(item.createSetNameAction(nuevo)); }, "renombrar secuencia");
+  });
+
+  /* La prueba: releer la lista y mirar ESA secuencia por su guid. Sin guid, sólo cuenta si el nombre viejo
+     desapareció y el nuevo apareció; cualquier otra cosa es "no se pudo releer", no un éxito. */
+  const rel = await project.getSequences();
+  let quedo = null;
+  if (guid) {
+    for (const sq of rel) if (guidDe(sq) === guid) quedo = String(sq.name);
+  } else {
+    const nombres = rel.map((sq) => norm(String(sq.name)));
+    if (nombres.indexOf(norm(viejo)) === -1 && nombres.indexOf(norm(nuevo)) !== -1) quedo = nuevo;
+  }
+  const bien = quedo !== null && norm(quedo) === norm(nuevo);
+  const cambio = quedo !== null && norm(quedo) !== norm(viejo);
+  let resumen;
+  if (bien) resumen = `Secuencia "${viejo}" → "${quedo}" · releída por ${guid ? "guid" : "nombre"} · 1 Cmd+Z la deshace`;
+  else if (cambio) resumen = `OJO: se pidió "${nuevo}" y Premiere dejó "${viejo}" como "${quedo}" · 1 Cmd+Z la deshace`;
+  else if (quedo === null) resumen = `NO SE PUDO RELEER "${viejo}" después de renombrarla (la transacción devolvió ${ok}): mirala en el panel Project`;
+  else resumen = `NO SE RENOMBRÓ: "${viejo}" sigue llamándose así · la transacción devolvió ${ok}`;
+  return { resumen: resumen, antes: viejo, despues: quedo, renombrada: bien, transacciones: ok ? 1 : 0 };
 }
 
 /* ---------- marcadores ---------- */
@@ -8791,7 +9446,7 @@ async function marcar(params) {
     let nuevo = null;
     try {
       project.lockedAccess(() => {
-        project.executeTransaction((a) => { a.addAction(formas[i][1]()); }, "poner marcador");
+        transaccion(project, (a) => { a.addAction(formas[i][1]()); }, "poner marcador");
       });
       const ahora = await traer();
       if (ahora.length <= antes) { intentos.push(formas[i][0] + ": no tiró pero no apareció"); continue; }
@@ -8823,7 +9478,7 @@ async function marcar(params) {
     if (comentario) {
       try {
         project.lockedAccess(() => {
-          project.executeTransaction((a) => { a.addAction(nuevo.createSetCommentsAction(comentario)); },
+          transaccion(project, (a) => { a.addAction(nuevo.createSetCommentsAction(comentario)); },
             "comentario del marcador");
         });
       } catch (e) { intentos.push(formas[i][0] + ": el setter del comentario tiró: " + (e && e.message ? e.message : e)); }
@@ -8841,7 +9496,7 @@ async function marcar(params) {
     // No sirvió: se lo saca antes de probar la siguiente, para no dejar basura.
     try {
       project.lockedAccess(() => {
-        project.executeTransaction((a) => { a.addAction(col.createRemoveMarkerAction(nuevo)); }, "sacar marcador de prueba");
+        transaccion(project, (a) => { a.addAction(col.createRemoveMarkerAction(nuevo)); }, "sacar marcador de prueba");
       });
     } catch (e) { intentos.push("(y no se pudo sacar: " + (e && e.message ? e.message : e) + ")"); }
   }
@@ -8872,7 +9527,7 @@ async function marcar(params) {
     colorPedido = indiceDeColor(params.color);
     try {
       project.lockedAccess(() => {
-        project.executeTransaction((a) => {
+        transaccion(project, (a) => {
           a.addAction(puesto.marker.createSetColorByIndexAction(colorPedido));
         }, "pintar el marcador");
       });
@@ -9096,7 +9751,7 @@ async function editarMarcador(params) {
     let ok = false;
     try {
       project.lockedAccess(() => {
-        ok = project.executeTransaction((a) => { a.addAction(fabrica()); }, "editar marcador: " + comoSeLlama);
+        ok = transaccion(project, (a) => { a.addAction(fabrica()); }, "editar marcador: " + comoSeLlama);
       });
     } catch (e) { corridas.push(`${comoSeLlama}: tiró ${(e && e.message) || e}`); continue; }
     corridas.push(`${comoSeLlama}: transacción ${ok}`);
@@ -9205,7 +9860,7 @@ async function desmarcar(params) {
   }
 
   project.lockedAccess(() => {
-    project.executeTransaction((a) => {
+    transaccion(project, (a) => {
       for (let i = 0; i < objetivos.length; i++) a.addAction(col.createRemoveMarkerAction(objetivos[i]));
     }, "sacar marcadores");
   });
@@ -9315,7 +9970,7 @@ async function revisar(params) {
 
   const pistas = [];
   const apagadas = [];
-  let ceros = 0, solapes = 0, huecosChicos = 0, huecosGrandes = 0, juntas = 0, deliberados = 0;
+  let ceros = 0, solapes = 0, huecosChicos = 0, huecosGrandes = 0, juntas = 0, deliberados = 0, fueraDeOrden = 0;
 
   for (const g of grupos) {
     for (let t = 0; t < g.cuantas; t++) {
@@ -9347,10 +10002,29 @@ async function revisar(params) {
           entrada: entrada
         });
       }
+
+      /*
+       * FUERA DE ORDEN EN LA LISTA (2026-09-30, un reporte de uso). `getTrackItems` devuelve los clips en el
+       * orden de la LISTA de la pista, y Premiere dibuja y exporta suponiendo que es el del tiempo. Un
+       * clip que la lista pone después de otro que arranca más tarde no se dibuja ni sale en el export,
+       * aunque `clips` lo lea en su lugar: lo dejaba `cortar` hasta ese día —movía la cola desde pasado
+       * el final— y lo deja `editar desde` si pasa a un vecino. Medido en el proyecto de prueba; el
+       * orden queda guardado en el .prproj, así que reiniciar no lo cura. Se informan los DOS de cada
+       * inversión: en uno de los casos medidos el que dejó de verse fue el movido, no el que la lista
+       * deja atrás. Se lee de lo que ya se leyó: no cuesta ninguna llamada.
+       */
+      const fuera = [];
+      let mayor = null;
+      for (const c of l) {
+        if (mayor && c.ini < mayor.ini - 1) {
+          fuera.push({ indice: c.indice, en: mmss(c.ini), segundos: enSeg(c.ini), despuesDe: mayor.indice, despuesDeEn: mmss(mayor.ini) });
+        }
+        if (!mayor || c.ini > mayor.ini) mayor = c;
+      }
       l.sort((a, b) => a.ini - b.ini);
 
       const info = {
-        pista: etiqueta, clips: l.length,
+        pista: etiqueta, clips: l.length, fueraDeOrden: fuera,
         ceros: [], solapes: [], huecos: [], juntas: [], cortesConMotionDistinto: 0
       };
       // La firma de Motion se lee solo para los candidatos y se cachea: cada
@@ -9405,6 +10079,7 @@ async function revisar(params) {
       const chicos = info.huecos.filter((h) => h.frames !== null && h.frames <= topeFrames);
       info.huecosChicos = chicos.length;
       info.huecosGrandes = info.huecos.length - chicos.length;
+      fueraDeOrden += fuera.length;
       ceros += info.ceros.length;
       solapes += info.solapes.length;
       huecosChicos += chicos.length;
@@ -9423,15 +10098,26 @@ async function revisar(params) {
    * "sin problemas" — que es el fallo que esta seccion existe para que no vuelva.
    */
   if (apagadas.length) partes.push(`${apagadas.length} pista(s) SIN SALIDA: ${apagadas.join(" · ")}`);
+  /* También antes que el resto, por lo mismo que las pistas sin salida: esos clips pueden estar
+     perfectos y no verse, ni en el visor ni en el export. */
+  if (fueraDeOrden) {
+    partes.push(`${fueraDeOrden} clip(s) FUERA DE ORDEN en la lista de su pista: Premiere puede NO DIBUJARLOS NI ` +
+      `EXPORTARLOS aunque \`clips\` los lea en su lugar —mirá cada uno con \`frame\`, y moverlo a mano en Premiere ` +
+      `lo reordena—`);
+  }
   if (ceros) partes.push(`${ceros} clip(s) de DURACIÓN CERO`);
   if (solapes) partes.push(`${solapes} solape(s)`);
   if (huecosChicos) partes.push(`${huecosChicos} hueco(s) de hasta ${topeFrames} frame(s)`);
   if (juntas) partes.push(`${juntas} junta(s) removible(s)`);
 
   const detalle = pistas
-    .filter((p) => p.ceros.length || p.solapes.length || p.huecosChicos || p.juntas.length)
+    .filter((p) => p.fueraDeOrden.length || p.ceros.length || p.solapes.length || p.huecosChicos || p.juntas.length)
     .map((p) => {
       const q = [];
+      if (p.fueraDeOrden.length) {
+        q.push(`FUERA DE ORDEN: ${p.fueraDeOrden.slice(0, 6).map((x) => `[${x.indice}] ${x.en} (la lista lo pone después de [${x.despuesDe}] ${x.despuesDeEn})`).join(", ")}` +
+          (p.fueraDeOrden.length > 6 ? ` y ${p.fueraDeOrden.length - 6} más` : ""));
+      }
       if (p.ceros.length) q.push(`CERO en ${p.ceros.map((x) => x.en).join(", ")}`);
       if (p.solapes.length) q.push(`solapes en ${p.solapes.map((x) => `${x.en} (${x.frames}f)`).join(", ")}`);
       const chicos = p.huecos.filter((h) => h.frames !== null && h.frames <= topeFrames);
@@ -9453,6 +10139,7 @@ async function revisar(params) {
     ticksPorFrame: tpf,
     topeFrames: topeFrames,
     pistasApagadas: apagadas,
+    fueraDeOrden: fueraDeOrden,
     ceros: ceros, solapes: solapes,
     huecosChicos: huecosChicos, huecosGrandes: huecosGrandes,
     juntasRemovibles: juntas,
@@ -9566,7 +10253,7 @@ async function importarTranscripcion(params) {
     if (!segs) throw new Error("no devolvió TextSegments");
     let ok = false;
     project.lockedAccess(() => {
-      ok = project.executeTransaction((a) => {
+      ok = transaccion(project, (a) => {
         a.addAction(orden === "clipPrimero"
           ? ppro.Transcript.createImportTextSegmentsAction(clipItem, segs)
           : ppro.Transcript.createImportTextSegmentsAction(segs, clipItem));
@@ -9664,7 +10351,7 @@ async function importarTranscripcion(params) {
     const segs = ppro.Transcript.importFromJSON(texto);
     let ok = false;
     project.lockedAccess(() => {
-      ok = project.executeTransaction((a) => {
+      ok = transaccion(project, (a) => {
         a.addAction(ppro.Transcript.createImportTextSegmentsAction(sequence, segs));
       }, "importar la transcripción");
     });
@@ -9691,7 +10378,7 @@ async function importarTranscripcion(params) {
       if (!segs) throw new Error("importFromJSON no devolvió TextSegments");
       let ok = false;
       project.lockedAccess(() => {
-        ok = project.executeTransaction((a) => {
+        ok = transaccion(project, (a) => {
           a.addAction(ppro.Transcript.createImportTextSegmentsAction(clipItem, segs));
         }, "importar la transcripción");
       });
@@ -9703,7 +10390,7 @@ async function importarTranscripcion(params) {
       const segs = ppro.Transcript.importFromJSON(texto);
       let ok = false;
       project.lockedAccess(() => {
-        ok = project.executeTransaction((a) => {
+        ok = transaccion(project, (a) => {
           a.addAction(ppro.Transcript.createImportTextSegmentsAction(segs, clipItem));
         }, "importar la transcripción");
       });
@@ -9734,7 +10421,7 @@ async function importarTranscripcion(params) {
   formas.push(["createImportTextSegmentsAction(clipItem, segments) en transacción", () => {
     let ok = false;
     project.lockedAccess(() => {
-      ok = project.executeTransaction((a) => {
+      ok = transaccion(project, (a) => {
         a.addAction(ppro.Transcript.createImportTextSegmentsAction(clipItem, datos.segments));
       }, "importar la transcripción");
     });
@@ -9744,7 +10431,7 @@ async function importarTranscripcion(params) {
   formas.push(["createImportTextSegmentsAction(clipItem, JSON entero) en transacción", () => {
     let ok = false;
     project.lockedAccess(() => {
-      ok = project.executeTransaction((a) => {
+      ok = transaccion(project, (a) => {
         a.addAction(ppro.Transcript.createImportTextSegmentsAction(clipItem, datos));
       }, "importar la transcripción");
     });
@@ -10139,7 +10826,7 @@ async function bins(params) {
     if (!carpetaPadre) throw new Error(`No se pudo castear el padre de "${params.bin}" a FolderItem.`);
     let ok = false;
     project.lockedAccess(() => {
-      ok = project.executeTransaction((a) => { a.addAction(carpetaPadre.createRemoveItemAction(bin)); }, "borrar el bin");
+      ok = transaccion(project, (a) => { a.addAction(carpetaPadre.createRemoveItemAction(bin)); }, "borrar el bin");
     });
     // la prueba es releer, no el booleano
     let sigue = false;
@@ -10396,12 +11083,23 @@ async function cortesDeEscena(params) {
     formas.push([`(op de ${nOp}, secuencia)`, () => P([op, sequence])]);
   }
 
+  let detenido = null, aceptada = null;
   for (const [etiqueta, fn] of formas) {
     let dev;
     try { dev = await fn(); }
-    catch (e) { intentos.push(etiqueta + ": " + (e && e.message ? e.message : e)); continue; }
+    catch (e) {
+      const msg = e && e.message ? e.message : String(e);
+      intentos.push(etiqueta + ": " + msg);
+      /* SÓLO UNA FIRMA EQUIVOCADA PASA A LA FORMA SIGUIENTE (2026-09-30), como en `exportar`: las
+         equivocadas de este método dicen "Illegal Parameter type" —19 de 20 medidas—, y cualquier otro
+         error es del análisis, que no se relanza por otra vía. */
+      if (/illegal parameter/i.test(msg)) continue;
+      detenido = msg;
+      break;
+    }
     devoluciones.push(etiqueta + " → " + (dev === undefined ? "undefined" : JSON.stringify(dev)));
     if (dev === false) { intentos.push(etiqueta + ": devolvió false"); continue; }
+    aceptada = etiqueta;
     /*
      * SE ESPERA Y SE VUELVE A MIRAR. La detección de escenas de Premiere es
      * ASÍNCRONA —levanta una barra de progreso y termina después—, así que medir
@@ -10426,6 +11124,22 @@ async function cortesDeEscena(params) {
     }
     if (movio) { via = etiqueta; despues = d; break; }
     intentos.push(etiqueta + ": no tiró y a los 6s NO cambió nada");
+    /* Y SE FRENA ACÁ (2026-09-30). Seguir con la forma siguiente encolaba OTRO análisis si éste todavía
+       corría: el análisis es asíncrono, y un clip largo puede pasar de los 6 s. La forma que acepta
+       va primera y es la medida; las otras son de respaldo para una firma que cambie, y una firma que
+       cambia no acepta. */
+    break;
+  }
+
+  if (detenido) {
+    throw new Error(`La detección de cortes FALLÓ sobre "${donde.nombre}" (${donde.pista}): ${detenido}. ` +
+      "NO se probaron las otras formas: relanzar el análisis por otra vía lo repetiría.");
+  }
+  if (!via && aceptada) {
+    throw new Error(`La detección de cortes ARRANCÓ sobre "${donde.nombre}" (${donde.pista}) con ${aceptada}, y a los 6 s ` +
+      `no había cambiado nada: puede seguir corriendo, así que NO se probaron las otras formas. Mirá los marcadores ` +
+      `o la pista en un rato —con premiere_marcadores o premiere_clips— antes de pedirlo de nuevo. Antes: ` +
+      `${antes.clipsEnPista} clip(s) en la pista, ${antes.marcadores} marcador(es).`);
   }
 
   if (!via) {
@@ -10619,7 +11333,7 @@ async function etiquetar(params) {
   let ok = false, error = null;
   try {
     project.lockedAccess(() => {
-      ok = project.executeTransaction((a) => {
+      ok = transaccion(project, (a) => {
         for (const e of encontrados) {
           const ci = ppro.ClipProjectItem.cast(e.item);
           a.addAction(ci.createSetColorLabelAction(indice));
@@ -10757,7 +11471,7 @@ async function interpretar(params) {
   formas.push(["createSetOverrideFrameRateAction(número)", () => {
     let ok = false;
     project.lockedAccess(() => {
-      ok = project.executeTransaction((a) => {
+      ok = transaccion(project, (a) => {
         a.addAction(clipItem.createSetOverrideFrameRateAction(pedido));
       }, "interpretar fps");
     });
@@ -10767,7 +11481,7 @@ async function interpretar(params) {
     antes.fi.setFrameRate(pedido);
     let ok = false;
     project.lockedAccess(() => {
-      ok = project.executeTransaction((a) => {
+      ok = transaccion(project, (a) => {
         a.addAction(clipItem.createSetFootageInterpretationAction(antes.fi));
       }, "interpretar fps");
     });
@@ -11025,7 +11739,7 @@ async function subclip(params) {
     let ok = false, error = null;
     try {
       project.lockedAccess(() => {
-        ok = project.executeTransaction((a) => { a.addAction(hacer()); }, "crear el subclip");
+        ok = transaccion(project, (a) => { a.addAction(hacer()); }, "crear el subclip");
       });
     } catch (e) { error = e && e.message ? e.message : String(e); }
     if (error) { intentos.push(etiqueta + ": " + error); continue; }
@@ -11098,7 +11812,7 @@ async function renombrarPista(params) {
   let ok = false, error = null;
   try {
     project.lockedAccess(() => {
-      ok = project.executeTransaction((a) => {
+      ok = transaccion(project, (a) => {
         a.addAction(track.createSetNameAction(params.nuevo));
       }, "renombrar la pista");
     });
@@ -11503,8 +12217,10 @@ async function leerParam(params) {
     const fila = { indice: i, nombre: null, valor: null, keyframes: null, param: null };
     try {
       fila.nombre = String(await items[i].getName());
-      const comp = await getComponente(items[i], efecto);
+      const ef = await componenteElegido(items[i], efecto, params.indiceEfecto);
+      const comp = ef.comp;
       if (!comp) { fila.sinEfecto = true; salida.push(fila); continue; }
+      if (ef.total > 1) { fila.indiceEfecto = ef.aparicion; fila.iguales = ef.total; if (!ef.elegido) fila.elegidoPorDefecto = true; }
       let p = null;
       if (iParam !== null) {
         project.lockedAccess(() => {
@@ -11541,6 +12257,9 @@ async function leerParam(params) {
         (f.db !== undefined ? ` (${isFinite(f.db) ? f.db.toFixed(1) + " dB" : "-inf dB, MUDO"})` : "") +
         `${f.keyframes ? "/" + f.keyframes + "kf" : ""}`).join(" ") +
       (salida.some((f) => f.db !== undefined) ? ` · ${ESCALA_NIVEL}` : "") +
+      (salida.some((f) => f.elegidoPorDefecto)
+        ? ` · OJO: ${salida.filter((f) => f.elegidoPorDefecto).length} clip(s) con más de un "${efecto}": se leyó el PRIMERO; los otros, con \`indiceEfecto\``
+        : "") +
       (hastaI < items.length ? ` · FALTAN desde ${hastaI}` : ""),
     pista: etiqueta, efecto: efecto, clips: salida, total: items.length,
     siguiente: hastaI < items.length ? hastaI : null
@@ -11865,12 +12584,12 @@ async function colocarLote(params) {
     if (li > 0) await esperarEntreTx();
     let okIO = false, okPegar = false;
     project.lockedAccess(() => {
-      okIO = project.executeTransaction((a) => {
+      okIO = transaccion(project, (a) => {
         for (const f of lote) a.addAction(cache[f.medio].clipItem.createSetInOutPointsAction(aTick(f.desde), aTick(f.hasta)));
       }, `in/out de ${lote.length} fragmento(s)`);
     });
     project.lockedAccess(() => {
-      okPegar = project.executeTransaction((a) => {
+      okPegar = transaccion(project, (a) => {
         for (const f of lote) a.addAction(editor.createOverwriteItemAction(cache[f.medio].medio, aTick(f.en), pistaIndex, pistaAudio));
       }, `pegar ${lote.length} fragmento(s)`);
     });
@@ -11902,15 +12621,50 @@ async function colocarLote(params) {
     puestos.push({ desde: t.desde, hasta: t.hasta, entrada: t.entrada, dura: t.hasta - t.desde });
   }
 
-  const bien = [], mal = [];
+  /* Y LA PISTA DE AUDIO PEDIDA, para los medios SIN VIDEO: un WAV no pone nada en V, y mirando solo
+   * el video el verbo informó «0 de 6… NO HAY CLIP ahi» con los seis en A2, en su lugar (un reporte de uso,
+   * 2026-09-29). Es el contador ciego que `insertar` y las capas de `armarSecuencia` ya pagaron. En
+   * audio se exige además el MISMO medio, para no tomar por el fragmento otro clip que arranque ahí. */
+  const puestosA = [];
+  let etqA = null;
+  try {
+    const cuantasA = await sequence.getAudioTrackCount();
+    if (pistaAudio >= 0 && pistaAudio < cuantasA) {
+      etqA = "A" + (pistaAudio + 1);
+      const trackA = await sequence.getAudioTrack(pistaAudio);
+      const itsA = trackA ? await trackA.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
+      for (let k = 0; k < itsA.length; k++) {
+        if (!itsA[k]) continue;   // el null de getTrackItems: ver `armarSecuencia`
+        const t = await tiemposDe(itsA[k]);
+        let medio = null;
+        try { medio = String((await itsA[k].getProjectItem()).name); } catch (e) { medio = null; }
+        puestosA.push({ desde: t.desde, hasta: t.hasta, entrada: t.entrada, dura: t.hasta - t.desde, medio: medio });
+      }
+    }
+  } catch (e) { /* sin la pista de audio queda el veredicto del video, que es el de antes */ }
+
+  const bien = [], mal = [], soloAudio = [], cuantizados = [];
   for (const f of frags) {
     const dura = Number(f.hasta) - Number(f.desde);
-    const c = puestos.find((x) => Math.abs(x.desde - Number(f.en)) < 0.05);
-    if (!c) { mal.push(`${f.medio} en ${f.en}s: NO HAY CLIP ahi`); continue; }
+    let c = puestos.find((x) => Math.abs(x.desde - Number(f.en)) < 0.05);
+    let enAudio = false;
+    if (!c) {
+      c = puestosA.find((x) => Math.abs(x.desde - Number(f.en)) < 0.05 && x.medio !== null && igualN(x.medio, cache[f.medio].nombre));
+      enAudio = !!c;
+    }
+    if (!c) { mal.push(`${f.medio} en ${f.en}s: NO HAY CLIP ahi, ni en ${pista}` + (etqA ? ` ni en ${etqA}` : "")); continue; }
     const okDur = Math.abs(c.dura - dura) < 0.05;
-    const okEnt = Math.abs((c.entrada === null || c.entrada === undefined ? Number(f.desde) : c.entrada) - Number(f.desde)) < 0.05;
-    if (okDur && okEnt) bien.push(f.en);
-    else mal.push(`${f.medio} en ${f.en}s: dura ${c.dura} (queria ${dura.toFixed(3)}), entrada ${c.entrada} (queria ${f.desde})`);
+    const entrada = c.entrada === null || c.entrada === undefined ? Number(f.desde) : c.entrada;
+    const okEnt = Math.abs(entrada - Number(f.desde)) < 0.05;
+    if (okDur && okEnt) {
+      bien.push(f.en);
+      if (enAudio) soloAudio.push(f.en);
+      /* Premiere BAJA el in-point al cuadro de la secuencia al pegar, también el del audio (medido:
+         0,01075 → 0 y 72,91056 → 72,90 en una de 50 fps). Entra en la tolerancia, pero para una
+         sincro al sample es el dato: se dice cuánto. */
+      if (Math.abs(entrada - Number(f.desde)) > 0.0005) cuantizados.push(`${f.en}s: ${Number(f.desde)} → ${entrada}`);
+    }
+    else mal.push(`${f.medio} en ${f.en}s${enAudio ? ` (en ${etqA})` : ""}: dura ${c.dura} (queria ${dura.toFixed(3)}), entrada ${c.entrada} (queria ${f.desde})`);
   }
 
   return {
@@ -11920,9 +12674,11 @@ async function colocarLote(params) {
       ` espaciadas ${MS_ENTRE_TX}ms` +
       (porTx > 1 ? ` de hasta ${porTx}, sin repetir medio` : "") +
       (fallosTx ? ` · ${fallosTx} transacción(es) NO corrieron` : "") +
+      (soloAudio.length ? ` · ${soloAudio.length} SIN VIDEO: releídos en ${etqA}, no en ${pista}` : "") +
+      (cuantizados.length ? ` · ${cuantizados.length} con el in-point BAJADO al cuadro por Premiere (${cuantizados.slice(0, 3).join(" | ")}): una sincro al sample va en el archivo` : "") +
       (mal.length ? ` · MAL ${mal.length}: ${mal.slice(0, 3).join(" | ")}` : "") +
       ` · ${textoInOut(inOut)}`,
-    pista: pista, colocados: bien.length, total: frags.length,
+    pista: pista, colocados: bien.length, total: frags.length, soloAudio: soloAudio, cuantizados: cuantizados,
     transacciones: transacciones, mal: mal, inOut: inOut
   };
 }
@@ -12041,6 +12797,31 @@ async function sondaTranscribir(params) {
  * metodo de transicion — medido reflejando los dos. Un fundido de video sin crossfade de audio
  * es medio trabajo, y esa mitad se hace a mano.
  */
+/*
+ * POR QUÉ UNA TRANSICIÓN PUEDE NO ENTRAR (2026-10-01). Cuatro de seis contra nests no entraron —transacción en
+ * true y el conteo quieto— y la causa no se pudo reproducir: diez variantes contra un nest entero entran, y el
+ * estado de esa noche no quedó guardado. La sospecha es la LISTA de la pista: Premiere arma la transición entre un
+ * clip y su vecino de lista, y esa secuencia tenía colas de `cortar` FUERA DE ORDEN. Así que cuando no entra se
+ * dice, con los tiempos ya leídos, si el clip pegado en el corte es también su vecino de lista. No lee nada más.
+ */
+function porQueNoEntro(bordes, clipIdx, alInicio) {
+  const b = bordes[clipIdx];
+  if (!b) return "";
+  const corte = alInicio ? b.desde : b.hasta;
+  if (corte === null || corte === undefined) return "";
+  const pegado = bordes.find((x) => {
+    const t = alInicio ? x.hasta : x.desde;
+    return x.i !== clipIdx && t !== null && t !== undefined && Math.abs(t - corte) < 0.001;
+  });
+  const deLista = bordes[alInicio ? clipIdx - 1 : clipIdx + 1];
+  if (!pegado) return " · en el corte no hay otro clip pegado";
+  if (!deLista || deLista.i !== pegado.i) {
+    return ` · OJO: el clip pegado en el corte (el ${pegado.i} de la lista) NO es su vecino en la LISTA de la pista: está FUERA ` +
+      "DE ORDEN, y Premiere arma la transición con el de la lista. `revisar` lo marca; se repara duplicando la secuencia";
+  }
+  return " · los dos clips del corte están pegados y en orden en la lista";
+}
+
 async function transicion(params) {
   const { project, sequence } = await getProyectoYSecuencia();
 
@@ -12180,6 +12961,22 @@ async function transicion(params) {
         (hEntra && hEntra.error ? ` (entra: ${hEntra.error})` : "") +
         ": no se puede afirmar que la duración pedida entre";
     }
+    /* UN LADO SIN MEDIR NO ES UN LADO QUE ALCANCE. Hasta el 2026-09-30, con un lado medido y bien y
+       el otro con error, no se decía nada: el caso de un NEST —su item es una secuencia, y `getMedia`
+       puede no dar lo que da un archivo— contra una charla con material de sobra. Premiere la
+       recortó a 0,5 s de un lado y el resumen afirmó «1.00s, centrada» (un reporte de uso, 2026-09-29). */
+    const sinMedir = [];
+    if (frac > 0.001 && !ok(hEntra)) sinMedir.push(`el clip que ENTRA${hEntra && hEntra.error ? ` (${hEntra.error})` : ""}`);
+    if (frac < 0.999 && !ok(hSale)) sinMedir.push(`el clip que SALE${hSale && hSale.error ? ` (${hSale.error})` : ""}`);
+    /* Y QUÉ HACE PREMIERE ahí, medido el 2026-10-01 contra un nest que entra entero, en los dos órdenes:
+       centrada, la ACORTA a la mitad y la pone toda sobre el nest; alineada a un extremo, entra ENTERA aunque al
+       nest le falte material de ese lado. El largo se leyó del `.prproj`: por API no se relee. */
+    if (topes.length && sinMedir.length) {
+      const extremo = frac <= 0.001 || frac >= 0.999;
+      avisoHandle += ` · OJO: el handle de ${sinMedir.join(" y de ")} NO se pudo medir: si es un nest que entra ` +
+        (extremo ? "entero, Premiere la pone ENTERA igual, sin material de ese lado (medido): mirá el cuadro"
+                 : "entero, Premiere la ACORTA a la mitad y la pone toda sobre el nest (medido: centrada de 1 s quedó de ~0,5 s)");
+    }
   }
 
   /*
@@ -12216,7 +13013,7 @@ async function transicion(params) {
       o.setApplyToStart(alInicio);
       o.setTransitionAlignment(frac);
       const accion = clip.createAddVideoTransitionAction(t, o);
-      ok = project.executeTransaction((a) => { a.addAction(accion); }, "agregar transicion");
+      ok = transaccion(project, (a) => { a.addAction(accion); }, "agregar transicion");
     });
   } catch (e) { excepcion = String((e && e.message) || e).slice(0, 140); }
 
@@ -12225,7 +13022,7 @@ async function transicion(params) {
     : Math.abs(frac - 0.5) < 0.06 ? "centrada en el corte" : `${Math.round(frac * 100)}% adentro`;
 
   const base =
-    `${pista} · ${nombre} de ${aSegundos(dur).toFixed(2)}s, ${donde}, en el corte de ` +
+    `${pista} · ${nombre} PEDIDA de ${aSegundos(dur).toFixed(2)}s, ${donde}, en el corte de ` +
     `${corteEn === null ? "?" : corteEn.toFixed(2)}s (${alInicio ? "cabeza" : "cola"} del clip ${clipIdx})` +
     ` · transiciones ${antes} → ${despues}`;
 
@@ -12246,7 +13043,7 @@ async function transicion(params) {
   return {
     resumen: `NO SE AGREGO NADA · ${base}` +
       (excepcion ? ` · ${excepcion}` : ` · la transaccion devolvio ${ok}`) +
-      ` · si ese corte YA tenia transicion, Premiere no agrega otra`,
+      ` · si ese corte YA tenia transicion, Premiere no agrega otra` + porQueNoEntro(bordes, clipIdx, alInicio),
     puesta: false, pista: pista, corte: corteEn, clip: clipIdx, alInicio: alInicio,
     antes: antes, despues: despues, transaccion: ok, excepcion: excepcion,
   };
@@ -12446,7 +13243,7 @@ async function clonar(params) {
         destIdx - origenIdx,               /* OFFSET de pista, no índice */
         0
       );
-      ok = project.executeTransaction((a) => { a.addAction(acc); }, "clonar clip");
+      ok = transaccion(project, (a) => { a.addAction(acc); }, "clonar clip");
     });
   } catch (e) { error = String((e && e.message) || e).slice(0, 90); }
 
@@ -12602,7 +13399,7 @@ async function cerrarProyecto(params) {
 
 
 
-const VERBOS = { limpiarRangos, transicion, relink, clonar, proyectosAbiertos, cerrarProyecto, sondaTranscribir, colocarLote, abrirProyecto, crearProyecto, copiarEfecto, quitarEfecto, borrarKeyframe, moverKeyframe, curvaKeyframe, leerParam, sondaParam, radiografia, desactivar, estado, guardar, bins, exportar, cortesDeEscena, etiquetar, interpretar, inOutMedio, proxy, subclip, renombrarPista, renombrar, revisar, importar, importarTranscripcion, motion, keyframe, frame, playhead, clips, seleccionar, efectos, param, editar, catalogo, agregarEfecto, medios, insertar, secuencias, borrar, transcripcion, armarSecuencia, borrarSecuencia, vistazo, mirarMedio, analizar, marcadores, marcar, desmarcar, editarMarcador, cortar, sacarRangos, cerrarHuecos, resolucion, ajustarAlCuadro, escalaFija, fijar, unirAudio, aplicarEscalas, aplicarMotion, aplicarZooms, leerEscalas, aplicarAnim, unirVideo, duplicarSecuencia, api };
+const VERBOS = { limpiarRangos, transicion, relink, clonar, proyectosAbiertos, cerrarProyecto, sondaTranscribir, colocarLote, abrirProyecto, crearProyecto, copiarEfecto, quitarEfecto, borrarKeyframe, moverKeyframe, curvaKeyframe, leerParam, sondaParam, radiografia, desactivar, estado, guardar, bins, exportar, cortesDeEscena, etiquetar, interpretar, inOutMedio, proxy, subclip, renombrarPista, renombrar, revisar, importar, importarTranscripcion, motion, keyframe, frame, playhead, clips, seleccionar, efectos, param, editar, catalogo, agregarEfecto, medios, insertar, secuencias, borrar, transcripcion, armarSecuencia, borrarSecuencia, vistazo, mirarMedio, analizar, marcadores, marcar, desmarcar, editarMarcador, cortar, sacarRangos, cerrarHuecos, resolucion, ajustarAlCuadro, escalaFija, fijar, unirAudio, aplicarEscalas, aplicarMotion, aplicarZooms, leerEscalas, aplicarAnim, unirVideo, duplicarSecuencia, renombrarSecuencia, api };
 
 
 /*
@@ -12635,11 +13432,11 @@ const PARAMS_DE = {
   abrirProyecto: ["ruta", "sinDialogos"],
   crearProyecto: ["ruta"],
   copiarEfecto: ["efecto", "indiceDestino", "indiceEfecto", "indiceOrigen", "param", "pistaDestino", "pistaOrigen", "secuenciaOrigen"],
-  quitarEfecto: ["efecto", "indice", "nombre", "pista"],
-  borrarKeyframe: ["efecto", "indice", "indiceParam", "nombre", "param", "pista", "segundos", "tolerancia"],
-  moverKeyframe: ["a", "de", "efecto", "indice", "indiceParam", "nombre", "param", "pista", "tolerancia"],
-  curvaKeyframe: ["efecto", "indice", "indiceParam", "modo", "nombre", "param", "pista", "segundos", "tolerancia"],
-  leerParam: ["desdeIndice", "efecto", "indiceParam", "limite", "param", "pista"],
+  quitarEfecto: ["efecto", "indice", "indiceEfecto", "nombre", "pista"],
+  borrarKeyframe: ["efecto", "indice", "indiceEfecto", "indiceParam", "nombre", "param", "pista", "segundos", "tolerancia"],
+  moverKeyframe: ["a", "de", "efecto", "indice", "indiceEfecto", "indiceParam", "nombre", "param", "pista", "tolerancia"],
+  curvaKeyframe: ["efecto", "indice", "indiceEfecto", "indiceParam", "modo", "nombre", "param", "pista", "segundos", "tolerancia"],
+  leerParam: ["desdeIndice", "efecto", "indiceEfecto", "indiceParam", "limite", "param", "pista"],
   sondaParam: ["efecto", "indice", "indiceParam", "metodos", "nombre", "pista"],
   radiografia: ["conParams", "desdeIndice", "limite", "maxParams", "pista"],
   desactivar: ["activar", "indice", "nombre", "pista", "vinculados"],
@@ -12659,17 +13456,17 @@ const PARAMS_DE = {
   revisar: ["pista", "topeFrames"],
   importar: ["archivos", "bin"],
   importarTranscripcion: ["desdeMedio", "json", "medio", "ruta", "todasLasFormas"],
-  motion: [],
-  keyframe: ["db", "efecto", "lista", "param", "valor", "x", "y"],
+  motion: ["indice", "nombre", "pista"],
+  keyframe: ["db", "efecto", "indice", "indiceEfecto", "lista", "nombre", "param", "pista", "valor", "x", "y"],
   frame: ["ancho"],
   playhead: ["segundos"],
   clips: ["pista"],
   seleccionar: ["indice", "nombre", "pista"],
   efectos: ["indice", "nombre", "pista"],
-  param: ["efecto", "indice", "nombre", "param", "pista", "valor", "x", "y"],
+  param: ["efecto", "indice", "indiceEfecto", "nombre", "param", "pista", "valor", "x", "y"],
   editar: ["apagado", "desde", "entrada", "indice", "nombre", "pista", "salida", "vinculados"],
   catalogo: ["buscar", "transiciones"],
-  agregarEfecto: ["efecto"],
+  agregarEfecto: ["efecto", "indice", "nombre", "pista"],
   medios: ["buscar"],
   insertar: ["medio", "pista", "pistaAudio", "segundos"],
   secuencias: ["nombre"],
@@ -12690,7 +13487,7 @@ const PARAMS_DE = {
   resolucion: ["alto", "ancho", "fps"],
   ajustarAlCuadro: ["solo"],
   escalaFija: ["desdeIndice", "limite", "pista", "valor"],
-  fijar: ["db", "efecto", "indice", "indiceParam", "nombre", "param", "pista", "valor", "x", "y"],
+  fijar: ["db", "efecto", "indice", "indiceEfecto", "indiceParam", "nombre", "param", "pista", "valor", "x", "y"],
   unirAudio: [],
   aplicarEscalas: ["desdeIndice", "limite", "pista", "plan", "porTransaccion"],
   aplicarMotion: ["clips", "pista"],
@@ -12700,6 +13497,7 @@ const PARAMS_DE = {
   aplicarAnim: ["desdeIndice", "limite", "pista", "plan", "porTransaccion"],
   unirVideo: ["pista", "rangos"],
   duplicarSecuencia: ["duracion", "nombre", "nuevoNombre"],
+  renombrarSecuencia: ["duracion", "nombre", "nuevo"],
   api: ["objeto"],
 };
 
@@ -12757,10 +13555,6 @@ async function ejecutar(cmd, params) {
     throw new Error(`Comando desconocido "${cmd}". Los que hay: ${Object.keys(VERBOS).join(", ")}.`);
   }
   const p = params || {};
-  // El contador se engancha antes del primer verbo, venga por donde venga el proyecto.
-  if (SESION.contando === null) {
-    try { contarEn(await ppro.Project.getActiveProject()); } catch (e) { /* sin proyecto: el próximo */ }
-  }
 
   /*
    * CLAVES DESCONOCIDAS: REBOTAN. Va PRIMERO, antes que las guardas de proyecto y secuencia,

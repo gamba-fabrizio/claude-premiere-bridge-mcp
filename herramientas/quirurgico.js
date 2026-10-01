@@ -138,15 +138,31 @@ function uso(m) {
 const LUMETRI = ["Temperature", "Tint", "Exposure", "Contrast", "Highlights", "Shadows",
                  "Whites", "Blacks", "Saturation", "Vibrance", "Faded Film", "Sharpen"];
 
-async function efectosDeUnClip(pista, indice, nombresEfectos) {
+/*
+ * EL MISMO EFECTO DOS VECES EN UN CLIP (2026-10-01): dos Lumetri Color. `radiografia` los lista en el orden de la
+ * cadena, así que la aparición de cada uno es cuántos del mismo nombre vienen antes —la misma cuenta que esta
+ * herramienta hace con los clips—. Sin esto se trataban como uno: los valores de los dos se leían del primero y
+ * se escribían en el primero, sin avisar. Vale también para los estados guardados antes de hoy, que no la traen.
+ */
+function conAparicion(efectos) {
+  const cuenta = new Map();
+  return (efectos || []).map((e) => {
+    const n = cuenta.get(e.nombre) || 0;
+    cuenta.set(e.nombre, n + 1);
+    return Object.assign({}, e, { aparicion: typeof e.aparicion === "number" ? e.aparicion : n });
+  });
+}
+
+async function efectosDeUnClip(pista, indice, efectos) {
   const salida = [];
-  for (const nomEf of nombresEfectos) {
+  for (const ef of conAparicion(efectos)) {
+    const nomEf = ef.nombre, ap = ef.aparicion;
     let nombres = LUMETRI;
     if (nomEf.indexOf("Lumetri") === -1) {
       await dormir(PAUSA);
       try {
         const r = await enviar("efectos", g({ pista: pista, indice: indice }), 300000);
-        const mio = (r.efectos || []).find((x) => x.nombre === nomEf);
+        const mio = (r.efectos || []).find((x) => x.nombre === nomEf && (typeof x.indiceEfecto === "number" ? x.indiceEfecto : 0) === ap);
         // sin duplicados: pedir dos veces el mismo nombre devuelve el mismo param
         nombres = mio ? mio.params.filter((x, i, a) => x && a.indexOf(x) === i) : [];
       } catch (e) { salida.push({ nombre: nomEf, params: [], error: String(e.message || e).slice(0, 70) }); continue; }
@@ -155,11 +171,11 @@ async function efectosDeUnClip(pista, indice, nombresEfectos) {
     for (const nom of nombres) {
       await dormir(PAUSA);
       try {
-        const r = await enviar("param", g({ pista: pista, indice: indice, efecto: nomEf, param: nom }), 300000);
+        const r = await enviar("param", g({ pista: pista, indice: indice, efecto: nomEf, param: nom, indiceEfecto: ap }), 300000);
         if (typeof r.valor === "number") leidos.push({ nombre: nom, valor: r.valor, keyframes: r.keyframes || 0 });
       } catch (e) { /* el param no existe en este efecto: la lista es genérica, es normal */ }
     }
-    salida.push({ nombre: nomEf, params: leidos, porNombre: true, gruposNoLeidos: nomEf.indexOf("Lumetri") !== -1 });
+    salida.push({ nombre: nomEf, aparicion: ap, params: leidos, porNombre: true, gruposNoLeidos: nomEf.indexOf("Lumetri") !== -1 });
   }
   return salida;
 }
@@ -315,8 +331,8 @@ async function guardar() {
     for (const c of pendientes) {
       await dormir(PAUSA);
       try {
-        const nombresEf = (c.efectos || []).filter((e) => e.valoresSinLeer).map((e) => e.nombre);
-        c.efectos = await efectosDeUnClip(pista, c.indice, nombresEf);
+        const sinLeer = conAparicion(c.efectos).filter((e) => e.valoresSinLeer);
+        c.efectos = await efectosDeUnClip(pista, c.indice, sinLeer);
         c.tocado = c.tocado.filter((t) => t.indexOf("valores SIN LEER") === -1);
         for (const ef of c.efectos) {
           const movidos = (ef.params || []).filter((q) => q.valor !== 0 &&
@@ -432,8 +448,8 @@ async function reponer() {
         }
         if ((c.efectos || []).some((e) => e.valoresSinLeer)) {
           try {
-            const nombresEf = c.efectos.filter((e) => e.valoresSinLeer).map((e) => e.nombre);
-            c.efectos = await efectosDeUnClip(pista, c.indice, nombresEf);
+            const sinLeer = conAparicion(c.efectos).filter((e) => e.valoresSinLeer);
+            c.efectos = await efectosDeUnClip(pista, c.indice, sinLeer);
           } catch (e) { /* queda con valoresSinLeer: el plan lo va a proponer, que es el lado seguro */ }
         }
       }
@@ -491,15 +507,17 @@ async function reponer() {
       if (destino.desactivado === true) yaEstaba.push("ojito ya apagado");
       else acciones.push({ tipo: "ojito", verbo: "desactivar", params: { pista: pista, indice: destino.indice } });
     }
-    const efectosAhora = (destino.efectos || []).map((e) => e.nombre);
-    for (const ef of (v.efectos || [])) {
+    /* Por nombre Y aparición (2026-10-01), como los clips: con dos Lumetri, el segundo guardado se compara con el
+       segundo de ahora, y si no está se agrega. */
+    const efectosAhora = conAparicion(destino.efectos);
+    for (const ef of conAparicion(v.efectos)) {
       const fijables = (ef.params || []).filter((p) => p.keyframes === 0 && typeof p.valor === "number");
       const animados = (ef.params || []).filter((p) => p.keyframes > 0);
-      if (efectosAhora.indexOf(ef.nombre) !== -1) {
+      const suyo = efectosAhora.find((e) => e.nombre === ef.nombre && e.aparicion === ef.aparicion);
+      if (suyo) {
         /* El efecto ya está. Se comparan los VALORES y se repone sólo lo que difiera: puede
          * estar el efecto y faltarle los params, que es como queda si una tanda anterior se
          * cortó por la mitad. */
-        const suyo = (destino.efectos || []).find((e) => e.nombre === ef.nombre);
         /* Por ÍNDICE si los dos lo tienen, y si no POR NOMBRE.
          *
          * Antes era `x.i === q.i` a secas, y los params leídos con `param` vienen sin índice:
@@ -513,12 +531,12 @@ async function reponer() {
           return !m || m.valor !== q.valor;
         });
         if (!distintos.length) { yaEstaba.push(ef.nombre + " ya está con sus " + fijables.length + " valores"); continue; }
-        acciones.push({ tipo: "params", verbo: null, params: { efecto: ef.nombre }, luego: distintos,
+        acciones.push({ tipo: "params", verbo: null, params: { efecto: ef.nombre, indiceEfecto: ef.aparicion }, luego: distintos,
                         animados: animados.length, nota: ef.nombre + " ya estaba, faltaban " + distintos.length + " valor(es)" });
         continue;
       }
       acciones.push({ tipo: "efecto", verbo: "agregarEfecto", params: { pista: pista, indice: destino.indice, efecto: ef.nombre },
-                      luego: fijables, animados: animados.length });
+                      luego: fijables, animados: animados.length, aparicion: ef.aparicion });
       if (ef.incompleto) acciones.push({ tipo: "AVISO", detalle: "el efecto " + ef.nombre + " se leyó INCOMPLETO: " + ef.incompleto });
     }
     for (const p of (v.motion || [])) {
@@ -668,20 +686,20 @@ async function reponer() {
     for (const a of p.acciones) {
       if (a.tipo === "AVISO") continue;
       await dormir(PAUSA);
+      /* Sobre CUÁL de los efectos de ese nombre se escribe: el ya puesto trae su aparición en el plan, y el recién
+         agregado la dice `agregarEfecto` —entra último—. Sin esto `fijar` rebota con dos iguales. */
+      let indiceEf = a.params && typeof a.params.indiceEfecto === "number" ? a.params.indiceEfecto : null;
       try {
         /* `tipo: "params"` no tiene llamada principal: el efecto ya está y sólo faltan
          * valores. Mandar `agregarEfecto` acá pondría un segundo Lumetri encima. */
         if (a.verbo === "agregarEfecto") {
-          /* `agregarEfecto` opera sobre el clip SELECCIONADO e IGNORA `pista` e `indice`: usa
-           * `exigirClip(sequence)`. Llamarlo con pista+indice, como se hacía acá, le pone el
-           * efecto a cualquier clip que estuviera seleccionado e informa éxito — un daño
-           * silencioso del peor tipo. Encontrado en el proyecto de prueba, el 2026-08-21.
-           *
-           * Así que hay que SELECCIONAR primero, y después comprobar que el efecto cayó en el
-           * clip que se pidió y no en otro. Que el verbo no tire no prueba nada. */
-          await enviar("seleccionar", g({ pista: a.params.pista, indice: a.params.indice }), 300000);
-          await dormir(PAUSA);
-          const r = await enviar("agregarEfecto", g({ efecto: a.params.efecto }), 300000);
+          /* `agregarEfecto` operaba SÓLO sobre el clip seleccionado e ignoraba `pista` e `indice`:
+           * llamarlo con pista+indice, como se hacía acá, le ponía el efecto a cualquier clip que
+           * estuviera seleccionado e informaba éxito (el 2026-08-21, en el proyecto de prueba). Desde
+           * el 2026-10-01 los acepta, y se le pasan: la selección se mueve sola con «Selection Follows
+           * Playhead». Igual se comprueba que el efecto cayó en el clip que se pidió y no en otro:
+           * que el verbo no tire no prueba nada. */
+          const r = await enviar("agregarEfecto", g({ efecto: a.params.efecto, pista: a.params.pista, indice: a.params.indice }), 300000);
           const donde = String(r.clip || "");
           if (donde && norm(donde) !== norm(p.v.nombre)) {
             mal.push(p.v.nombre + " / agregarEfecto: el efecto cayó en \"" + donde + "\", NO en el clip pedido");
@@ -689,6 +707,7 @@ async function reponer() {
             continue;
           }
           console.log("  " + p.v.nombre.slice(0, 22).padEnd(23) + "agregarEfecto: " + String(r.resumen).slice(0, 80));
+          indiceEf = typeof r.indiceEfecto === "number" ? r.indiceEfecto : 0;
           ok++;
         } else if (a.verbo) {
           const r = await enviar(a.verbo, a.params, 300000);
@@ -714,14 +733,15 @@ async function reponer() {
           await dormir(PAUSA);
           try {
             const r2 = await enviar("efectos", g({ pista: pista, indice: p.destino.indice }), 300000);
-            const mio = (r2.efectos || []).find((x) => x.nombre === a.params.efecto);
+            const mio = (r2.efectos || []).find((x) => x.nombre === a.params.efecto &&
+              (typeof x.indiceEfecto === "number" ? x.indiceEfecto : 0) === (indiceEf || 0));
             if (mio) {
               const actual = new Map();
               for (const nom of new Set(pendientes.map((q) => q.nombre))) {
                 await dormir(PAUSA);
                 try {
                   const rp = await enviar("param", g({ pista: pista, indice: p.destino.indice,
-                                                       efecto: a.params.efecto, param: nom }), 300000);
+                                                       efecto: a.params.efecto, param: nom, indiceEfecto: indiceEf }), 300000);
                   if (typeof rp.valor === "number") actual.set(nom, rp.valor);
                 } catch (e) { /* si no se puede leer, se escribe: el lado seguro */ }
               }
@@ -740,6 +760,7 @@ async function reponer() {
              * cadena de efectos cambió y el índice guardado ya no apunta a lo mismo. */
             const arg = { pista: pista, indice: p.destino.indice, efecto: a.params.efecto,
                           param: q.nombre, valor: q.valor };
+            if (indiceEf !== null) arg.indiceEfecto = indiceEf;
             /* Sólo si el índice se conoce de verdad. Los valores leídos con `param` vienen por
              * NOMBRE y no traen índice; inventar uno mandaría a `fijar` a verificar contra un
              * índice que no se midió, y ahí rechaza o —peor— acierta por casualidad. */

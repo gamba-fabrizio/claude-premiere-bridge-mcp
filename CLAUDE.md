@@ -1,7 +1,7 @@
 # Bridge Claude ↔ Premiere Pro — lo que costó medir
 
 Le da a un agente control de Premiere Pro: leer la secuencia, **mirar el frame**, navegar,
-animar, editar y armar timeline. **59 herramientas MCP sobre 75 verbos del panel** — la
+animar, editar y armar timeline. **60 herramientas MCP sobre 76 verbos del panel** — la
 diferencia importa, ver *Al escribir un verbo nuevo*.
 
 Esos dos números los chequea `test.js` contra el código. Escritos a mano envejecen: decían
@@ -171,6 +171,10 @@ Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que
   1-based en todos (A1 es 1).
 - **Premiere devuelve los nombres en NFC y las rutas en NFD.** Se compara normalizando, y una ruta
   que devolvió la API se pasa tal cual, nunca retipeada. → `cuadros-y-nombres.md`
+- **Un clip FUERA DE ORDEN en la lista de su pista no se dibuja ni se exporta**: `createMoveAction` no
+  reordena la lista y clonar sí. Un verbo que lleva un clip por encima de otro lo clona; y una pista de
+  mentira en `test.js` devuelve la lista en SU orden, no ordenada, o el test no puede verlo.
+  → `docs/api.md`, *Pistas y clips*
 - **Un pendiente se cierra en la misma tanda que su trabajo**: uno vencido se lee con la misma
   confianza que uno cierto. → `verificacion.md`
 
@@ -181,7 +185,8 @@ Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que
 - **Devolvé el antes y el después**, no un booleano.
 - **Contá el efecto COMPLETO**, no la parte que se te ocurrió mirar.
 - **Nombrá el objetivo explícitamente** en los verbos destructivos. Operar sobre "el
-  seleccionado" es una sorpresa fea cuando nadie está mirando.
+  seleccionado" es una sorpresa fea cuando nadie está mirando, y con *Selection Follows Playhead*
+  mover el playhead cambia la selección (medido el 2026-10-01).
 - **Decí cuántos Cmd+Z hacen falta**, contando las transacciones que de verdad corrieron.
   Decir "uno" cuando son dos deja al usuario con medio cambio puesto creyendo que lo sacó.
 - **Y exponelo en el servidor, o no existe.** Un verbo que vive sólo en la tabla del panel es
@@ -205,16 +210,21 @@ no la tienen estén **declarados a propósito** en una lista. El default —no h
   lado. El servidor la deduce de `__dirname`; el panel la tiene escrita a mano porque corre
   adentro de Premiere. **Mover el repo obliga a editar la del panel**, y `test.js` compara
   las dos.
-## Pendientes abiertos (2026-09-23)
 
-- **`armarSecuencia` pone los fps pero NO el formato del reloj**: con material de otra cadencia la
-  regla cuenta mal. El arreglo es poner el formato de display junto con los fps y releerlo; a mano,
-  *Sequence Settings → Display Format*.
-- **`frame` llega truncado con cuadros grandes** por el transporte directo: la espera mira que el
-  PNG exista, no que termine de escribirse. Hay que exigir que el tamaño se estabilice.
-- **`audio.js` pisa la transcripción anterior** si se corren dos motores con el mismo `--destino`:
-  el motor no está en el nombre del archivo. Mientras tanto, un `--destino` por motor.
-- **`importar` a veces recibe un hueco en la lista de items**: está blindado y sigue sin causa.
+## Pendientes abiertos (2026-10-01)
+
+- **El espaciado es una constante y el borde depende del peso del proyecto.** Tres pesos medidos, y la
+  fórmula no sale: el liviano y el intermedio aguantan al ritmo mínimo del transporte (~200 ms), y sólo
+  el pesado cae. Un proyecto más pesado que el medido sigue sin medir. → `crashes.md`
+- **Las listas de la API a veces traen un null**: los items de un bin en `importar`, y los de
+  `getTrackItems` en el `armarSecuencia` de un proyecto pesado. Está blindado y sigue sin causa: en un
+  proyecto de prueba no se reprodujo.
+- **Los arreglos del panel contra los crashes de la interfaz y del recolector están SIN MEDIR**: se
+  miden por tasa, con tandas largas. Son los dos marcados como PROPUESTA en `plugin/index.js`.
+
+Cerrados el 2026-09-23, medidos en vivo: el reloj de `armarSecuencia` (pone el formato de display con
+los fps y lo relee), el `frame` truncado (espera el cierre del PNG) y `audio.js` pisando la
+transcripción de otro motor (rebota; `--pisar` la reemplaza).
 
 ## Índice por tarea: qué leer ANTES de tocar algo
 

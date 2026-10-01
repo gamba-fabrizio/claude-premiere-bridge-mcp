@@ -2,7 +2,7 @@
 
 Un bridge que le da a Claude acceso de lectura y escritura a Premiere Pro: leer la
 secuencia, **mirar el frame** bajo el playhead, animar, editar y armar timeline.
-**59 herramientas MCP sobre 75 verbos del panel.**
+**60 herramientas MCP sobre 76 verbos del panel.**
 
 > **Esto salió de un flujo de trabajo real, no de un ejercicio.** Se usó para armar
 > cortes de videoclips, cursos e institucionales, y casi todo lo que hay acá se pagó
@@ -114,20 +114,20 @@ claude mcp add premiere-bridge --scope user -- node /RUTA/A/TU/COPIA/premiere-br
 | `premiere_vistazo` | Varios cuadros repartidos, para ver de qué es el material |
 | `premiere_analizar` | Cuadros Y el texto que se dice en cada uno, alineados |
 | `premiere_catalogo` | Busca entre los efectos instalados (330 acá) |
-| `premiere_agregar_efecto` | Le agrega un efecto al clip |
-| `premiere_efectos` | Los efectos del clip y los nombres exactos de sus params |
+| `premiere_agregar_efecto` | Le agrega un efecto al clip nombrado (`pista` + `indice`) o al seleccionado |
+| `premiere_efectos` | Los efectos del clip y los nombres exactos de sus params; los repetidos, con su `indiceEfecto` (#0, #1) |
 | `premiere_param` | El valor de un param y en qué segundos tiene keyframes |
-| `premiere_motion` | Atajo: Position y escala del clip, con sus keyframes |
-| `premiere_keyframe` | Escribe uno o varios keyframes; con `lista`, anima |
+| `premiere_motion` | Atajo: Position y escala del clip nombrado o el seleccionado, con sus keyframes; avisa si el playhead no está sobre él |
+| `premiere_keyframe` | Escribe uno o varios keyframes en el clip nombrado (`pista` + `indice`) o el seleccionado; con `lista`, anima; un punto fuera del clip rebota |
 | `premiere_borrar_keyframe` | Borra keyframes por tiempo, sin tocar los demás |
 | `premiere_mover_keyframe` | Mueve un keyframe de tiempo, conservando su valor |
 | `premiere_curva_keyframe` | Cambia la curva: lineal, bezier, hold o tiempo |
-| `premiere_editar` | Mueve, recorta o apaga un clip |
+| `premiere_editar` | Mueve, recorta o apaga un clip. Mover un clip por encima de otro rebota: quedaría fuera de orden y no se dibujaría |
 | `premiere_medios` | Qué hay en el panel de proyecto, bin por bin |
 | `premiere_insertar` | Pone un medio en una pista, en el segundo que se pida |
 | `premiere_borrar` | Saca un clip y sus vinculados |
 | `premiere_cortar` | Parte un clip en dos, en un segundo dado. La cola es un clon: efectos, nombre y el mismo audio, pero sin vínculo en Premiere |
-| `premiere_sacar_rangos` | Saca tramos de la secuencia cerrando el hueco |
+| `premiere_sacar_rangos` | Saca tramos de la secuencia cerrando el hueco; ~7 rangos por minuto, y frena limpio en el tope |
 | `premiere_cerrar_huecos` | Cierra las juntas de un frame que dejan los cortes |
 | `premiere_resolucion` | Cambia el tamaño de cuadro de la secuencia |
 | `premiere_escala` | Fija la escala del Motion en todos los clips |
@@ -141,6 +141,7 @@ claude mcp add premiere-bridge --scope user -- node /RUTA/A/TU/COPIA/premiere-br
 | `premiere_transcripcion` | El texto del clip con tiempos de secuencia, o dónde dice algo |
 | `premiere_armar_secuencia` | Crea una secuencia y le pega fragmentos de un medio; las `capas` con `apagado` quedan sin verse ni sonar, con TODO su audio |
 | `premiere_borrar_secuencia` | Saca una secuencia del proyecto por su nombre exacto; si coinciden varias rebota, y dos homónimas se eligen con `duracion` |
+| `premiere_renombrar_secuencia` | Renombra una secuencia en el lugar, elegida como en `borrar_secuencia`; rebota si el nombre nuevo ya existe, y relee por guid |
 | `premiere_cortes_de_escena` | Detecta cambios de plano en un clip; `marcar` no toca el timeline, `cortar` lo parte, `subclips` los crea |
 | `premiere_etiquetar` | Etiquetas de color en el panel de proyecto; sin `color` sólo lee |
 | `premiere_interpretar` | Lee o cambia los fps con que Premiere lee un medio; sin `fps` sólo lee |
@@ -152,7 +153,7 @@ claude mcp add premiere-bridge --scope user -- node /RUTA/A/TU/COPIA/premiere-br
 | `premiere_subclip` | Un pedazo con nombre de un medio, en el panel; verifica que el item aparezca |
 | `premiere_desactivar` | Apaga o prende el ojito DE UN CLIP, o de una pista entera, con TODOS los streams del audio vinculado y en lotes de 10 acciones; existe para dejar los suplentes a la vista sin que tapen el corte |
 | `premiere_renombrar_pista` | Le pone nombre a una pista de video o audio; relee para confirmar |
-| `premiere_exportar` | Renderiza la secuencia con un preset `.epr`. `modo` es obligatorio: `ya` bloquea y comprueba que el archivo aparezca; `ame` lo encola en Media Encoder, sin confirmar, y con un `.mov` no admite rango |
+| `premiere_exportar` | Renderiza la secuencia con un preset `.epr`. `modo` es obligatorio: `ya` bloquea y comprueba que el archivo aparezca; `ame` lo encola en Media Encoder, sin confirmar, arranca la cola sólo si estaba parada, y con un `.mov` no admite rango |
 | `premiere_limpiar_rangos` | Saca los in/out de la secuencia (el Opt+X): `exportSequence` los RESPETA y un out viejo estira el export con negro al final |
 | `premiere_quitar_efecto` | Saca un efecto de un clip; el simétrico de agregar |
 | `premiere_abrir_proyecto` | Abre un .prproj por su ruta, o trae al frente uno ya abierto (no lo recarga) |
@@ -161,7 +162,7 @@ claude mcp add premiere-bridge --scope user -- node /RUTA/A/TU/COPIA/premiere-br
 | `premiere_guardar` | Guarda el proyecto, y comprueba que el archivo se escribió |
 | `premiere_importar` | Importa archivos al panel de proyecto, opcionalmente a un bin; no necesita secuencia activa |
 | `premiere_bins` | Lista el árbol de bins, crea los que falten, mueve medios adentro y borra bins vacíos |
-| `premiere_revisar` | Recorre la secuencia y devuelve lo que quedó mal: ceros, solapes, huecos en frames, juntas |
+| `premiere_revisar` | Recorre la secuencia y devuelve lo que quedó mal: clips fuera de orden en su pista —que no se dibujan—, ceros, solapes, huecos en frames, juntas |
 
 Las de Motion operan sobre **el clip seleccionado**. Empezá por `premiere_estado`
 o `premiere_clips`: sin eso se escribe a ciegas.

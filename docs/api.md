@@ -134,7 +134,8 @@ eso no puede salir de un error simétrico.
 - **Un corte en un tiempo cualquiera se emula**, y la COLA ES UN CLON (2026-09-25):
   `premiere_cortar` clona el clip y sus socios pasado el final de la secuencia, les
   recorta el inicio con `createSetStartAction`, recorta la cabeza con
-  `createSetEndAction` y corre los clones con `createMoveAction`. Hasta ese día
+  `createSetEndAction`, CLONA los recortados a su lugar y saca los estacionados
+  (2026-09-30: moverlos los dejaba fuera de orden en la lista, y no se dibujaban). Hasta el 25/9
   REINSERTABA el medio, y eso trae todos sus streams a las pistas espejo, pisa lo
   que haya ahí y pierde efectos, nombre y el procesamiento del audio. El costo del
   clon: la cola queda sin vínculo, porque la API no los crea.
@@ -414,6 +415,10 @@ devuelve "Connection to object lost". La única vía que funciona es pedir el
 objeto vivo con `sequence.getSelection()`, vaciarlo con `removeItem` y agregarle
 el clip. Medido probando las tres, no deducido.
 
+**Y la selección se mueve sola**: con «Selection Follows Playhead» prendido
+(`MZ.Prefs.SelectionFollowsPlayhead` en las prefs del perfil), `setPlayerPosition` selecciona el clip
+que queda debajo. Un verbo que toma «el seleccionado» después de mover el playhead escribe en ése.
+
 ## Firmas que no se adivinan
 
 **Antes de adivinar una firma, reflejala.** El verbo `api` lee los nombres de métodos sin llamar a
@@ -506,6 +511,9 @@ el bridge: cada una es una medición contra Premiere, no una deducción del nomb
   distinguen por `String(seq.guid)`, y `seq.getEndTime()` da el largo también de una que no es la
   activa. Para renombrar una, su `ProjectItem` sale de `seq.getProjectItem()`: Premiere le pone
   «X Copy» a TODAS las copias, así que buscarla por nombre en el panel agarra la vieja.
+  `createSetNameAction` sobre ese ítem la renombra en el lugar y respeta los puntos, que la
+  creación corta. En el `.prproj`, el nombre real es el del `MasterClip`: el `<Name>` del
+  `ClipProjectItem` es el de nacimiento, también tras un renombre a mano.
 - `SequenceEditor.getEditor(seq).insertMogrtFromPath(ruta, tick, pistaV, pistaA)` coloca un MOGRT;
   su `Source Text` no se puede escribir.
 
@@ -513,7 +521,14 @@ el bridge: cada una es una medición contra Premiere, no una deducción del nomb
 
 - `createOverwriteItemAction(item, tick, pistaV, pistaA)`: el cuarto es la pista de AUDIO, `-1`
   cae en A1, PISA lo que haya, y una pista de audio que no existe se crea: UNA, al final.
-- `createMoveAction` toma un delta y SOLAPA en vez de pisar.
+- `createMoveAction` toma un delta y SOLAPA en vez de pisar. **Y no reordena la lista de la pista**:
+  un clip movido por encima de otro queda FUERA DE ORDEN, y Premiere dibuja y exporta suponiendo que la
+  lista está en el orden del tiempo, así que ese clip —o su vecino— no se ve ni sale en el export,
+  aunque `getTrackItems` lo lea en su lugar. El orden queda guardado en el `.prproj`. Un clon, en
+  cambio, entra en la lista en su lugar, y duplicar la secuencia reconstruye las listas en orden
+  (medido el 2026-09-30).
+- `getTrackItems` devuelve los clips en el orden de la LISTA de la pista, no del tiempo, y dos
+  lecturas devuelven los mismos objetos: se pueden comparar con `===`.
 - `createSetEndAction` guarda el tick exacto y el overwrite pega al cuadro: un corte entre cuadros
   deja un hueco de uno.
 - Al arrastrar un clip, Premiere recuantiza su in-point a la grilla de la SECUENCIA, y el del
@@ -563,8 +578,15 @@ el bridge: cada una es una medición contra Premiere, no una deducción del nomb
 - `getValueAtTime` lee con y sin keyframes y devuelve `{value}`; `getKeyframePtr` en ráfaga es un
   SIGBUS.
 - `getKeyframeListAsTickTimes` es sincrónico adentro del lock y no lee valores.
+- Un keyframe pedido FUERA del clip se escribe en su borde, y el último pisa a los anteriores; uno en el
+  borde de salida exacto se acepta en ese tiempo.
 - `createRemoveKeyframeAction(tick)` borra uno. `createSetInterpolationAtKeyframeAction(tick,
   modo)` cambia el tipo, que no se puede releer, y un bezier sin tiradores se mueve como un lineal.
+- No hay interpolación ESPACIAL (reflejado 26.5.1): `Constants.InterpolationMode` es LINEAR 0, HOLD 4,
+  BEZIER 5, TIME 6/7/8, y `PointKeyframe` sólo tiene `position` y `value`.
+- Una transición contra un nest que entra entero: centrada, Premiere la acorta a la mitad y la pone sobre
+  el nest; alineada a un extremo, entra entera. `getMedia()` del item de un nest contesta «The script
+  object is no longer valid».
 - `VideoComponentChain.createAppendComponentAction(comp)` con un componente de OTRO clip lo
   COMPARTE, y el vínculo sobrevive a cerrar y reabrir. `createInsertComponentAction(comp, i)`
   contesta "Illegal Parameter type".
@@ -593,8 +615,12 @@ el bridge: cada una es una medición contra Premiere, no una deducción del nomb
   hasta un in pasado del out.
 - En `EncoderManager`, `getExportFileExtension` e `isAMEInstalled` figuran en el reflejo y no son
   funciones.
-- `launchEncoder()` devuelve `true` antes de que Media Encoder esté listo; `startBatchEncode()`
-  arranca la cola, y hay que pedirlo más de una vez.
+- `launchEncoder()` devuelve `true` antes de que Media Encoder esté listo, y `startBatchEncode()` hace lo
+  que el play de su cola: parada o en pausa la arranca, corriendo la PAUSA. El estado de la cola no lo da
+  la API: está en `~/Documents/Adobe/Adobe Media Encoder/<versión>/AMEEncodingLog.txt`, UTF-16LE con BOM,
+  una línea «Queue Started», «Resumed», «Paused» o «Stopped» por cambio. «Resumed» seguido de «Stopped»
+  es un pedido sin nada listo: un ítem recién encolado tarda de 3 a 21 s en estarlo. Y el log no registra
+  cuándo se abre o se cierra Media Encoder.
 - `Transcript.transcribeClipProjectItem(clip, {language: "es-es"})` crea una transcripción desde
   26.5. `importFromJSON` sigue devolviendo un cascarón, y `TextSegments.exportToJSON` sobre él
   dereferencia un nulo: no llamarlo.

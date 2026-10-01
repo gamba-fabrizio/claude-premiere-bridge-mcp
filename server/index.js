@@ -231,11 +231,13 @@ server.registerTool(
 server.registerTool(
   "premiere_motion",
   {
-    title: "Leer el Motion del clip seleccionado",
+    title: "Leer el Motion de un clip",
     description:
-      "Position, Scale y Scale Width del efecto Motion del clip seleccionado, " +
-      "con la cantidad de keyframes de cada uno. Motion es intrínseco: está en " +
-      "todos los clips y no hay que insertarlo.",
+      "Position, Scale y Scale Width del efecto Motion de un clip —el que se nombra con `pista` e " +
+      "`indice` (o `nombre`), o si no el seleccionado—, en el playhead y con la cantidad de keyframes " +
+      "de cada uno. Motion es intrínseco: está en todos los clips y no hay que insertarlo.\n\n" +
+      "Nombrá el clip: con «Selection Follows Playhead» —prendido en esta máquina— mover el playhead " +
+      "cambia la selección. Y si el playhead está fuera del clip nombrado, avisa: lo animado se lee en su borde.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       proyecto: z
@@ -245,12 +247,15 @@ server.registerTool(
           "GUARDA: nombre (o parte) del proyecto sobre el que se quiere operar. Si el que tiene "
           + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
           + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
-        )
+        ),
+      pista: z.union([z.number().int().min(1), z.string()]).optional().describe("Etiqueta de pista del clip: \"V2\", \"A1\". Va con `indice`."),
+      indice: z.number().int().min(0).optional().describe("Índice del clip dentro de la pista, de premiere_clips."),
+      nombre: z.string().optional().describe("Parte del nombre del clip. Sin esto ni `pista`/`indice`, el seleccionado.")
     })
   },
-  async ({ proyecto, secuencia }) => {
+  async ({ proyecto, secuencia, pista, indice, nombre }) => {
     try {
-      const r = await enviar("motion", { proyecto, secuencia });
+      const r = await enviar("motion", { proyecto, secuencia, pista, indice, nombre });
       return texto(r.resumen, r.params);
     } catch (e) {
       return fallo(e);
@@ -331,7 +336,9 @@ server.registerTool(
   {
     title: "Agregar un efecto al clip",
     description:
-      "Le agrega un efecto de video al clip seleccionado, por nombre visible o por match name. " +
+      "Le agrega un efecto de video a un clip —el que se nombra con `pista` e `indice` (o `nombre`), o si " +
+      "no el seleccionado—, por nombre visible o por match name. Nombrá el clip: con «Selection Follows " +
+      "Playhead» —prendido en esta máquina— mover el playhead cambia la selección. " +
       "Devuelve la lista de efectos ANTES y DESPUÉS, y los params del efecto nuevo — que es lo " +
       "que hace falta para después escribirle valores con premiere_keyframe.\n\n" +
       "Si el nombre es ambiguo no elige por su cuenta: lista los candidatos y falla.",
@@ -347,12 +354,15 @@ server.registerTool(
         ),
       efecto: z
         .string()
-        .describe("Nombre visible (ej: \"Lumetri Color\") o match name (ej: \"AE.ADBE Lumetri\").")
+        .describe("Nombre visible (ej: \"Lumetri Color\") o match name (ej: \"AE.ADBE Lumetri\")."),
+      pista: z.union([z.number().int().min(1), z.string()]).optional().describe("Etiqueta de pista del clip: \"V2\", \"A1\". Va con `indice`."),
+      indice: z.number().int().min(0).optional().describe("Índice del clip dentro de la pista, de premiere_clips."),
+      nombre: z.string().optional().describe("Parte del nombre del clip. Sin esto ni `pista`/`indice`, el seleccionado.")
     })
   },
-  async ({ efecto, proyecto, secuencia }) => {
+  async ({ efecto, proyecto, secuencia, pista, indice, nombre }) => {
     try {
-      const r = await enviar("agregarEfecto", { efecto, proyecto, secuencia });
+      const r = await enviar("agregarEfecto", { efecto, proyecto, secuencia, pista, indice, nombre });
       return texto(r.resumen, { antes: r.efectosAntes, despues: r.efectosDespues, params: r.params });
     } catch (e) {
       return fallo(e);
@@ -384,7 +394,8 @@ server.registerTool(
       efecto: z.string().optional().describe("Nombre del efecto. Por defecto \"Motion\"."),
       nombre: z.string().optional().describe("Parte del nombre del clip. Sin nada, el seleccionado."),
       pista: z.union([z.number().int().min(1), z.string()]).optional().describe("Etiqueta de pista: \"V2\", \"A1\"."),
-      indice: z.number().int().min(0).optional().describe("Índice dentro de la pista.")
+      indice: z.number().int().min(0).optional().describe("Índice dentro de la pista."),
+      indiceEfecto: z.number().int().min(0).optional().describe("Cuál de los efectos con ese nombre, si el clip tiene más de uno: 0 el primero, en el orden de la cadena (premiere_efectos los marca #0, #1). Sin esto, con dos o más, lee el PRIMERO y lo avisa en el resumen.")
     })
   },
   async (args) => {
@@ -677,6 +688,50 @@ server.registerTool(
   }
 );
 
+server.registerTool(
+  "premiere_renombrar_secuencia",
+  {
+    title: "Renombrar una secuencia del proyecto",
+    description:
+      "Le cambia el nombre a una SECUENCIA, en el lugar: no la duplica ni le cambia la identidad. Para " +
+      "un clip del timeline es premiere_renombrar, y para una pista premiere_renombrar_pista.\n\n" +
+      "La secuencia se elige como en premiere_borrar_secuencia: el nombre EXACTO gana sobre las " +
+      "parciales, y si igual coincide con más de una, REBOTA listándolas con su duración. Rebota " +
+      "también si el nombre nuevo ya lo tiene otra secuencia, aunque cambien las mayúsculas: con dos " +
+      "iguales, los verbos que eligen por nombre ya no pueden distinguirlas.\n\n" +
+      "Se relee por guid y devuelve el nombre ANTES y DESPUÉS. Si Premiere deja otro nombre que el " +
+      "pedido, lo dice. Se deshace con 1 Cmd+Z.",
+    inputSchema: soloEstas({
+      secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
+      proyecto: z
+        .string()
+        .optional()
+        .describe(
+          "GUARDA: nombre (o parte) del proyecto sobre el que se quiere operar. Si el que tiene "
+          + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
+          + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
+        ),
+      nombre: z.string().describe(
+        "Nombre (o parte) de la secuencia a renombrar. No tiene que ser la activa. El nombre EXACTO "
+        + "gana sobre las parciales; si igual coincide con más de una, REBOTA y no toca nada."
+      ),
+      nuevo: z.string().describe("El nombre que va a tener la secuencia."),
+      duracion: z.number().optional().describe(
+        "Duración en segundos (±0,05) de la que se quiere renombrar, para elegir entre dos secuencias "
+        + "con el MISMO nombre: el orden del proyecto no es el de creación."
+      )
+    })
+  },
+  async ({ nombre, nuevo, duracion, proyecto, secuencia }) => {
+    try {
+      const r = await enviar("renombrarSecuencia", { nombre, nuevo, duracion, proyecto, secuencia });
+      return texto(r.resumen, { antes: r.antes, despues: r.despues, renombrada: r.renombrada, transacciones: r.transacciones });
+    } catch (e) {
+      return fallo(e);
+    }
+  }
+);
+
 /* ---------- el panel de proyecto ---------- */
 
 server.registerTool(
@@ -837,7 +892,10 @@ server.registerTool(
       "igual que arrastrar su borde izquierdo. Para dejarlo donde está y cambiar solo qué parte de " +
       "la fuente se ve, no existe una acción directa.\n\n" +
       "Todo entra en una transacción (un Cmd+Z) y devuelve los tiempos ANTES y DESPUÉS: si no " +
-      "cambió nada, lo dice.",
+      "cambió nada, lo dice.\n\n" +
+      "Mover un clip POR ENCIMA de otro rebota sin tocar nada: la API no reordena la lista de la " +
+      "pista, y un clip fuera de orden no se dibuja ni sale en el export (medido). Para llevarlo entre " +
+      "otros clips: premiere_clonar a la posición nueva y premiere_borrar el original.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       proyecto: z
@@ -883,6 +941,8 @@ server.registerTool(
       "vínculos). El bridge la sigue emparejando por medio y rango; a mano se revincula con Cmd+L. " +
       "Con otra velocidad que 1x rebota sin tocar nada. El resumen dice cuántos items esperaba y " +
       "cuántos Cmd+Z lo deshacen.\n\n" +
+      "Cada corte borra por dentro un clon estacionado, con su propio tope: van de a 15 por minuto " +
+      "(medido sin problemas a 23 en el proyecto de prueba), y el 16º rebota sin tocar nada.\n\n" +
       "Casi siempre conviene premiere_sacar_rangos, que hace los dos cortes y el borrado. Este " +
       "verbo es el atómico, para cuando hace falta partir sin sacar nada.",
     inputSchema: soloEstas({
@@ -923,7 +983,10 @@ server.registerTool(
       "de la derecha, así que ir de adelante para atrás invalidaría los rangos siguientes. Se " +
       "pasan en tiempos de la secuencia ACTUAL, sin compensar nada.\n\n" +
       "Un rango que cruza de un clip a otro no se toca y se informa. Devuelve cuánto se fue de " +
-      "verdad contra cuánto se pidió: si no coinciden, algo salió distinto de lo esperado.",
+      "verdad contra cuánto se pidió: si no coinciden, algo salió distinto de lo esperado.\n\n" +
+      "Va de a ~7 rangos por minuto —dos cortes y un pedazo cada uno, con topes medidos—, y si el tope " +
+      "no alcanza para el rango siguiente FRENA LIMPIO: los rangos que faltan quedan sin tocar y el " +
+      "resumen los lista, para pedirlos de nuevo tal cual cuando se libere la ventana.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       proyecto: z
@@ -1088,9 +1151,14 @@ server.registerTool(
   {
     title: "Escribir keyframes",
     description:
-      "Escribe uno o varios keyframes en un param de cualquier efecto del clip seleccionado. " +
-      "Pasá `lista` para animar: todos los keyframes entran en UNA transacción, así que un " +
-      "solo Cmd+Z deshace la animación entera. Sin `lista`, escribe uno en el playhead.\n\n" +
+      "Escribe uno o varios keyframes en un param de cualquier efecto de un clip: el que se nombra con " +
+      "`pista` e `indice` (o `nombre`), o si no el seleccionado. Pasá `lista` para animar: todos los " +
+      "keyframes entran en UNA transacción, así que un solo Cmd+Z deshace la animación entera. Sin " +
+      "`lista`, escribe uno en el playhead.\n\n" +
+      "NOMBRÁ EL CLIP: con «Selection Follows Playhead» prendido —en esta máquina lo está—, mover el " +
+      "playhead SELECCIONA el clip que queda debajo, y sin `pista`/`indice` el keyframe va a ése. Y los " +
+      "puntos tienen que caer adentro del clip: uno afuera rebota sin escribir nada, porque Premiere lo " +
+      "pondría en el borde y el último pisaría a los demás.\n\n" +
       "Devuelve cuántos keyframes había antes, cuántos después, y EN QUÉ SEGUNDOS quedaron: " +
       "esa diferencia es la única prueba de que pasó algo, porque esta API puede devolver " +
       "éxito sin escribir nada, y puede escribir en el tiempo equivocado.",
@@ -1104,6 +1172,9 @@ server.registerTool(
           + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
           + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
         ),
+      pista: z.union([z.number().int().min(1), z.string()]).optional().describe("Etiqueta de pista del clip: \"V2\", \"A1\". Va con `indice`."),
+      indice: z.number().int().min(0).optional().describe("Índice del clip dentro de la pista, de premiere_clips."),
+      nombre: z.string().optional().describe("Parte del nombre del clip. Sin esto ni `pista`/`indice`, el seleccionado."),
       param: z.string().describe("Nombre exacto del param, de premiere_efectos. Ej: \"Scale\", \"Position\"."),
       efecto: z.string().optional().describe("Nombre del efecto. Por defecto \"Motion\"."),
       lista: z.array(PUNTO).optional().describe("Para animar: un elemento por keyframe."),
@@ -1113,7 +1184,8 @@ server.registerTool(
         .describe("Para un solo keyframe en el playhead. Booleano para params que son casillas (Volume > Mute)."),
       db: z.number().optional().describe("Solo para Volume > Level: el nivel en dB, que se convierte al crudo de Premiere (0 dB = 0.1778, +15 dB = 1, medido exportando). Con Level, `valor` es el CRUDO: pasarle -6 deja el clip MUDO, por eso rebota."),
       x: z.number().optional().describe("Para un solo keyframe de punto en el playhead."),
-      y: z.number().optional().describe("Idem, la vertical.")
+      y: z.number().optional().describe("Idem, la vertical."),
+      indiceEfecto: z.number().int().min(0).optional().describe("Cuál de los efectos con ese nombre, si el clip tiene más de uno: 0 el primero, en el orden de la cadena (premiere_efectos los marca #0, #1). Sin esto, con dos o más, REBOTA sin tocar nada: elegir por vos escribiría en uno sin saber cuál.")
     })
   },
   async (args) => {
@@ -1219,7 +1291,8 @@ server.registerTool(
       y: z.number().optional().describe("Idem, la vertical."),
       nombre: z.string().optional().describe("Parte del nombre del clip. Sin nada, el seleccionado."),
       pista: z.union([z.number().int().min(1), z.string()]).optional().describe("Etiqueta de pista: \"V2\", \"A1\"."),
-      indice: z.number().int().min(0).optional().describe("Índice dentro de la pista.")
+      indice: z.number().int().min(0).optional().describe("Índice dentro de la pista."),
+      indiceEfecto: z.number().int().min(0).optional().describe("Cuál de los efectos con ese nombre, si el clip tiene más de uno: 0 el primero, en el orden de la cadena (premiere_efectos los marca #0, #1). Sin esto, con dos o más, REBOTA sin tocar nada: elegir por vos escribiría en uno sin saber cuál.")
     })
   },
   async (args) => {
@@ -1667,7 +1740,8 @@ server.registerTool(
       efecto: z.string().optional().describe("Nombre del efecto. Por defecto \"Motion\"."),
       limite: z.number().optional().describe("Clips por llamada. Por defecto 25, techo 60."),
       desdeIndice: z.number().optional().describe("Desde que indice retomar, con el `siguiente` de la tanda anterior."),
-      secuencia: z.string().optional().describe("Guarda: rechaza si la secuencia activa no es esta.")
+      secuencia: z.string().optional().describe("Guarda: rechaza si la secuencia activa no es esta."),
+      indiceEfecto: z.number().int().min(0).optional().describe("Cuál de los efectos con ese nombre, si el clip tiene más de uno: 0 el primero, en el orden de la cadena (premiere_efectos los marca #0, #1). Sin esto, con dos o más, lee el PRIMERO y lo avisa en el resumen.")
     })
   },
   async (args) => {
@@ -1835,7 +1909,11 @@ server.registerTool(
       "**`modo` es OBLIGATORIO y no tiene default, a propósito**: los dos tienen una trampa.\n" +
       "- `ya` renderiza en el momento, bloquea Premiere y CONFIRMA el archivo en disco. Pero esta " +
       "llamada deja de esperar a los 30 min y el render SIGUE: si vence, no lo relances, mirá el disco.\n" +
-      "- `ame` lo encola en Media Encoder y vuelve al instante, pero NO confirma nada: medí el archivo. " +
+      "- `ame` lo encola en Media Encoder y vuelve en segundos —con Media Encoder cerrado, ~30—, pero NO " +
+      "confirma nada: medí el archivo. " +
+      "Arranca la cola SÓLO si estaba parada, según el log de Media Encoder: el play de la cola ALTERNA, así " +
+      "que con la cola corriendo el ítem entra a su turno, y con la cola en pausa queda esperando que alguien " +
+      "la reanude —reanudarla seguiría también lo que se pausó—. El resumen dice cuál fue el caso. " +
       "Y con un preset QuickTime (.mov) Media Encoder IGNORA el rango y exporta la secuencia entera " +
       "(medido): esa combinación rebota antes de tocar nada.\n" +
       "Corto: `ya`; largo: `ame`. `lote` no existe más: no exportaba nada.\n\n" +
@@ -1898,7 +1976,8 @@ server.registerTool(
       efecto: z.string().describe("Nombre visible del efecto, como lo lista premiere_efectos."),
       pista: z.union([z.number().int().min(1), z.string()]).optional().describe("Pista del clip, por ejemplo 2 o \"V2\"."),
       indice: z.number().int().min(0).optional().describe("Indice del clip en esa pista, desde 0."),
-      nombre: z.string().optional().describe("O el nombre del clip, si es unico en la pista.")
+      nombre: z.string().optional().describe("O el nombre del clip, si es unico en la pista."),
+      indiceEfecto: z.number().int().min(0).optional().describe("Cuál de los efectos con ese nombre, si el clip tiene más de uno: 0 el primero, en el orden de la cadena (premiere_efectos los marca #0, #1). Sin esto, con dos o más, REBOTA sin tocar nada: elegir por vos escribiría en uno sin saber cuál.")
     })
   },
   async (args) => {
@@ -2283,7 +2362,11 @@ server.registerTool(
       "por terminado. Cada verbo se verifica a sí mismo, pero nadie verifica el resultado " +
       "combinado, y esta API acepta escrituras que no aplica: que un verbo diga \"reparado\" no " +
       "prueba que la secuencia esté sana.\n\n" +
-      "Cuatro chequeos, todos inequívocos:\n" +
+      "Los chequeos, todos inequívocos:\n" +
+      "· CLIPS FUERA DE ORDEN en la lista de su pista — Premiere no los dibuja ni los exporta aunque " +
+      "premiere_clips los lea en su lugar. Lo dejaban los cortes hasta el 2026-09-30, y cualquier " +
+      "movimiento que pasa por encima de un vecino. Se repara duplicando la secuencia (pedíselo al " +
+      "repo) o moviendo el clip a mano en Premiere.\n" +
       "· CLIPS DE DURACIÓN CERO — Premiere los acepta y no se ven en el timeline.\n" +
       "· SOLAPES.\n" +
       "· HUECOS, medidos en FRAMES: los de 1 frame son cortes que cayeron entre frames y suenan " +
@@ -2613,7 +2696,8 @@ server.registerTool(
           "GUARDA: nombre (o parte) del proyecto sobre el que se quiere operar. Si el que tiene "
           + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
           + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
-        )
+        ),
+      indiceEfecto: z.number().int().min(0).optional().describe("Cuál de los efectos con ese nombre, si el clip tiene más de uno: 0 el primero, en el orden de la cadena (premiere_efectos los marca #0, #1). Sin esto, con dos o más, REBOTA sin tocar nada: elegir por vos escribiría en uno sin saber cuál.")
     })
   },
   async (args) => {
@@ -2663,7 +2747,8 @@ server.registerTool(
           "GUARDA: nombre (o parte) del proyecto sobre el que se quiere operar. Si el que tiene "
           + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
           + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
-        )
+        ),
+      indiceEfecto: z.number().int().min(0).optional().describe("Cuál de los efectos con ese nombre, si el clip tiene más de uno: 0 el primero, en el orden de la cadena (premiere_efectos los marca #0, #1). Sin esto, con dos o más, REBOTA sin tocar nada: elegir por vos escribiría en uno sin saber cuál.")
     })
   },
   async (args) => {
@@ -2724,7 +2809,8 @@ server.registerTool(
           "GUARDA: nombre (o parte) del proyecto sobre el que se quiere operar. Si el que tiene "
           + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
           + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
-        )
+        ),
+      indiceEfecto: z.number().int().min(0).optional().describe("Cuál de los efectos con ese nombre, si el clip tiene más de uno: 0 el primero, en el orden de la cadena (premiere_efectos los marca #0, #1). Sin esto, con dos o más, REBOTA sin tocar nada: elegir por vos escribiría en uno sin saber cuál.")
     })
   },
   async (args) => {

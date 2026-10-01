@@ -28,7 +28,7 @@ const RUTA_BRIDGE = "/RUTA/ABSOLUTA/A/TU/COPIA/premiere-bridge/intercambio";   /
 const MS_POLL = 200;
 
 /*
- * CUANDO SE CARGO ESTE CODIGO. Va en el latido, que ya se escribe 1,4 veces por segundo, asi que
+ * CUANDO SE CARGO ESTE CODIGO. Va en el latido, que ya se escribe una vez por segundo, asi que
  * no cuesta una llamada ni un verbo nuevo.
  *
  * Sirve para una sola cosa y es importante: saber si un Reload ENTRO. Cada cambio en `plugin/`
@@ -51,8 +51,21 @@ const elLatido = document.getElementById("latido");
 const elEstado = document.getElementById("estado");
 const elUltimo = document.getElementById("ultimo");
 
+/*
+ * EL DOM SE TOCA LO MENOS POSIBLE, y solo si el texto cambió (PROPUESTA 2026-09-30, sin medir).
+ * Cuatro crashes del 2026-09-29 cayeron en el HILO PRINCIPAL, en el código que dibuja la UI, con
+ * Premiere en segundo plano; el de las 23:14 adentro de `torq` (el motor de los paneles UXP)
+ * desarmando un árbol de nodos, y el de las 19:28 en CoreText adentro de `torq` (un reporte de uso). Cada
+ * `textContent =` saca el nodo de texto viejo y arma uno nuevo, y hasta acá pasaba cinco veces por
+ * segundo en el latido, más el resumen entero —a veces cientos de caracteres en `pre-wrap`— en
+ * cada comando. El latido va al disco igual: la pantalla es para el editor, no para el servidor.
+ */
+const MAX_TEXTO_PANEL = 160;
+const CADA_VUELTAS_PANEL = 25;   // ~5 s con MS_POLL 200
+const CADA_VUELTAS_LATIDO = 5;   // el latido al disco: ~1 por segundo con MS_POLL 200
 function mostrar(el, texto) {
-  el.textContent = texto;
+  const corto = texto.length > MAX_TEXTO_PANEL ? texto.slice(0, MAX_TEXTO_PANEL) + "…" : texto;
+  if (el.textContent !== corto) el.textContent = corto;
   console.log("[bridge]", texto);
 }
 
@@ -101,10 +114,19 @@ async function vuelta() {
   // El latido va SIEMPRE, incluso mientras se ejecuta un comando largo: es la
   // señal de que Premiere sigue respondiendo. Si dejara de latir durante una
   // exportación, el servidor lo leería como panel caído.
-  try { await escribir("latido.json", { vuelta: vueltas, cargadoEn: CARGADO_EN }); }
-  catch (e) { mostrar(elEstado, "No se pudo escribir el latido: " + e.message); return; }
+  //
+  // Pero UNA VEZ POR SEGUNDO y no en cada vuelta (2026-09-30, PROPUESTA SIN MEDIR). Escribirlo es
+  // `createFile` + `write`, y cada uno crea un objeto nativo que después limpia el recolector: a cinco
+  // vueltas por segundo eran unos 36.000 por hora sólo del latido, y cinco de los crashes de la noche
+  // del 2026-09-29 cayeron en la recolección de esos envoltorios (`UserWeakCallback`, en el hilo de
+  // scripts). El servidor lo da por muerto a los 5 s, así que un segundo sobra. El poleo de comandos
+  // sigue en cada vuelta: la latencia no cambia.
+  if (vueltas % CADA_VUELTAS_LATIDO === 1) {
+    try { await escribir("latido.json", { vuelta: vueltas, cargadoEn: CARGADO_EN }); }
+    catch (e) { mostrar(elEstado, "No se pudo escribir el latido: " + e.message); return; }
+  }
 
-  elLatido.textContent = "vuelta " + vueltas + (ocupado ? " · ejecutando…" : "");
+  if (vueltas % CADA_VUELTAS_PANEL === 0) mostrarLatido();
 
   if (ocupado) return;
 
@@ -160,6 +182,12 @@ async function vuelta() {
  * dejara de dispararse, la guarda de `desmontado` adentro de la vuelta sigue
  * evitando el trabajo pesado — por eso están las dos y no una.
  */
+let latidoMostrado = "";
+function mostrarLatido() {
+  const t = ocupado ? "ejecutando…" : "latiendo (vuelta " + vueltas + ")";
+  if (t !== latidoMostrado) { elLatido.textContent = t; latidoMostrado = t; }
+}
+
 let desmontado = false;
 const timer = setInterval(() => {
   if (desmontado) return;

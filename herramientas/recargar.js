@@ -497,6 +497,72 @@ const leerLatido = () => {
 };
 const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/*
+ * EL MACRO PUEDE APUNTAR AL PROCESO EQUIVOCADO (2026-10-01). Premiere corre con auxiliares que viven
+ * adentro de su mismo .app —TeamProjectsLocalHub, dynamiclinkmanager—, y Keyboard Maestro resuelve la
+ * app del macro por la ruta del .app: a veces agarra el auxiliar. Medido: «Activate Application cannot
+ * activate application» sobre TeamProjectsLocalHub, el macro se aborta y el Cmd+Q no sale; y ni el
+ * bundle id solo ni el nombre lo desambiguan (probados los dos). El reinicio esperaba 180 s y trababa el
+ * transporte culpando a un cartel que no había. La falla queda en el log de KM en el mismo segundo.
+ */
+const KM_LOG = path.join(require("os").homedir(), "Library", "Logs", "Keyboard Maestro", "Engine.log");
+const APP_PREMIERE = "/Applications/Adobe Premiere Pro 2026/Adobe Premiere Pro 2026.app";
+const BUNDLE_PREMIERE = "com.adobe.PremierePro.26";
+function tamLogKM() { try { return fs.statSync(KM_LOG).size; } catch (e) { return null; } }
+/** La última línea de falla de `macro` escrita en el log de KM después de `desde` bytes; "" si no hay, null si no se pudo leer. */
+function falloDelMacro(desde, macro) {
+  if (desde === null) return null;
+  let txt;
+  try { txt = fs.readFileSync(KM_LOG).subarray(desde).toString("utf8"); } catch (e) { return null; }
+  const lineas = txt.split("\n").filter((l) => l.indexOf("“" + macro + "”") !== -1 && /\b(failed|cannot)\b/i.test(l));
+  return lineas.length ? lineas[lineas.length - 1].trim() : "";
+}
+
+/*
+ * CERRAR SIN EL MACRO. LaunchServices activa el proceso que registró como la app —el de verdad—, y el Cmd+Q
+ * va a la app del FRENTE, mandado por Keyboard Maestro sólo si su bundle id es el de Premiere. La guarda
+ * corre en el mismo AppleScript que la tecla, porque un Cmd+Q que cae en otra app la cierra, Claude
+ * incluida. Medido el 2026-10-01: «ENVIADO» y Premiere cerró a los 4 s.
+ */
+const PLIST_CMDQ = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+	<dict>
+		<key>KeyCode</key>
+		<integer>12</integer>
+		<key>MacroActionType</key>
+		<string>SimulateKeystroke</string>
+		<key>Modifiers</key>
+		<integer>256</integer>
+		<key>ReleaseAll</key>
+		<false/>
+		<key>TargetingType</key>
+		<string>Front</string>
+	</dict>
+</array>
+</plist>
+`;
+async function cerrarConGuarda() {
+  try { require("child_process").execFileSync("open", ["-a", APP_PREMIERE], { timeout: 15000 }); }
+  catch (e) { return { enviado: false, detalle: "open -a no pudo activar Premiere: " + (e && e.message ? e.message : e) }; }
+  await dormir(2000);
+  const xml = path.join(require("os").tmpdir(), "bridge-cmdq-premiere.xml");
+  try { fs.writeFileSync(xml, PLIST_CMDQ); } catch (e) { return { enviado: false, detalle: "no se pudo escribir " + xml }; }
+  const r = osa([
+    `set x to read POSIX file "${xml}" as «class utf8»`,
+    'tell application "Keyboard Maestro Engine"',
+    '  set b to process tokens "%ApplicationBundleID%1%"',
+    `  if b is "${BUNDLE_PREMIERE}" then`,
+    "    do script x",
+    '    return "ENVIADO"',
+    "  else",
+    '    return "NO: al frente está " & b',
+    "  end if",
+    "end tell"].join("\n"), 20000);
+  return { enviado: r === "ENVIADO", detalle: r === null ? "osascript no contestó" : r };
+}
+
 async function reiniciarPremiere() {
   const { enviar, ponerTraba, sacarTraba } = require(path.join(RAIZ, "server", "bridge.js"));
   /*
@@ -597,8 +663,20 @@ async function reiniciarPremiere() {
   const marca = Date.now();
   /* `do script` devuelve "missing value" cuando anda, asi que no se juzga por el retorno: se
    * juzga por si el proceso se fue. Lo de siempre en este repo. */
+  const km0 = tamLogKM();
   osa(`tell application "Keyboard Maestro Engine" to do script "${MACRO_CERRAR}"`, 20000);
   console.log(`  macro "${MACRO_CERRAR}" disparado, esperando a que Premiere cierre…`);
+  /* Si el macro falló —el log de KM lo dice en el mismo segundo—, se cierra por la otra vía en vez de
+     esperar 180 s a un Cmd+Q que no salió. */
+  await dormir(1500);
+  const falloMacro = falloDelMacro(km0, MACRO_CERRAR);
+  let viaGuarda = null;
+  if (falloMacro) {
+    console.log(`  el macro FALLÓ según Keyboard Maestro: ${falloMacro.replace(/^\S+ \S+ /, "")}`);
+    console.log("  cierro por la otra vía: LaunchServices activa Premiere y el Cmd+Q va con guarda…");
+    viaGuarda = await cerrarConGuarda();
+    console.log(viaGuarda.enviado ? "  Cmd+Q enviado a Premiere" : `  NO se envió el Cmd+Q: ${viaGuarda.detalle}`);
+  }
   let cerro = false;
   let mtimeVisto = haceCuantoCambio(ruta);
   for (let i = 0; i < TOPE_CIERRE_S; i++) {
@@ -674,6 +752,8 @@ async function reiniciarPremiere() {
        en el unico lugar que alguien iba a leer. Con el titulo adentro, nombra el dialogo. */
     const puesta = ponerTraba(
       `se pidio cerrar Premiere y a los ${TOPE_CIERRE_S}s seguia abierto y SIN guardar. ` +
+      (falloMacro ? `El macro "${MACRO_CERRAR}" FALLÓ en Keyboard Maestro («${falloMacro.replace(/^\S+ \S+ /, "")}»)` +
+        (viaGuarda ? `, y la vía con guarda: ${viaGuarda.enviado ? "el Cmd+Q salió" : viaGuarda.detalle}` : "") + ". " : "") +
       (v.miro && !v.esProyecto ? `HAY UN CARTEL ABIERTO: "${v.titulo}" — resolvelo en pantalla. `
         : v.miro ? "La ventana al frente ES el proyecto, asi que el cartel NO es la causa: mirá el macro. "
         : `No se pudo mirar si hay un cartel (${v.porque}). `) +
