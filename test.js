@@ -3959,10 +3959,10 @@ titulo("exportar lee los in/out de la secuencia aunque no se le pida rango");
 titulo("exportar: modo sin default, .mov en cola, cancelación y reposición en dos transacciones");
 {
   const fuentes = ["async function exportar(", "async function tipoDePreset(", "async function rutaLogAME(", "async function leerLogAME(",
-    "function textoDeCola("].map((f) => cuerpoDeFuncion(srcComandos, f));
+    "function textoDeCola(", "function textoDeColaSegunLog("].map((f) => cuerpoDeFuncion(srcComandos, f));
   const constEstado = (/^const ESTADO_COLA_AME = [^\n]*$/m.exec(srcComandos) || [""])[0];
   const casos = (() => {
-    if (fuentes.some((f) => !f) || !constEstado) return { error: "falta `exportar`, `tipoDePreset`, `rutaLogAME`, `leerLogAME`, `textoDeCola` o `ESTADO_COLA_AME`" };
+    if (fuentes.some((f) => !f) || !constEstado) return { error: "falta `exportar`, `tipoDePreset`, `rutaLogAME`, `leerLogAME`, `textoDeCola`, `textoDeColaSegunLog` o `ESTADO_COLA_AME`" };
     const guion = `
       const vm = require("vm"), fuentes = ${JSON.stringify(fuentes)};
       const T = 254016000000, SENT = -400000, PRESET = "/p.epr", SALIDA = "/s.mov";
@@ -3980,7 +3980,8 @@ titulo("exportar: modo sin default, .mov en cola, cancelación y reposición en 
         const anotar = (que) => lineas.push(hora() + " : " + que);
         anotar("File Successfully Encoded");
         let cola = ame.cola || "parada";
-        anotar("Queue " + { parada: "Stopped", corriendo: "Started", pausada: "Paused" }[cola]);
+        // La última línea del log puede no ser la cola de ahora: si AME se cayó encodeando, queda un «Started».
+        anotar("Queue " + { parada: "Stopped", corriendo: "Started", pausada: "Paused" }[ame.logDice || cola]);
         const agendar = (que) => agenda.push({ en: tick + (ame.demoraLog || 0), que });
         const pasar = () => { tick++; for (const a of agenda.filter((a) => a.en <= tick)) { anotar("Queue " + a.que); agenda.splice(agenda.indexOf(a), 1); } };
         const bufferLog = () => {
@@ -4085,14 +4086,18 @@ titulo("exportar: modo sin default, .mov en cola, cancelación y reposición en 
         colaCorriendo: await correr({ marca: [SENT, SENT], formas: [true], params: { modo: "ame" }, tipo: H264, ame: { cola: "corriendo" } }),
         colaPausada: await correr({ marca: [SENT, SENT], formas: [true], params: { modo: "ame" }, tipo: H264, ame: { cola: "pausada" } }),
         sinLog: await correr({ marca: [SENT, SENT], formas: [true], params: { modo: "ame" }, tipo: H264, ame: { sinLog: true } }),
-        logSeRompe: await correr({ marca: [SENT, SENT], formas: [true], params: { modo: "ame" }, tipo: H264, ame: { listoEn: 2, seRompe: true } })
+        logSeRompe: await correr({ marca: [SENT, SENT], formas: [true], params: { modo: "ame" }, tipo: H264, ame: { listoEn: 2, seRompe: true } }),
+        viejaCerrado: await correr({ marca: [SENT, SENT], formas: [true], params: { modo: "ame", ameAbierto: false }, tipo: H264, ame: { logDice: "corriendo" } }),
+        pausaViejaCerrado: await correr({ marca: [SENT, SENT], formas: [true], params: { modo: "ame", ameAbierto: false }, tipo: H264, ame: { logDice: "pausada" } }),
+        viejaSinDato: await correr({ marca: [SENT, SENT], formas: [true], params: { modo: "ame" }, tipo: H264, ame: { logDice: "corriendo" } }),
+        corriendoAbierto: await correr({ marca: [SENT, SENT], formas: [true], params: { modo: "ame", ameAbierto: true }, tipo: H264, ame: { cola: "corriendo" } })
       })))();`;
     try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
     catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
   })();
   const { sinModo, lote, movEnCola, cancelado, otroError, firma, espejo, despues, sentinel, movSinRango,
           colaParada, colaRecienAbierta, colaLogLento, colaSinNadaListo, colaNuncaLista, colaListaAlFinal, colaTerminaEnseguida,
-          colaCorriendo, colaPausada, sinLog, logSeRompe } = casos;
+          colaCorriendo, colaPausada, sinLog, logSeRompe, viejaCerrado, pausaViejaCerrado, viejaSinDato, corriendoAbierto } = casos;
   const cola = (c, pedidos, estado, re) => c && !c.error && c.ame.pedidos === pedidos && c.ame.cola === estado && re.test(c.resumen || "");
   const noToco = (c) => c && c.error && c.txs.length === 0 && c.llamadas === 0;
   const igual = (a, b) => Array.isArray(a) && Math.abs(a[0] - b[0]) < 0.01 && Math.abs(a[1] - b[1]) < 0.01;
@@ -4155,9 +4160,19 @@ titulo("exportar: modo sin default, .mov en cola, cancelación y reposición en 
              !logSeRompe || logSeRompe.error || logSeRompe.ame.pedidos !== 1 || !/no se pudo releer/.test(logSeRompe.resumen || "")) {
     mal("sin poder leer el log de Media Encoder, `exportar` pide más de una vez o no dice que no pudo mirar",
         "sin ver la cola, repetir el pedido es jugar a alternarla · " + JSON.stringify({ sinLog: sinLog && sinLog.ame, logSeRompe: logSeRompe && logSeRompe.ame }));
+  } else if (!cola(viejaCerrado, 1, "corriendo", /estaba CERRADO[\s\S]*no contó[\s\S]*cola ARRANCADA/) ||
+             !cola(pausaViejaCerrado, 1, "corriendo", /estaba CERRADO[\s\S]*«Queue Paused»[\s\S]*cola ARRANCADA/)) {
+    mal("con Media Encoder cerrado, `exportar` le cree al «Started» o al «Paused» que quedó en el log",
+        "si AME se cayó encodeando, esa línea es de una sesión muerta: la cola que abre `launchEncoder` arranca parada y el ítem " +
+        "esperaba sin que nadie la arrancara · " + JSON.stringify({ viejaCerrado: viejaCerrado && viejaCerrado.ame, pausaViejaCerrado: pausaViejaCerrado && pausaViejaCerrado.ame }));
+  } else if (!cola(viejaSinDato, 0, "parada", /la cola CORRE[\s\S]*No se pudo ver si Media Encoder estaba abierto/) ||
+             !cola(corriendoAbierto, 0, "corriendo", /la cola CORRE/) || /No se pudo ver/.test(corriendoAbierto.resumen || "")) {
+    mal("sin saber si Media Encoder está abierto `exportar` deja de creerle al log o no avisa, o con AME abierto sigue dudando",
+        JSON.stringify({ viejaSinDato: viejaSinDato && { ame: viejaSinDato.ame, resumen: (viejaSinDato.resumen || "").slice(-200) },
+                         corriendoAbierto: corriendoAbierto && (corriendoAbierto.resumen || "").slice(-200) }));
   } else {
     ok("sin `modo` y con `lote` rebota, un .mov en cola con rango rebota, una cancelación corta y repone, la reposición va en dos transacciones, " +
-       "y la cola de Media Encoder se arranca sólo si está parada, sin repetir el pedido cuando ya registró el cambio");
+       "y la cola de Media Encoder se arranca sólo si está parada —o si AME estaba cerrado y el log quedó viejo—, sin repetir el pedido cuando ya registró el cambio");
   }
 }
 
@@ -4480,6 +4495,146 @@ titulo("El panel escribe el latido una vez por segundo y la pantalla casi nunca"
   } else {
     ok(`el panel escribe el latido ${r.escrituras["latido.json"]} veces en 100 vueltas, la pantalla ${r.pantalla.latido}, y contesta con el resumen cortado`);
   }
+}
+
+/*
+ * EL COMANDO QUE YA ESTABA AL CARGAR NO SE EJECUTA (2026-10-01). Premiere se cayó armando 216 clips y el
+ * `comando.json` quedó en la carpeta: un panel nuevo arranca con `ultimoId` en null y lo habría repetido
+ * al cargar. Se EJECUTA `plugin/index.js` con ese comando en el disco desde la primera vuelta: no tiene que
+ * correr ni contestar, y uno que llega DESPUÉS de cargar sí, una vez.
+ */
+titulo("El panel no ejecuta el comando que ya estaba pendiente cuando cargó");
+{
+  const src = fs.readFileSync(path.join(raiz, "plugin/index.js"), "utf8");
+  const r = (() => {
+    const guion = `
+      const vm = require("vm"), src = ${JSON.stringify(src)};
+      const escrituras = {}, ejecutados = [];
+      const el = () => { let t = ""; return { get textContent() { return t; }, set textContent(v) { t = v; } }; };
+      const els = { latido: el(), estado: el(), ultimo: el() };
+      let comando = JSON.stringify({ id: "viejo", cmd: "armarSecuencia", params: {} });
+      const carpeta = {
+        createFile: async (n) => ({ write: async () => { escrituras[n] = (escrituras[n] || 0) + 1; } }),
+        getEntry: async (n) => { if (n !== "comando.json" || !comando) throw new Error("no"); return { read: async () => comando }; }
+      };
+      const ctx = { document: { getElementById: (id) => els[id] }, console: { log: () => {} }, window: { addEventListener: () => {} },
+        uxp: { storage: { localFileSystem: { getEntryWithUrl: async () => carpeta } } }, setInterval: () => 1, clearInterval: () => {},
+        ejecutar: async (cmd) => { ejecutados.push(cmd); return { resumen: "ok" }; } };
+      vm.runInNewContext(src, ctx);
+      (async () => {
+        for (let i = 0; i < 40; i++) { if (i === 20) comando = JSON.stringify({ id: "nuevo", cmd: "estado", params: {} }); await ctx.vuelta(); }
+        console.log(JSON.stringify({ ejecutados, respuestas: escrituras["respuesta.json"] || 0, ultimo: els.ultimo.textContent }));
+      })();`;
+    try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
+    catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
+  })();
+  if (r.error) mal("el panel no se pudo ejecutar contra un disco de mentira", r.error);
+  else if (r.ejecutados.indexOf("armarSecuencia") !== -1) {
+    mal("el panel ejecuta el comando que ya estaba en la carpeta cuando cargó",
+        "si Premiere se cae con un comando adentro, reabrir lo repite: lo que acababa de tirarlo, o un borrado por segunda vez · " + JSON.stringify(r));
+  } else if (r.ejecutados.join(",") !== "estado" || r.respuestas !== 1) {
+    mal("el panel dejó de ejecutar el comando que llega después de cargar, o contesta más de una vez", JSON.stringify(r));
+  } else ok("el comando pendiente al cargar no se ejecuta y queda dicho en el panel; el siguiente se ejecuta y contesta una vez");
+}
+
+/*
+ * Y EL TRANSPORTE SACA SU COMANDO CUANDO VENCE LA ESPERA (2026-10-01). Lo borraba sólo al llegar la
+ * respuesta: con Premiere caído, el comando quedaba en la carpeta y lo levantaba el panel siguiente —o un
+ * Reload del panel, con el proyecto abierto, que es cuando la repetición SÍ entra—. Se EJECUTA `enviar`
+ * contra un disco de mentira —nunca contra `intercambio/`, que lo leería el panel vivo— con un panel que
+ * late y no contesta: al vencer, su comando no está; y si otro cliente lo reemplazó, el de él queda.
+ */
+titulo("El transporte saca su comando de la carpeta cuando vence la espera");
+{
+  const src = fs.readFileSync(path.join(raiz, "server/bridge.js"), "utf8");
+  const r = (() => {
+    const guion = `
+      const vm = require("vm"), path = require("path"), src = ${JSON.stringify(src)};
+      const caso = async (reemplazar) => {
+        const disco = {};
+        const falso = {
+          readFile: async (p) => { if (!(p in disco)) { const e = new Error("ENOENT"); e.code = "ENOENT"; throw e; } return disco[p]; },
+          writeFile: async (p, t) => { disco[p] = String(t); },
+          stat: async (p) => { if (p.endsWith("latido.json")) return { mtimeMs: Date.now() }; throw new Error("ENOENT"); },
+          mkdir: async () => {},
+          unlink: async (p) => { delete disco[p]; },
+        };
+        const fsSync = { readFileSync: () => { throw new Error("ENOENT"); } };
+        const modulo = { exports: {} };
+        vm.runInNewContext(src, { module: modulo, exports: modulo.exports, __dirname: "/falso/server", console: { log() {}, error() {} },
+          setTimeout, clearTimeout, require: (m) => m === "fs/promises" ? falso : m === "fs" ? fsSync : m === "path" ? path : require(m) });
+        const cmd = "/falso/intercambio/comando.json";
+        if (reemplazar) setTimeout(() => { disco[cmd] = JSON.stringify({ id: "otro", cmd: "estado", params: {} }); }, 150);
+        let error = null;
+        try { await modulo.exports.enviar("estado", {}, 400); } catch (e) { error = e.message; }
+        return { vencio: /no tuvo respuesta/.test(error || ""), queda: disco[cmd] ? JSON.parse(disco[cmd]).id : null };
+      };
+      (async () => { console.log(JSON.stringify({ suyo: await caso(false), ajeno: await caso(true) })); })();`;
+    try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
+    catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
+  })();
+  if (r.error) mal("`enviar` no se pudo ejecutar contra un disco de mentira", r.error);
+  else if (!r.suyo.vencio || !r.ajeno.vencio) mal("`enviar` no vence contra un panel que late y no contesta", JSON.stringify(r));
+  else if (r.suyo.queda !== null) {
+    mal("al vencer la espera, el comando queda en la carpeta",
+        "con Premiere caído lo ejecuta el panel siguiente apenas carga, o un Reload con el proyecto abierto · " + JSON.stringify(r));
+  } else if (r.ajeno.queda !== "otro") {
+    mal("al vencer la espera, el transporte borra un comando que no es el suyo", JSON.stringify(r));
+  } else ok("al vencer la espera el transporte saca SU comando de la carpeta, y deja el de otro");
+}
+
+/*
+ * EL TRANSPORTE LE DICE AL PANEL SI MEDIA ENCODER ESTÁ ABIERTO (2026-10-01). El panel no puede ver procesos,
+ * y sin eso un «Started» que quedó en el log de un AME caído lo hacía creer que la cola corría. Se EJECUTA
+ * `enviar` contra un disco y un `ps` de mentira: el dato va sólo en `exportar` con `ame`, no pisa el que
+ * manda quien llama, y si `ps` no contesta va `null`, que el panel trata como no saber.
+ */
+titulo("El transporte manda en `exportar` con `ame` si Media Encoder está abierto");
+{
+  const src = fs.readFileSync(path.join(raiz, "server/bridge.js"), "utf8");
+  const r = (() => {
+    const guion = `
+      const vm = require("vm"), path = require("path"), src = ${JSON.stringify(src)};
+      const AME = "/Applications/Adobe Media Encoder 2026/Adobe Media Encoder 2026.app/Contents/MacOS/Adobe Media Encoder 2026";
+      const OTRO = "/Applications/Adobe Premiere Pro 2026/Adobe Premiere Pro 2026.app/Contents/MacOS/Adobe Premiere Pro 2026";
+      const caso = async (cmd, params, ps) => {
+        const escritos = [];
+        const falso = {
+          readFile: async () => { throw new Error("ENOENT"); },
+          writeFile: async (p, t) => { if (p.endsWith("comando.json")) escritos.push(JSON.parse(t)); },
+          stat: async (p) => { if (p.endsWith("latido.json")) return { mtimeMs: Date.now() }; throw new Error("ENOENT"); },
+          mkdir: async () => {}, unlink: async () => {},
+        };
+        const modulo = { exports: {} };
+        const cp = { execFileSync: () => { if (ps === null) throw new Error("ps no contestó"); return ps.join("\\n") + "\\n"; } };
+        vm.runInNewContext(src, { module: modulo, exports: modulo.exports, __dirname: "/falso/server", console: { log() {}, error() {} },
+          setTimeout, clearTimeout,
+          require: (m) => m === "fs/promises" ? falso : m === "fs" ? { readFileSync: () => { throw new Error("no"); } } :
+                          m === "path" ? path : m === "child_process" ? cp : require(m) });
+        try { await modulo.exports.enviar(cmd, params, 50); } catch (e) {}
+        const p = escritos.length ? escritos[0].params : null;
+        return p ? ("ameAbierto" in p ? p.ameAbierto : "sin dato") : "no escribió";
+      };
+      (async () => console.log(JSON.stringify({
+        abierto: await caso("exportar", { modo: "ame" }, [OTRO, AME]),
+        cerrado: await caso("exportar", { modo: "ame" }, [OTRO]),
+        sinPs: await caso("exportar", { modo: "ame" }, null),
+        loDice: await caso("exportar", { modo: "ame", ameAbierto: true }, [OTRO]),
+        ya: await caso("exportar", { modo: "ya" }, [OTRO, AME]),
+        otro: await caso("estado", {}, [OTRO, AME]),
+      })))();`;
+    try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
+    catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
+  })();
+  if (r.error) mal("`enviar` no se pudo ejecutar contra un `ps` de mentira", r.error);
+  else if (r.abierto !== true || r.cerrado !== false || r.sinPs !== null) {
+    mal("el transporte no manda si Media Encoder está abierto, o no manda `null` cuando no pudo mirar",
+        "sin el dato, un «Started» de un AME caído deja el ítem esperando · " + JSON.stringify(r));
+  } else if (r.loDice !== true) {
+    mal("el transporte pisa el `ameAbierto` que mandó quien llama", JSON.stringify(r));
+  } else if (r.ya !== "sin dato" || r.otro !== "sin dato") {
+    mal("el transporte agrega `ameAbierto` fuera de `exportar` con `ame`", "los demás verbos lo rebotan por clave inventada · " + JSON.stringify(r));
+  } else ok("en `exportar` con `ame` va si Media Encoder está abierto —`null` si `ps` no contesta—, sin pisar lo que manda quien llama");
 }
 
 /*

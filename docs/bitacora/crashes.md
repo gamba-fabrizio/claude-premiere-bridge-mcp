@@ -10,8 +10,9 @@
   distintas. → «Los regímenes que tiran Premiere»
 - **Una ráfaga de transacciones tira Premiere.** El espaciado real es `PAUSA + MS_POLL` y tiene que
   dar 500 ms o más; `test.js` lo exige. → «El espaciado real es la SUMA»
-- **El borde se mueve con el peso del proyecto y con la acción**: ~205 ms mató uno pesado, y uno chico
-  y uno intermedio aguantaron. → «El umbral depende del PESO», «El tercer peso», «El borde también
+- **El borde se mueve con el peso y con la acción**: ~205 ms mató uno pesado y un banco pesado, y hoy
+  aguantan uno chico, uno intermedio y una copia pesada con la secuencia del banco: qué lo movió no está
+  separado. → «El umbral depende del PESO», «El tercer peso», «El cuarto peso», «El borde también
   depende de la ACCIÓN»
 - **Menos transacciones antes que menos espera**: `porTransaccion` hasta `TOPE_LOTE` (10).
   → «Agrupar por transacción gana MÁS»
@@ -29,8 +30,11 @@
 - **Recargar el plugin con su `setInterval` vivo crasheaba**: el panel se desarma en
   `beforeunload`. → «5. Recargar el plugin»
 - **Premiere se cae por lo ACUMULADO en la sesión**, no por el ritmo ni por un verbo, y el punto varía
-  mucho: ~540–630 escrituras con `fijar` espaciado, de ~200 a ~2.900 con una tanda. Guardar antes y
-  después de cada tanda, y reiniciar antes de una grande. → «Premiere se cae por lo ACUMULADO»
+  mucho: ~540–630 escrituras con `fijar` espaciado, de ~200 a ~3.000 con una tanda, con el panel nuevo
+  igual. Guardar antes y después, y reiniciar antes de una tanda o un armado grande. → «Premiere se cae
+  por lo ACUMULADO», «La tasa con el panel nuevo»
+- **Un comando que quedó adentro cuando se cayó Premiere ya no se repite al reabrir.** → «El comando que
+  quedó adentro»
 
 # Los regímenes que tiran Premiere
 
@@ -398,3 +402,58 @@ en `estado` y en el resumen de todo verbo que escribe —transacciones, y las es
 aparte—, para que el próximo crash quede medido. Sin umbral de aviso: no hay número seguro. Lo que evita
 perder trabajo es lo de siempre: guardar antes y después de cada tanda —Premiere recupera lo guardado— y
 reiniciar Premiere antes de una tanda grande.
+
+## La tasa con el panel nuevo: igual que antes (2026-10-01)
+
+Los dos arreglos del panel del 2026-09-30 —el latido una vez por segundo y la pantalla cada ~5 s— se
+midieron por tasa contra lo acumulado, con el mismo protocolo de la sección anterior: `aplicarMotion` sobre
+46 capas, de a 23 clips por llamada con escala, posición y rotación, 1,2 s entre llamadas, cada corrida
+desde un Premiere recién abierto, hasta el primer error o 100 llamadas. Una corrida se dio por caída sólo si
+el proceso se había ido o había un reporte nuevo: con el protector de pantalla puesto el panel también deja
+de latir, y eso no es un crash.
+
+```
+                              llamada en la que cayó          mediana
+2026-09-27, panel viejo       11, 11, 42, 6, 5, 4, 30         11
+2026-10-01, panel nuevo       45, 23, 23, 4, 26               23
+```
+
+Cayó en las cinco, entre ~200 y ~3.000 escrituras, y en los primeros 3 minutos de la sesión; las que
+dejaron reporte, en el hilo de scripts, en dos de los siete lugares de arriba. **La mediana subió y no es
+una mejora**: las dos distribuciones se pisan, y una prueba de rangos no las separa del azar. Con esta
+carga el panel no mueve la tasa. Si ayuda en sesiones largas y livianas, donde el latido pesa más contra lo
+que asigna la API, no se pudo medir, y los crashes de la interfaz no se reproducen a pedido.
+
+## El cuarto peso: una copia pesada aguanta al ritmo mínimo, con la secuencia del banco (2026-10-01)
+
+El 2026-09-11 el borde se remidió contra 26.5 en un banco de 434 medios, 21 secuencias y una de 216 clips,
+y murió en la transacción 79 a ~202 ms. Esta vez se midió sobre una copia de un proyecto real, pesada al
+revés que el de arriba: 339 medios y 35 secuencias, pero 1.700 clips de video y 856 de audio en sus pistas,
+2.052 efectos y material 4K. A ~203 ms, 150 escrituras de `editar salida` con `vinculados: true`, cada
+corrida desde un Premiere recién abierto:
+
+```
+secuencia editada                          corridas   resultado
+50 clips de un medio, 3 pasadas               2       aguantaron
+216 clips de un medio, 150 distintos          2       aguantaron, todas quedaron
+216 clips de 54 medios, 150 distintos         2       aguantaron, todas quedaron
+```
+
+**Con la secuencia y el material del banco, seis de seis.** No es el largo de la secuencia editada, ni que
+el material venga de uno o de muchos medios, ni el peso de timeline. Queda sin separar si fue algo propio de
+aquel banco, el bridge de entonces —desde el 09-11 cambiaron el latido, la pantalla del panel, el contador
+y `editar`— o el azar, porque la muerte del banco fue una sola. El espaciado de 500 ms queda como está.
+
+## El comando que quedó adentro se repetía al reabrir (2026-10-01)
+
+Premiere se cayó en medio de un armado de 216 clips, y su `comando.json` quedó en `intercambio/`. El
+transporte lo borraba sólo al llegar la respuesta, y con Premiere caído no llega nunca; el panel guarda en
+memoria el último id que ejecutó, así que uno nuevo arranca vacío y ejecuta el comando que encuentre.
+Reabrir habría vuelto a armar lo que acababa de tirar Premiere. Medido en vivo con un `estado` puesto a mano
+en la carpeta: el panel de antes lo ejecutó al cargar —falló sin daño sólo porque el proyecto todavía no
+había abierto— y el nuevo no.
+
+Los dos arreglos: el transporte saca su comando también al vencer la espera, si sigue siendo el suyo; y el
+panel no ejecuta lo que encuentra en su primera lectura, porque el transporte sólo escribe después de ver
+latir a un panel y este escribe su primer latido antes de leer. El segundo cubre lo que el primero no: un
+cliente que se muere sin llegar a vencer. `test.js` ejecuta los dos contra discos de mentira, con mutación.

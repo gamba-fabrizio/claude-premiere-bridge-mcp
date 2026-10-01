@@ -130,15 +130,24 @@ async function leerLogAME(ruta, desde) {
 
 /** Lo que `exportar` dice de la cola de Media Encoder, desde lo que registró su log. */
 function textoDeCola(a) {
+  const viejo = a.logViejo
+    ? ` · Media Encoder estaba CERRADO, así que el «Queue ${a.logViejo.que}» de las ${a.logViejo.hora} en su log era de una ` +
+      "sesión anterior y no contó"
+    : "";
+  return viejo + textoDeColaSegunLog(a);
+}
+
+function textoDeColaSegunLog(a) {
   const n = a.intentos.length;
   const ant = a.antes && typeof a.antes === "object" ? a.antes : null;
   const ult = a.nuevos && a.nuevos.length ? a.nuevos[a.nuevos.length - 1] : null;
   /* «Según el log», y no «la cola corre»: el log no registra cuándo se abre o se cierra Media Encoder, así que
-     con AME cerrado su última línea es de la sesión anterior (chequeo del 2026-10-01). */
+     con AME cerrado su última línea es de la sesión anterior (chequeo del 2026-10-01). Con AME abierto —lo
+     dice el transporte, en `ameAbierto`— el log está al día y la duda sobra. */
   if (a.decision === "corriendo") {
     return ` · según el log de Media Encoder la cola CORRE («Queue ${ant.que}» ${ant.hora}): NO se pidió arrancarla —con la ` +
-      "cola andando, el pedido la PAUSA— y el ítem entra a su turno. El log no registra si Media Encoder se cerró: si la " +
-      "cola no está corriendo, arrancala a mano";
+      "cola andando, el pedido la PAUSA— y el ítem entra a su turno" +
+      (a.ameAbierto === true ? "" : ". No se pudo ver si Media Encoder estaba abierto: si la cola no está corriendo, arrancala a mano");
   }
   if (a.decision === "pausada") {
     return ` · según el log de Media Encoder la cola está EN PAUSA («Queue Paused» ${ant.hora}): NO se pidió arrancarla ` +
@@ -541,7 +550,8 @@ async function exportar(params) {
    */
   let arranque = null;
   if (modo !== "ya") {
-    arranque = { lanzo: null, intentos: [], log: null, antes: null, nuevos: null, decision: null, arranco: null, error: null };
+    arranque = { lanzo: null, intentos: [], log: null, antes: null, nuevos: null, decision: null, arranco: null, error: null,
+      ameAbierto: params.ameAbierto === true || params.ameAbierto === false ? params.ameAbierto : null, logViejo: null };
     /*
      * PRIMERO SE MIRA LA COLA (2026-10-01, un reporte de uso). Con la cola corriendo, pedir el arranque la PAUSA;
      * con la cola en pausa, la reanuda, y con ella lo que el editor pausó. En los dos casos no se pide: el
@@ -552,7 +562,18 @@ async function exportar(params) {
     arranque.log = logAme.ruta || logAme.error;
     const colaAntes = logAme.ruta ? await leerLogAME(logAme.ruta) : { ok: false, error: logAme.error };
     arranque.antes = colaAntes.ok ? (colaAntes.ultimo || "sin registros") : "ilegible: " + colaAntes.error;
-    const estadoPrevio = colaAntes.ok && colaAntes.ultimo ? colaAntes.ultimo.estado : null;
+    /*
+     * CON MEDIA ENCODER CERRADO, EL LOG NO CUENTA (2026-10-01). El log no registra cuándo se abre o se
+     * cierra, y si AME se cae encodeando su última línea queda en «Started»: tres veces en nueve meses, una
+     * con dos días hasta la siguiente. Con eso el verbo creía que la cola corría, no la arrancaba, y el ítem
+     * esperaba a que alguien la arrancara a mano. El panel no puede ver procesos; el transporte sí, y lo
+     * manda en `ameAbierto`. Cerrado, no hay cola corriendo ni pausada: la que abre `launchEncoder` arranca
+     * parada, como con un «Stopped». Sin el dato, `null`, se sigue creyendo al log y se avisa.
+     */
+    const estadoLog = colaAntes.ok && colaAntes.ultimo ? colaAntes.ultimo.estado : null;
+    const logViejo = arranque.ameAbierto === false && (estadoLog === "corriendo" || estadoLog === "pausada");
+    if (logViejo) arranque.logViejo = colaAntes.ultimo;
+    const estadoPrevio = logViejo ? "parada" : estadoLog;
     const nuevosDesde = async () => {
       const n = await leerLogAME(logAme.ruta, colaAntes.largo);
       return n.ok ? n.nuevos : null;
@@ -13443,7 +13464,7 @@ const PARAMS_DE = {
   estado: [],
   guardar: [],
   bins: ["aunqueTengaCosas", "bin", "borrar", "medios"],
-  exportar: ["desde", "hasta", "modo", "preset", "salida"],
+  exportar: ["ameAbierto", "desde", "hasta", "modo", "preset", "salida"],
   limpiarRangos: [],
   cortesDeEscena: ["indice", "modo", "nombre", "pista"],
   etiquetar: ["color", "medio", "medios"],

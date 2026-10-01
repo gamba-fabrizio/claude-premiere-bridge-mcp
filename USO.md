@@ -103,7 +103,8 @@ en `CLAUDE.md`.
 - **`exportar` pide `modo` siempre, sin default**: `ya` es el único que se confirma, pero la llamada
   espera 30 min —si vence, el render sigue: no lo relances, mirá el disco—; `ame` no confirma nada y
   arranca la cola SÓLO si estaba parada: el play de Media Encoder alterna, así que con la cola corriendo
-  el ítem entra a su turno y en pausa queda esperando. Y **con un preset `.mov` la cola ignora el rango** y exporta la secuencia
+  el ítem entra a su turno y en pausa queda esperando. Con AME cerrado la arranca igual: su log no registra que se
+  cerró, y lo mira el transporte. Y **con un preset `.mov` la cola ignora el rango** y exporta la secuencia
   entera, así que esa combinación rebota. `lote` no exporta. Si el export se cancela o falla, lo
   dice, no reintenta y repone el in/out. El preset H.264 va de la carpeta `4E49434B_48323634`: el
   mismo nombre en la de QuickTime escribe `.mov`. Respeta los in/out de la secuencia, que
@@ -150,6 +151,9 @@ en `CLAUDE.md`.
 - **Con la pantalla bloqueada no entra ningún macro de Keyboard Maestro**, y con el Privacy Mode de
   Jump fallan los que buscan por imagen. Los dos fallan callados. El protector de pantalla marca la
   sesión como bloqueada aunque no tenga contraseña: `--reiniciar` lo saca y vuelve a mirar.
+- **Y con el protector puesto el panel DEJA DE LATIR**: una tanda desatendida de más de media hora se
+  corta con "el panel no latió" y parece un crash. Mientras dure, `caffeinate -d`; y antes de dar a
+  Premiere por caído, mirá si el proceso sigue.
 
 ## Las herramientas
 

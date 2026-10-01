@@ -46,6 +46,17 @@ let vueltas = 0;
 let ultimoTexto = "";
 let ultimoId = null;
 let ocupado = false;
+/*
+ * UN COMANDO QUE YA ESTABA AL CARGAR NO SE EJECUTA (2026-10-01). `ultimoId` vive en memoria y un panel
+ * nuevo arranca en null, así que lo primero que hacía era ejecutar el `comando.json` que hubiera. El
+ * transporte lo borra cuando le llega la respuesta, pero no si se cae Premiere o se muere el cliente
+ * con el comando adentro: el armado de 216 clips que tiró Premiere quedó en la carpeta, y al reabrir
+ * el panel lo habría repetido. El transporte sólo escribe un comando después de ver latir a un panel,
+ * y este escribe su primer latido antes de su primera lectura: lo que hay en esa lectura lo escribió
+ * alguien para el panel anterior. Se marca como visto y no se ejecuta; si su cliente seguía
+ * esperando, le vence la espera, que es un error que se ve, en vez de una repetición que no.
+ */
+let primeraLectura = true;
 
 const elLatido = document.getElementById("latido");
 const elEstado = document.getElementById("estado");
@@ -132,7 +143,7 @@ async function vuelta() {
 
   let crudo;
   try { crudo = await leerComando(); }
-  catch (e) { return; } // sin comando.json no hay nada que hacer: es lo normal
+  catch (e) { primeraLectura = false; return; } // sin comando.json no hay nada que hacer: es lo normal
 
   if (crudo === ultimoTexto) return;
   ultimoTexto = crudo;
@@ -143,6 +154,12 @@ async function vuelta() {
 
   if (!comando || !comando.id || comando.id === ultimoId) return;
   ultimoId = comando.id;
+
+  if (primeraLectura) {
+    primeraLectura = false;
+    mostrar(elUltimo, comando.cmd + " · NO se ejecutó: estaba pendiente de antes de cargar el panel");
+    return;
+  }
 
   ocupado = true;
   let respuesta;

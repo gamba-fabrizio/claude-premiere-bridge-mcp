@@ -1913,7 +1913,8 @@ server.registerTool(
       "confirma nada: medí el archivo. " +
       "Arranca la cola SÓLO si estaba parada, según el log de Media Encoder: el play de la cola ALTERNA, así " +
       "que con la cola corriendo el ítem entra a su turno, y con la cola en pausa queda esperando que alguien " +
-      "la reanude —reanudarla seguiría también lo que se pausó—. El resumen dice cuál fue el caso. " +
+      "la reanude —reanudarla seguiría también lo que se pausó—. Si Media Encoder estaba CERRADO —lo mira el " +
+      "transporte—, lo que quedó en su log es de una sesión anterior, y la arranca igual. El resumen dice cuál fue el caso. " +
       "Y con un preset QuickTime (.mov) Media Encoder IGNORA el rango y exporta la secuencia entera " +
       "(medido): esa combinación rebota antes de tocar nada.\n" +
       "Corto: `ya`; largo: `ame`. `lote` no existe más: no exportaba nada.\n\n" +

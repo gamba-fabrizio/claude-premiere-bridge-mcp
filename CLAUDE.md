@@ -175,6 +175,9 @@ Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que
   reordena la lista y clonar sí. Un verbo que lleva un clip por encima de otro lo clona; y una pista de
   mentira en `test.js` devuelve la lista en SU orden, no ordenada, o el test no puede verlo.
   → `docs/api.md`, *Pistas y clips*
+- **Un comando sale de `intercambio/` al contestar Y al vencer, y el panel no ejecuta el que encuentra al
+  cargar**: con Premiere caído, el que quedaba adentro se repetía al reabrir. Las dos mitades hacen falta:
+  la segunda cubre al cliente que muere sin llegar a vencer. → `crashes.md`
 - **Un pendiente se cierra en la misma tanda que su trabajo**: uno vencido se lee con la misma
   confianza que uno cierto. → `verificacion.md`
 
@@ -213,14 +216,16 @@ no la tienen estén **declarados a propósito** en una lista. El default —no h
 
 ## Pendientes abiertos (2026-10-01)
 
-- **El espaciado es una constante y el borde depende del peso del proyecto.** Tres pesos medidos, y la
-  fórmula no sale: el liviano y el intermedio aguantan al ritmo mínimo del transporte (~200 ms), y sólo
-  el pesado cae. Un proyecto más pesado que el medido sigue sin medir. → `crashes.md`
+- **El borde de ~200 ms del espaciado no se reproduce hoy.** Mató a un proyecto pesado en 26.3.2 y a un
+  banco pesado en 26.5; el 2026-10-01 una copia pesada, con la secuencia y el material de aquel banco,
+  aguantó al ritmo mínimo del transporte seis de seis. Si lo movió el proyecto o el bridge no está
+  separado. Los 500 ms quedan. → `crashes.md`
 - **Las listas de la API a veces traen un null**: los items de un bin en `importar`, y los de
   `getTrackItems` en el `armarSecuencia` de un proyecto pesado. Está blindado y sigue sin causa: en un
   proyecto de prueba no se reprodujo.
-- **Los arreglos del panel contra los crashes de la interfaz y del recolector están SIN MEDIR**: se
-  miden por tasa, con tandas largas. Son los dos marcados como PROPUESTA en `plugin/index.js`.
+- **Los crashes de la interfaz no tienen arreglo medido**: no se reproducen a pedido. Los del panel
+  —marcados como PROPUESTA en `plugin/index.js`— no mueven lo acumulado: medido por tasa el 2026-10-01,
+  Premiere cayó igual que antes. → `crashes.md`
 
 Cerrados el 2026-09-23, medidos en vivo: el reloj de `armarSecuencia` (pone el formato de display con
 los fps y lo relee), el `frame` truncado (espera el cierre del PNG) y `audio.js` pisando la

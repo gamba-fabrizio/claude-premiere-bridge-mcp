@@ -85,6 +85,20 @@ async function asegurarCarpeta() {
   await fs.mkdir(CARPETA, { recursive: true });
 }
 
+/*
+ * ¿MEDIA ENCODER ESTÁ ABIERTO? Lo ve el transporte y no el panel, que adentro de Premiere no puede listar
+ * procesos (2026-10-01). `exportar` con `ame` decide si arranca la cola por la última línea del log de AME,
+ * y el log no registra cuándo AME se abre o se cierra: si se cayó encodeando, queda un «Started» de una
+ * sesión muerta. Se reconoce por su EJECUTABLE, como Premiere en `recargar.js`. `null` si `ps` no contestó,
+ * y el panel lo trata como no saber: sigue creyéndole al log.
+ */
+function ameAbierto() {
+  try {
+    const o = require("child_process").execFileSync("ps", ["-axo", "comm="], { encoding: "utf8", timeout: 5000 });
+    return o.split("\n").some((l) => /\/Contents\/MacOS\/Adobe Media Encoder[^/]*$/.test(l.trim()));
+  } catch (e) { return null; }
+}
+
 /**
  * Manda un comando y espera la respuesta.
  *
@@ -213,6 +227,11 @@ async function enviar(cmd, params = {}, msTimeout = MS_TIMEOUT) {
     const problema = PREVUELO[cmd](params);
     if (problema) throw new Error(problema);
   }
+  /* En el transporte y no en la herramienta MCP: los scripts del repo llaman por acá y saltean el servidor.
+     Si quien llama ya lo dice, manda lo suyo. */
+  if (cmd === "exportar" && params && params.modo === "ame" && params.ameAbierto === undefined) {
+    params = Object.assign({}, params, { ameAbierto: ameAbierto() });
+  }
   await asegurarCarpeta();
 
   /*
@@ -275,6 +294,19 @@ async function enviar(cmd, params = {}, msTimeout = MS_TIMEOUT) {
     }
   }
 
+  /*
+   * Y SE SACA TAMBIÉN AL VENCER, si sigue siendo ESTE (2026-10-01). Borrarlo sólo al contestar dejaba
+   * afuera justo el caso de un Premiere que se cae con el comando adentro: el armado de 216 clips que lo
+   * tiró quedó en la carpeta, y lo habría ejecutado el panel siguiente apenas cargara, o un Reload con el
+   * proyecto abierto, que es cuando la repetición sí entra. Quien llama ya se rindió: que corra después
+   * nunca es lo que espera. Si el panel lo está ejecutando, sacarlo no lo corta. Y si otro cliente
+   * escribió encima, el comando ya no es este y no se toca.
+   */
+  const quedo = await leerJson(ARCHIVO_COMANDO);
+  if (quedo && quedo.id === id) {
+    try { await fs.unlink(ARCHIVO_COMANDO); } catch (e) { /* ya no estaba */ }
+  }
+
   // Distinguir "se cayó mientras trabajaba" de "tardó" ayuda a decidir si
   // reintentar o ir a mirar Premiere.
   const edadFinal = await edadDelLatido();
@@ -286,4 +318,4 @@ async function enviar(cmd, params = {}, msTimeout = MS_TIMEOUT) {
   );
 }
 
-module.exports = { enviar, edadDelLatido, CARPETA, ponerTraba, sacarTraba, leerTraba };
+module.exports = { enviar, edadDelLatido, CARPETA, ponerTraba, sacarTraba, leerTraba, ameAbierto };
