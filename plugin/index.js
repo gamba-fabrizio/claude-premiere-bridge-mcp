@@ -10,6 +10,7 @@
  * mira la frescura ANTES de mandar nada y contesta "el panel no está abierto"
  * al instante. Verificado: UXP no frena este timer cuando el panel pierde el
  * foco, así que el bridge sigue vivo mientras editás — que es cuando hace falta.
+ * Lo que SÍ lo frena es macOS, con Premiere tapado entero u oculto: ver `vuelta`.
  */
 
 /*
@@ -73,7 +74,8 @@ const elUltimo = document.getElementById("ultimo");
  */
 const MAX_TEXTO_PANEL = 160;
 const CADA_VUELTAS_PANEL = 25;   // ~5 s con MS_POLL 200
-const CADA_VUELTAS_LATIDO = 5;   // el latido al disco: ~1 por segundo con MS_POLL 200
+const MS_ENTRE_LATIDOS = 1000;   // el latido al disco: uno por segundo, por RELOJ y no por vueltas
+let ultimoLatido = 0;
 function mostrar(el, texto) {
   const corto = texto.length > MAX_TEXTO_PANEL ? texto.slice(0, MAX_TEXTO_PANEL) + "…" : texto;
   if (el.textContent !== corto) el.textContent = corto;
@@ -132,7 +134,14 @@ async function vuelta() {
   // del 2026-09-29 cayeron en la recolección de esos envoltorios (`UserWeakCallback`, en el hilo de
   // scripts). El servidor lo da por muerto a los 5 s, así que un segundo sobra. El poleo de comandos
   // sigue en cada vuelta: la latencia no cambia.
-  if (vueltas % CADA_VUELTAS_LATIDO === 1) {
+  //
+  // Y POR RELOJ, no "cada cinco vueltas" (2026-10-07, un reporte de uso). Con Premiere tapado entero por
+  // otra ventana, macOS frena el timer del panel: medido, una vuelta cada 4 a 11 s. Contado por
+  // vueltas, eso era un latido cada 20 a 55 s, y el transporte, que espera 25 s a que avance, daba
+  // por muerto a un panel que seguía leyendo comandos en cada vuelta. Por reloj, frenado late en
+  // cada vuelta; sin frenar, sigue siendo uno por segundo.
+  if (Date.now() - ultimoLatido >= MS_ENTRE_LATIDOS) {
+    ultimoLatido = Date.now();
     try { await escribir("latido.json", { vuelta: vueltas, cargadoEn: CARGADO_EN }); }
     catch (e) { mostrar(elEstado, "No se pudo escribir el latido: " + e.message); return; }
   }

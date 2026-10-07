@@ -2949,6 +2949,26 @@ async function inOutMedio(params) {
   };
 }
 
+/* Lo que no tiene tiempo: dos pedazos de una foto arrancan en el mismo punto sin repetir nada. */
+const ES_IMAGEN_FIJA = /\.(png|jpe?g|tiff?|psd|gif|bmp|heic|webp|ai|eps|svg)$/i;
+
+/*
+ * FRAGMENTOS SEGUIDOS DEL MISMO MEDIO QUE SE PISAN EN LA FUENTE (2026-10-07, un reporte de uso). Ese tramo sale
+ * dos veces y en el timeline no se ve: así quedó una frase repetida en el módulo de un curso, y `revisar`
+ * recién lo marca después de armar. `armarSecuencia` lo AVISA y no lo rebota, porque una repetición puede
+ * ser deliberada. Sólo los SEGUIDOS, que son los que quedan pegados en la secuencia.
+ */
+function fragmentosQueSePisan(fragmentos, medioDe, umbral) {
+  const pisados = [];
+  for (let i = 1; i < fragmentos.length; i++) {
+    const a = fragmentos[i - 1], b = fragmentos[i], medio = medioDe(a);
+    if (medio !== medioDe(b) || ES_IMAGEN_FIJA.test(medio)) continue;
+    const pisa = Math.min(a.hasta, b.hasta) - Math.max(a.desde, b.desde);
+    if (pisa > umbral) pisados.push({ fragmentos: [i - 1, i], medio: medio, segundos: Number(pisa.toFixed(3)) });
+  }
+  return pisados;
+}
+
 async function armarSecuencia(params) {
   const project = await getProyecto();
 
@@ -3410,6 +3430,11 @@ async function armarSecuencia(params) {
   const nombreReal = String(nueva.name || nombre);
   const cortoPunto = nombre.lastIndexOf(".") !== -1 && nombreReal === nombre.slice(0, nombre.lastIndexOf("."));
 
+  /* Más de un cuadro y medio, como en `revisar`: un cuadro solo es redondeo. Por el medio RESUELTO, que es
+     el mismo aunque dos fragmentos lo nombren distinto. */
+  const pisados = fragmentosQueSePisan(fragmentos, (f) => cache[f.medio || params.medio].nombre,
+    ajustes && ajustes.fps ? 1.5 / ajustes.fps : 0.06);
+
   delete A_MEDIAS.armarSecuencia;
   return {
     resumen:
@@ -3431,6 +3456,10 @@ async function armarSecuencia(params) {
         : "") +
       `: ${puestos.length} de ${fragmentos.length} fragmentos ` +
       `de ${Object.keys(porMedio).length} medio(s), ${cursor.toFixed(2)}s en total` +
+      (pisados.length
+        ? ` · OJO: ${pisados.length} par(es) de fragmentos seguidos del mismo medio SE PISAN EN LA FUENTE y ese tramo ` +
+          `sale dos veces: ${pisados.map((p) => `${p.fragmentos.join(" y ")} (${p.segundos} s de ${p.medio})`).join(", ")}`
+        : "") +
       (sacados ? ` · se vació el clip que metió createSequenceFromMedia (${sacados})` : "") +
       (fallidos.length ? ` · FALLARON ${fallidos.length}: ${fallidos.join(" | ")}` : "") +
       (capas.length ? ` · ${capasPuestas.length - capasRotas.length}/${capas.length} capas` : "") +
@@ -3466,6 +3495,7 @@ async function armarSecuencia(params) {
     reajuste: reajuste,
     inOut: inOut,
     puestos: puestos,
+    pisados: pisados,
     capasPuestas: capasPuestas,
     audioApagado: audioApagado,
     sinReleer: sinReleer,
@@ -9992,6 +10022,10 @@ async function revisar(params) {
   const pistas = [];
   const apagadas = [];
   let ceros = 0, solapes = 0, huecosChicos = 0, huecosGrandes = 0, juntas = 0, deliberados = 0, fueraDeOrden = 0;
+  let repitenSinMedir = 0;
+  const lugaresQueRepiten = new Set();
+  // Más de UN cuadro: con uno solo hubo cuatro casos en el mismo módulo, y eran redondeo.
+  const umbralRepite = tpf ? tpf * 1.5 : TICKS_POR_SEGUNDO * 0.06;
 
   for (const g of grupos) {
     for (let t = 0; t < g.cuantas; t++) {
@@ -10046,7 +10080,7 @@ async function revisar(params) {
 
       const info = {
         pista: etiqueta, clips: l.length, fueraDeOrden: fuera,
-        ceros: [], solapes: [], huecos: [], juntas: [], cortesConMotionDistinto: 0
+        ceros: [], solapes: [], huecos: [], juntas: [], repiten: [], repitenSinMedir: 0, cortesConMotionDistinto: 0
       };
       // La firma de Motion se lee solo para los candidatos y se cachea: cada
       // clip aparece en dos pares como mucho, y no hace falta para el resto.
@@ -10054,6 +10088,23 @@ async function revisar(params) {
       const firmaDe = async (i) => {
         if (!(i in firmas)) firmas[i] = g.letra === "V" ? await firmaMotion(project, items[l[i].indice]) : null;
         return firmas[i];
+      };
+      // Lo mismo con la velocidad y el medio, que sólo hacen falta para los vecinos del mismo nombre.
+      const velocidades = {}, medios = {};
+      const velocidadEn = async (i) => {
+        if (!(i in velocidades)) velocidades[i] = await velocidadDe(items[l[i].indice]);
+        return velocidades[i];
+      };
+      const medioDe = async (i) => {
+        if (!(i in medios)) {
+          try {
+            const pi = await items[l[i].indice].getProjectItem();
+            let ruta = null;
+            try { const ci = ppro.ClipProjectItem.cast(pi); ruta = ci ? String(await ci.getMediaFilePath()) : null; } catch (e) { ruta = null; }
+            medios[i] = { nombre: String(pi.name), ruta: ruta || null };
+          } catch (e) { medios[i] = null; }
+        }
+        return medios[i];
       };
 
       for (const c of l) {
@@ -10065,6 +10116,31 @@ async function revisar(params) {
       for (let i = 1; i < l.length; i++) {
         const a = l[i - 1], b = l[i];
         const d = b.ini - a.fin;
+        /*
+         * REPITE MATERIAL (2026-10-07, un reporte de uso). Dos vecinos del mismo medio, pegados o con un hueco
+         * chico, que se PISAN EN LA FUENTE: el timeline está limpio y ese tramo sale dos veces. En el módulo
+         * de un curso, uno llegaba a 434,88 s del medio y el siguiente arrancaba en 432,00, y la frase sonaba
+         * dos veces con `revisar` diciendo "sin solapes": sólo miraba el TIMELINE.
+         *
+         * Se mide SÓLO a 1x, con lo que ya se leyó —la salida de fuente es la entrada más la duración—, y
+         * no es un atajo: a otra velocidad no está medido si `getInPoint` es punto de fuente o va escalado
+         * (`relojDelClip` y `radiografia` suponen cosas distintas). Esos pares se cuentan como sin medir, para
+         * que un "sin problemas" no los incluya. Y el medio se confirma por la RUTA, que además deja afuera lo
+         * que no tiene tiempo: dos cámaras que numeran igual dejan dos medios con el mismo nombre, y dos
+         * pedazos de una misma foto, un título o una capa de ajuste arrancan en el mismo punto sin repetir nada.
+         */
+        if (d >= -1 && d <= (tpf ? topeFrames * tpf : 1) && a.nombre === b.nombre && a.entrada !== null && b.entrada !== null) {
+          if ((await velocidadEn(i - 1)) !== 1 || (await velocidadEn(i)) !== 1) info.repitenSinMedir++;
+          else {
+            const pisa = Math.min(a.entrada + (a.fin - a.ini), b.entrada + (b.fin - b.ini)) - Math.max(a.entrada, b.entrada);
+            const ma = pisa > umbralRepite ? await medioDe(i - 1) : null, mb = ma ? await medioDe(i) : null;
+            if (ma && mb && ma.ruta && ma.ruta === mb.ruta && !ES_IMAGEN_FIJA.test(ma.ruta)) {
+              info.repiten.push({ en: mmss(b.ini), segundos: enSeg(b.ini), indices: [a.indice, b.indice],
+                                  medio: ma.nombre, segundosRepetidos: enSeg(pisa), frames: enFrames(pisa) });
+              lugaresQueRepiten.add(ma.nombre + "\u0000" + Math.round(b.ini / (tpf || 1)));
+            }
+          }
+        }
         if (d < -1) {
           info.solapes.push({ en: mmss(b.ini), segundos: enSeg(b.ini), frames: enFrames(-d) });
         } else if (d > 1) {
@@ -10103,6 +10179,7 @@ async function revisar(params) {
       fueraDeOrden += fuera.length;
       ceros += info.ceros.length;
       solapes += info.solapes.length;
+      repitenSinMedir += info.repitenSinMedir;
       huecosChicos += chicos.length;
       huecosGrandes += info.huecosGrandes;
       juntas += info.juntas.length;
@@ -10128,11 +10205,16 @@ async function revisar(params) {
   }
   if (ceros) partes.push(`${ceros} clip(s) de DURACIÓN CERO`);
   if (solapes) partes.push(`${solapes} solape(s)`);
+  /* Por LUGAR y no por par: el video y cada pista de su audio son un par cada uno, y es una sola repetición. */
+  if (lugaresQueRepiten.size) {
+    partes.push(`${lugaresQueRepiten.size} lugar(es) que REPITEN MATERIAL: dos vecinos del mismo medio se pisan en la ` +
+      `fuente y ese tramo sale dos veces`);
+  }
   if (huecosChicos) partes.push(`${huecosChicos} hueco(s) de hasta ${topeFrames} frame(s)`);
   if (juntas) partes.push(`${juntas} junta(s) removible(s)`);
 
   const detalle = pistas
-    .filter((p) => p.fueraDeOrden.length || p.ceros.length || p.solapes.length || p.huecosChicos || p.juntas.length)
+    .filter((p) => p.fueraDeOrden.length || p.ceros.length || p.solapes.length || p.repiten.length || p.huecosChicos || p.juntas.length)
     .map((p) => {
       const q = [];
       if (p.fueraDeOrden.length) {
@@ -10141,6 +10223,10 @@ async function revisar(params) {
       }
       if (p.ceros.length) q.push(`CERO en ${p.ceros.map((x) => x.en).join(", ")}`);
       if (p.solapes.length) q.push(`solapes en ${p.solapes.map((x) => `${x.en} (${x.frames}f)`).join(", ")}`);
+      if (p.repiten.length) {
+        q.push(`REPITE MATERIAL en ${p.repiten.slice(0, 6).map((x) => `[${x.indices.join("]/[")}] ${x.en} (${x.segundosRepetidos} s de ${x.medio})`).join(", ")}` +
+          (p.repiten.length > 6 ? ` y ${p.repiten.length - 6} más` : ""));
+      }
       const chicos = p.huecos.filter((h) => h.frames !== null && h.frames <= topeFrames);
       if (chicos.length) q.push(`huecos en ${chicos.map((x) => `${x.en} (${x.frames}f)`).join(", ")}`);
       if (p.juntas.length) q.push(`${p.juntas.length} junta(s) en ${p.juntas.slice(0, 6).map((x) => x.en).join(", ")}`);
@@ -10154,6 +10240,8 @@ async function revisar(params) {
       ` · ${pistas.length} pista(s) con contenido, ${pistas.reduce((n, p) => n + p.clips, 0)} clips` +
       (huecosGrandes ? ` · ${huecosGrandes} hueco(s) grande(s), probablemente a propósito` : "") +
       (deliberados ? ` · ${deliberados} corte(s) de video continuos pero con distinto Motion: son deliberados, NO unir` : "") +
+      (repitenSinMedir ? ` · ${repitenSinMedir} par(es) de vecinos con el mismo nombre a otra velocidad que 1x (o sin poder leerla): ` +
+        "si repiten material NO se midió" : "") +
       (tpf === null ? " · OJO: no se pudo leer el timebase, los huecos van sin medir en frames" : "") +
       (detalle.length ? `\n  ${detalle.join("\n  ")}` : ""),
     secuencia: sequence.name,
@@ -10162,6 +10250,7 @@ async function revisar(params) {
     pistasApagadas: apagadas,
     fueraDeOrden: fueraDeOrden,
     ceros: ceros, solapes: solapes,
+    repitenMaterial: lugaresQueRepiten.size, repitenSinMedir: repitenSinMedir,
     huecosChicos: huecosChicos, huecosGrandes: huecosGrandes,
     juntasRemovibles: juntas,
     cortesDeliberados: deliberados,

@@ -4,7 +4,7 @@
 > estaba. «Arriba» y «abajo» se refieren a aquel archivo único. Los títulos no se
 > tocaron: el código que cita una sección «de CLAUDE.md» la encuentra acá con `grep`.
 
-## Vigente (2026-09-23)
+## Vigente (2026-10-07)
 
 - **Antes de teorizar sobre un crash, leé el reporte**: son cinco regímenes distintos, con firmas
   distintas. → «Los regímenes que tiran Premiere»
@@ -35,6 +35,9 @@
   por lo ACUMULADO», «La tasa con el panel nuevo»
 - **Un comando que quedó adentro cuando se cayó Premiere ya no se repite al reabrir.** → «El comando que
   quedó adentro»
+- **Con Premiere tapado entero, oculto o con el protector, App Nap FRENA el panel** a una vuelta cada
+  10–20 s: el latido va por RELOJ para que el transporte lo vea vivo, y cada llamada tarda eso. Sin App
+  Nap (`NSAppSleepDisabled`) late normal. → «Premiere tapado: App Nap frena el panel»
 
 # Los regímenes que tiran Premiere
 
@@ -457,3 +460,49 @@ Los dos arreglos: el transporte saca su comando también al vencer la espera, si
 panel no ejecuta lo que encuentra en su primera lectura, porque el transporte sólo escribe después de ver
 latir a un panel y este escribe su primer latido antes de leer. El segundo cubre lo que el primero no: un
 cliente que se muere sin llegar a vencer. `test.js` ejecuta los dos contra discos de mentira, con mutación.
+
+## Premiere tapado: App Nap frena el panel, y el latido por vueltas lo hacía parecer muerto (2026-10-07)
+
+Una sesión de uso lo reportó: `estado` contestaba "el panel no latió" varias veces durante unos 5 minutos, con
+Premiere vivo, a 0 % de CPU y sin reporte de crash. El latido avanzaba +5 cada ~55 s, contra uno por segundo. Al
+frente había un navegador con un video, la máquina llevaba 15 minutos sin uso, y no había protector ni pantalla
+bloqueada. Volvió a latir normal apenas Premiere pasó al frente.
+
+Eran dos piezas juntas. macOS frena con App Nap a una app tapada entera, y con ella el timer del panel. Y el
+latido se escribía cada CINCO VUELTAS, no por reloj: con la vuelta estirada, eso daba un latido cada casi un
+minuto. El transporte espera 25 s a que avance, así que lo daba por muerto, aunque el panel seguía leyendo
+comandos en cada vuelta.
+
+Medido en un proyecto de prueba, con Premiere tapado por otra ventana:
+
+```
+panel                         Premiere            entre latidos       vueltas
+viejo (cada 5 vueltas)        tapado, 5 min       17 a 43 s *         +5 por latido
+nuevo (por reloj, 1 s)        al frente           1,01 s              ~5 por segundo
+nuevo                         tapado, 3 min       10,2 a 20,5 s       +1 por latido (a veces 2–4 juntas)
+nuevo, sin App Nap            tapado, 200 s       1,01 a 1,02 s       ~5 por segundo
+```
+
+\* Con huecos más cortos, de 3 a 11 s, cuando algo lo despertaba, y un tramo de 35 s a uno por segundo.
+
+- **App Nap entra al minuto.** El panel nuevo siguió a un latido por segundo los primeros 60 s tapado, y
+  después pasó a una vuelta cada 10,2 s, y a ratos cada ~20. A veces dos a cuatro vueltas salen juntas: el
+  sistema junta los disparos atrasados.
+- **Es App Nap, confirmado.** Con `defaults write com.adobe.PremierePro.26 NSAppSleepDisabled -bool YES` y
+  Premiere reiniciado, tapado 200 s, el hueco más largo fue de 1,02 s. Cuesta ~3 % de CPU con Premiere quieto,
+  contra ~0 % dormido. Va en el dominio del bundle id: un Premiere 27 arranca con App Nap otra vez, y el
+  latido por reloj es la red para ese caso.
+- **Un AppleEvent no lo despierta.** Después de un `get name` a Premiere, el hueco siguiente fue igual de 20 s.
+- **Con el panel frenado, `estado` contesta igual, lento.** Con el viejo, siete llamadas tardaron de 3 a 27 s y
+  ninguna falló: con latidos cada ~30 s, la espera de 25 s los alcanzó. El ~minuto del reporte, después de
+  15 minutos quieto, no se reprodujo. Con el nuevo, cuatro de cuatro en 12 a 18 s.
+
+**El arreglo.** El latido va por reloj (`MS_ENTRE_LATIDOS`): sin frenar es uno por segundo como antes, y frenado
+late en cada vuelta. El transporte, sin el proceso de Premiere, lo dice al instante en vez de esperar 25 s al
+panel. Con el proceso vivo y el latido quieto, el error dice la antigüedad del latido y su vuelta: si sube entre
+una llamada y otra, el panel está frenado y no caído. `test.js` ejecuta el panel con un reloj de mentira, a 200 ms
+y a 11 s por vuelta, y el transporte con un `ps` y un reloj de mentira, con mutación: 4 de 4.
+
+**Lo que queda.** Con huecos de 20 s, a la espera de 25 s le queda poco margen, y un App Nap más profundo no se
+midió con el panel nuevo: si pasa de 25 s, el error ahora dice qué es. Un protector de pantalla tapa todo, así
+que probablemente frene igual; no se midió.

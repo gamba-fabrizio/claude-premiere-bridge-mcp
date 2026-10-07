@@ -1,6 +1,6 @@
 
 
-## Vigente (2026-09-23)
+## Vigente (2026-10-07)
 
 - **Una guarda se verifica haciéndola fallar**, mirando por posición y sin comentarios ni strings.
   → «Una guarda se verifica HACIÉNDOLA FALLAR»
@@ -19,6 +19,8 @@
 - **Un item nulo no voltea un recorrido: se cuenta.** → «Recorrer bins: un item nulo»
 - **Un nombre parcial que engancha más de uno rebota.** → «El match parcial del proyecto»
 - **`clips` y `revisar` leen la salida de cada pista.** → «Una pista con el OJO APAGADO»
+- **`revisar` marca a los vecinos que REPITEN MATERIAL en la fuente**, sólo a 1x y confirmados por la ruta;
+  a otra velocidad, sin medir. → «`revisar` no veía el material REPETIDO»
 - **Un pendiente se cierra en la misma tanda que su trabajo.** → «Un pendiente que no se cierra»
 
 # Método de verificación
@@ -284,6 +286,45 @@ distinguirlos desde adentro del texto. Al cerrar un trabajo, cerrar también su 
 tanda. Y cada tanto, cotejar la lista contra el CÓDIGO en vez de contra la memoria: los dos se
 encontraron con un `grep` de "SIGUE|FALTA|sin hacer" y cinco minutos de leer lo que supuestamente
 faltaba.
+
+## `revisar` no veía el material REPETIDO: dos vecinos que se pisan en la fuente (2026-10-07)
+
+Una sesión de uso lo encontró leyendo el `.prproj` del módulo de un curso: dos clips vecinos del mismo medio,
+en V1 y con su audio, SE PISABAN EN LA FUENTE. El primero llegaba a 434,88 s del medio y el siguiente arrancaba
+en 432,00, así que una frase de 2,88 s sonaba dos veces. `revisar` contestaba "sin solapes", y era cierto: sólo
+miraba el TIMELINE, y ahí estaban pegados. La única comparación de fuente era la de la junta, que busca lo
+contrario: un corte continuo.
+
+**El chequeo.** Vecinos de una pista, pegados o con un hueco de hasta `topeFrames`, con el mismo nombre de
+clip y los dos a 1x. El intervalo de fuente de cada uno es su entrada más su duración en el timeline, así que
+no cuesta lecturas nuevas. Si se pisan más de un cuadro y medio —un cuadro solo es redondeo: el mismo módulo
+tenía cuatro—, se confirma que es el mismo medio por la RUTA. La ruta deja afuera dos cámaras que numeran igual
+y lo que no tiene tiempo: dos pedazos de una foto, un título o una capa de ajuste arrancan en el mismo punto sin
+repetir nada. El resumen cuenta LUGARES, porque el video y cada stream de audio de un mismo par son una sola
+repetición.
+
+**Sólo a 1x, y no es un atajo.** A otra velocidad no está medido si `getInPoint` devuelve el punto de fuente o
+uno escalado: `relojDelClip` supone lo segundo y `radiografia` lo primero. Esos pares se cuentan como "sin
+medir", para que un "sin problemas" no los incluya.
+
+Medido:
+
+```
+proyecto de prueba, un clip de video y 6 streams de audio, fragmentos 2–8, 6–12, 11,96–16, una foto dos veces
+  revisar: 1 lugar, en V1 y A1–A6, 2 s (50 cuadros) · el pisado de un cuadro y la foto, sin marcar
+
+el módulo del reporte, leyendo el .prproj guardado en memoria (Premiere no lo abrió)
+  marcaría el par de V1 y el de A1, 2,88 s (72 cuadros) · los cuatro de un cuadro, 1,00 exacto, sin marcar
+```
+
+**`armarSecuencia` ahora lo avisa antes de que se escuche.** Dos fragmentos SEGUIDOS del mismo medio que se
+pisan en la fuente salen en `pisados` y en el resumen, con el mismo umbral y sin fotos. Avisa y no rebota,
+porque una repetición puede ser a propósito. `test.js` ejecuta `revisar` sobre una secuencia de mentira y
+`fragmentosQueSePisan` con los mismos casos, con mutación: 8 de 8.
+
+Lo que no ve: un clip RENOMBRADO en el timeline (el filtro es el nombre del clip, para no leer el medio de
+todos), una secuencia anidada (no tiene ruta) y los pares a otra velocidad. Y una repetición deliberada
+también se marca: es un hallazgo, no una orden.
 
 ## Cerrados: casos resueltos, acotados o desmentidos
 

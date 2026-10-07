@@ -162,7 +162,7 @@ claude mcp add premiere-bridge --scope user -- node /RUTA/A/TU/COPIA/premiere-br
 | `premiere_guardar` | Guarda el proyecto, y comprueba que el archivo se escribió |
 | `premiere_importar` | Importa archivos al panel de proyecto, opcionalmente a un bin; no necesita secuencia activa |
 | `premiere_bins` | Lista el árbol de bins, crea los que falten, mueve medios adentro y borra bins vacíos |
-| `premiere_revisar` | Recorre la secuencia y devuelve lo que quedó mal: clips fuera de orden en su pista —que no se dibujan—, ceros, solapes, huecos en frames, juntas |
+| `premiere_revisar` | Recorre la secuencia y devuelve lo que quedó mal: clips fuera de orden en su pista —que no se dibujan—, ceros, solapes, huecos en frames, juntas, y vecinos que repiten material en la fuente |
 
 Las de Motion operan sobre **el clip seleccionado**. Empezá por `premiere_estado`
 o `premiere_clips`: sin eso se escribe a ciegas.

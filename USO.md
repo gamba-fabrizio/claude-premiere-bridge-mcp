@@ -37,8 +37,10 @@ en `CLAUDE.md`.
 - **`frame` es la mejor verificación: mirá en vez de deducir.** Y cuando importa, MEDÍ el cuadro
   (la media): un negro y un vacío se ven iguales, y el visor muestra un PNG transparente como
   blanco. Una opacidad se mide en el ALFA del PNG: la luminancia no la ve.
-- **`revisar` después de cada tanda**: ceros, solapes, huecos en cuadros, juntas, y pistas con la
-  salida apagada. Verificar cada paso no verifica la tanda.
+- **`revisar` después de cada tanda**: ceros, solapes, huecos en cuadros, juntas, pistas con la
+  salida apagada, y vecinos del mismo medio que REPITEN MATERIAL —se pisan en la fuente y ese tramo
+  sale dos veces, con el timeline limpio—. Esto último sólo a 1x: los pares a otra velocidad los cuenta
+  como sin medir. Verificar cada paso no verifica la tanda.
 - **Un clip FUERA DE ORDEN en la lista de su pista no se dibuja ni sale en el export**, aunque `clips`
   lo lea en su lugar. Lo dejaba `cortar` hasta el 2026-09-30, y lo deja cualquier movimiento por API que
   pasa por encima de un vecino —`editar` ahora lo rebota—. `revisar` lo marca `FUERA DE ORDEN`. Se
@@ -82,7 +84,8 @@ en `CLAUDE.md`.
   un PNG limpiado entra con DOCE HORAS. Un still que ya quedó así NO se arregla
   reimportándolo —`importar` saltea lo que ya está—: se cura con `in_out_medio` `entrada: 0,
   salida: 5`. Y no se lo reconoce leyéndolo: se lee "sin marca", igual que un video sano; lo delata
-  insertarlo en una secuencia descartable.
+  insertarlo en una secuencia descartable. Si dos fragmentos SEGUIDOS del mismo medio se pisan en la
+  fuente, avisa (`pisados`): ese tramo va a salir dos veces. No lo rebota, por si es a propósito.
 - **La cola de `cortar` es un CLON**: trae efectos, nombre, apagado y el mismo audio en las mismas
   pistas, y no pisa nada. Con audio vinculado queda SIN VÍNCULO en Premiere —la API no crea
   vínculos—: el bridge la sigue emparejando, y a mano es Cmd+L. A otra velocidad que 1x rebota. Cada
@@ -151,9 +154,15 @@ en `CLAUDE.md`.
 - **Con la pantalla bloqueada no entra ningún macro de Keyboard Maestro**, y con el Privacy Mode de
   Jump fallan los que buscan por imagen. Los dos fallan callados. El protector de pantalla marca la
   sesión como bloqueada aunque no tenga contraseña: `--reiniciar` lo saca y vuelve a mirar.
-- **Y con el protector puesto el panel DEJA DE LATIR**: una tanda desatendida de más de media hora se
-  corta con "el panel no latió" y parece un crash. Mientras dure, `caffeinate -d`; y antes de dar a
-  Premiere por caído, mirá si el proceso sigue.
+- **Con Premiere tapado entero por otra ventana, oculto o con el protector, macOS lo FRENA (App Nap)**:
+  al minuto, el panel pasa a dar una vuelta cada 10 a 20 s, y cada llamada tarda eso. Contesta, lento.
+  Si igual sale "el panel no latió", el error dice la vuelta del latido: si subió en la llamada
+  siguiente, está frenado y no caído, y se destraba con Premiere al frente —que no se trae si el editor
+  está usando otra cosa—. Sin el proceso de Premiere, el error lo dice al instante. Para una tanda
+  desatendida, `caffeinate -d`, por el protector. Sin App Nap
+  (`defaults write com.adobe.PremierePro.26 NSAppSleepDisabled -bool YES`, y reiniciar Premiere) late
+  normal tapado, medido, a cambio de ~3 % de CPU quieto, y en esta máquina está puesta desde el
+  2026-10-07. Va por el bundle id: un Premiere 27 vuelve a dormirse hasta que se la pone de nuevo.
 - **A Media Encoder no se lo cierra mientras arranca**: un `quit` a los 21 s de abrirlo lo tiró, y ya
   arrancado cierra limpio con el `quit` común. Que el proceso se haya ido no prueba que cerró bien: mirá
   si quedó un `.ips` nuevo en `~/Library/Logs/DiagnosticReports`.

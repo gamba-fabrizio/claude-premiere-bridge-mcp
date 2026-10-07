@@ -178,6 +178,8 @@ Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que
 - **Un comando sale de `intercambio/` al contestar Y al vencer, y el panel no ejecuta el que encuentra al
   cargar**: con Premiere caído, el que quedaba adentro se repetía al reabrir. Las dos mitades hacen falta:
   la segunda cubre al cliente que muere sin llegar a vencer. → `crashes.md`
+- **Lo periódico del panel va por RELOJ, no por vueltas**: con Premiere tapado, App Nap estira la vuelta a
+  10–20 s, y el latido "cada cinco vueltas" hacía ver muerto a un panel que ejecutaba. → `crashes.md`
 - **Un pendiente se cierra en la misma tanda que su trabajo**: uno vencido se lee con la misma
   confianza que uno cierto. → `verificacion.md`
 
@@ -214,7 +216,7 @@ no la tienen estén **declarados a propósito** en una lista. El default —no h
   adentro de Premiere. **Mover el repo obliga a editar la del panel**, y `test.js` compara
   las dos.
 
-## Pendientes abiertos (2026-10-01)
+## Pendientes abiertos (2026-10-07)
 
 - **El borde de ~200 ms del espaciado no se reproduce hoy.** Mató a un proyecto pesado en 26.3.2 y a un
   banco pesado en 26.5; el 2026-10-01 una copia pesada, con la secuencia y el material de aquel banco,
@@ -226,6 +228,11 @@ no la tienen estén **declarados a propósito** en una lista. El default —no h
 - **Los crashes de la interfaz no tienen arreglo medido**: no se reproducen a pedido. Los del panel
   —marcados como PROPUESTA en `plugin/index.js`— no mueven lo acumulado: medido por tasa el 2026-10-01,
   Premiere cayó igual que antes. → `crashes.md`
+- **`getInPoint` a otra velocidad que 1x**: no está medido si devuelve el punto de fuente o uno escalado.
+  `radiografia` supone lo primero —su `salida` suma la duración por la velocidad— y nunca se midió a otra
+  velocidad; `relojDelClip` sí, pero con keyframes, que no dicen cuál de las dos es la entrada. Por eso
+  `revisar` no mide repeticiones a otra velocidad. Hace falta un clip a otra velocidad, que la API no pone:
+  a mano. → `verificacion.md`
 
 Cerrados el 2026-09-23, medidos en vivo: el reloj de `armarSecuencia` (pone el formato de display con
 los fps y lo relee), el `frame` truncado (espera el cierre del PNG) y `audio.js` pisando la

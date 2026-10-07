@@ -587,6 +587,8 @@ server.registerTool(
       "sin avisar.\n\n" +
       "El audio vinculado del medio viene solo y alineado. Los cortes se pegan al frame, así que " +
       "pueden arrancar hasta un frame antes de lo pedido.\n\n" +
+      "Si dos fragmentos SEGUIDOS del mismo medio se pisan en la fuente, lo avisa (`pisados`): ese " +
+      "tramo va a sonar dos veces. No lo rebota, por si es a propósito.\n\n" +
       "**La secuencia hereda tamaño y fps del material**, que con una cámara vertical moderna son " +
       "2160x3840 @ 50fps. Con `ancho`/`alto`/`fps` se pide otra cosa, y se aplica con la " +
       "secuencia todavía VACÍA: así los cortes snapean al frame que va desde el principio. " +
@@ -2373,7 +2375,10 @@ server.registerTool(
       "· HUECOS, medidos en FRAMES: los de 1 frame son cortes que cayeron entre frames y suenan " +
       "como un click; los grandes suelen ser material pendiente puesto a propósito, y van aparte.\n" +
       "· JUNTAS REMOVIBLES — dos clips pegados, mismo medio y continuos en el material, o sea un " +
-      "corte que no corta nada. Se limpian con el verbo `unirAudio`.",
+      "corte que no corta nada. Se limpian con el verbo `unirAudio`.\n" +
+      "· REPITE MATERIAL — dos vecinos del mismo medio que se PISAN EN LA FUENTE: el timeline está " +
+      "limpio y ese tramo se ve o se oye dos veces. Cuenta lugares: el video y su audio son uno. Sólo " +
+      "a 1x; los pares a otra velocidad los cuenta como sin medir. Una repetición deliberada también sale.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       proyecto: z

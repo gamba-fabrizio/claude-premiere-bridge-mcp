@@ -4253,6 +4253,101 @@ titulo("El orden de la lista de cada pista: `revisar` lo detecta y `editar` no l
 }
 
 /*
+ * REPITE MATERIAL (2026-10-07, un reporte de uso). Dos vecinos del mismo medio que se pisan en la FUENTE pasaban
+ * por `revisar` como "sin solapes": el timeline estaba limpio y la frase sonaba dos veces. Se EJECUTA sobre
+ * una secuencia de mentira con el caso que tiene que marcar y los que tienen que callar —un cuadro de pisado,
+ * que es redondeo; dos pedazos de una foto; dos cámaras con el mismo nombre de archivo; un salto atrás sin
+ * pisar—, y un par a 0,5x que va como sin medir. El audio del mismo par es el mismo lugar, no otro.
+ */
+titulo("`revisar` marca a los vecinos que REPITEN MATERIAL en la fuente, y nada más");
+{
+  const fija = (srcComandos.match(/^const ES_IMAGEN_FIJA = [^\n]+/m) || [""])[0];
+  const f = fija + "\n" + cuerpoDeFuncion(srcComandos, "async function revisar(");
+  const r = (() => {
+    if (!f) return { error: "falta `revisar`" };
+    const guion = `
+      const vm = require("vm"), T = 254016000000;
+      const clip = (n, d, h, entrada, ruta, v) => ({ getStartTime: async () => ({ ticks: String(d * T) }),
+        getEndTime: async () => ({ ticks: String(h * T) }), getInPoint: async () => ({ ticks: String(Math.round(entrada * T)) }),
+        getName: async () => n, velocidad: v === undefined ? 1 : v,
+        getProjectItem: async () => ({ name: n, getMediaFilePath: async () => ruta }) });
+      const pista = (repite) => [
+        clip("M", 0, 10, 100, "/m/M.mp4"),
+        clip("M", 10, 20, repite ? 108 : 110, "/m/M.mp4"),
+        clip("M", 20, 30, (repite ? 118 : 120) - 0.04, "/m/M.mp4"),
+        clip("M", 30, 40, 50, "/m/M.mp4"),
+        clip("foto", 40, 45, 3600, "/m/foto.png"), clip("foto", 45, 50, 3600, "/m/foto.png"),
+        clip("C0001", 50, 60, 0, "/camA/C0001.MP4"), clip("C0001", 60, 70, 5, "/camB/C0001.MP4"),
+        clip("L", 70, 80, 10, "/m/L.mp4", 0.5), clip("L", 80, 90, 15, "/m/L.mp4"),
+      ];
+      const secuencia = (repite) => ({ name: "S", getTimebase: async () => String(T / 25),
+        getVideoTrackCount: async () => 1, getAudioTrackCount: async () => 1,
+        getVideoTrack: async () => ({ getTrackItems: async () => pista(repite) }), getAudioTrack: async () => ({ getTrackItems: async () => pista(repite) }) });
+      const ctx = { TICKS_POR_SEGUNDO: T, ppro: { Constants: { TrackItemType: { CLIP: "CLIP" } }, ClipProjectItem: { cast: (pi) => pi } },
+        estadoDeSalida: async () => false, avisoDeSalida: () => "", firmaMotion: async () => null, velocidadDe: async (it) => it.velocidad };
+      vm.runInNewContext(${JSON.stringify(f)} + "\\nthis.revisar = revisar;", ctx);
+      const de = (x) => ({ lugares: x.repitenMaterial, sinMedir: x.repitenSinMedir,
+        pares: x.pistas.map((p) => p.repiten.map((q) => q.indices.join("/") + "@" + q.segundosRepetidos)), resumen: x.resumen.slice(0, 500) });
+      (async () => {
+        ctx.getProyectoYSecuencia = async () => ({ project: {}, sequence: secuencia(true) });
+        const con = de(await ctx.revisar({}));
+        ctx.getProyectoYSecuencia = async () => ({ project: {}, sequence: secuencia(false) });
+        const sin = de(await ctx.revisar({}));
+        console.log(JSON.stringify({ con, sin }));
+      })();`;
+    try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
+    catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
+  })();
+  if (r.error) mal("`revisar` no se pudo ejecutar contra una secuencia de mentira", r.error);
+  else if (JSON.stringify(r.con.pares) !== JSON.stringify([["0/1@2"], ["0/1@2"]]) || !/REPITEN MATERIAL/.test(r.con.resumen) ||
+           !/\[0\]\/\[1\]/.test(r.con.resumen)) {
+    mal("`revisar` no marca el par que se pisa 2 s en la fuente, o marca otro",
+        "el pisado de un cuadro es redondeo; una foto, un título o dos cámaras con el mismo nombre no repiten nada · " + JSON.stringify(r.con));
+  } else if (r.con.lugares !== 1) {
+    mal("`revisar` cuenta el video y el audio de una repetición como dos lugares", JSON.stringify(r.con));
+  } else if (r.con.sinMedir !== 2 || !/NO se midió/.test(r.con.resumen)) {
+    mal("`revisar` mide o calla el par a otra velocidad", "a 0,5x no está medido qué devuelve `getInPoint`: va como sin medir · " + JSON.stringify(r.con));
+  } else if (r.sin.lugares !== 0 || /REPITE/.test(r.sin.resumen)) {
+    mal("`revisar` marca una repetición en una secuencia sin pisados", "rechazar lo correcto es el peor fallo de una guarda · " + JSON.stringify(r.sin));
+  } else ok("`revisar` marca el par que se pisa 2 s, en V y en A como UN lugar; calla el cuadro, la foto, las dos cámaras y el salto atrás, y el 0,5x va sin medir");
+}
+
+/*
+ * Y `armarSecuencia` LO AVISA ANTES (2026-10-07). El pisado del curso salió de un armado, y nada lo dijo
+ * hasta que se escuchó. Se EJECUTA `fragmentosQueSePisan` con los casos de `revisar` —2 s se avisa; un
+ * cuadro, una foto, dos medios distintos y un pisado que no es de fragmentos SEGUIDOS, no— y por posición,
+ * que `armarSecuencia` lo llame y lo lleve al resumen.
+ */
+titulo("`armarSecuencia` avisa de los fragmentos seguidos del mismo medio que se pisan en la fuente");
+{
+  const fija = (srcComandos.match(/^const ES_IMAGEN_FIJA = [^\n]+/m) || [""])[0];
+  const f = cuerpoDeFuncion(srcComandos, "function fragmentosQueSePisan(");
+  const cArmar = (cuerpoDeFuncion(srcComandos, "async function armarSecuencia(") || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  let r = null;
+  try {
+    const ctx = {};
+    require("vm").runInNewContext(fija + "\n" + f + "\nthis.f = fragmentosQueSePisan;", ctx);
+    const de = (x) => x.medio, u = 1.5 / 25;
+    const caso = (lista) => ctx.f(lista, de, u).map((p) => p.fragmentos.join("/") + "@" + p.segundos);
+    r = {
+      pisa: caso([{ medio: "M", desde: 2, hasta: 8 }, { medio: "M", desde: 6, hasta: 12 }]),
+      cuadro: caso([{ medio: "M", desde: 2, hasta: 8 }, { medio: "M", desde: 7.96, hasta: 12 }]),
+      foto: caso([{ medio: "f.png", desde: 0, hasta: 3 }, { medio: "f.png", desde: 0, hasta: 3 }]),
+      otro: caso([{ medio: "M", desde: 2, hasta: 8 }, { medio: "N", desde: 6, hasta: 12 }]),
+      salteado: caso([{ medio: "M", desde: 2, hasta: 8 }, { medio: "N", desde: 0, hasta: 3 }, { medio: "M", desde: 6, hasta: 12 }]),
+    };
+  } catch (e) { r = { error: String(e.message || e).slice(0, 300) }; }
+  const iLlama = cArmar.indexOf("fragmentosQueSePisan(fragmentos"), iResumen = cArmar.indexOf("pisados.length");
+  if (r.error) mal("`fragmentosQueSePisan` no se pudo ejecutar", r.error);
+  else if (JSON.stringify(r.pisa) !== JSON.stringify(["0/1@2"])) mal("`fragmentosQueSePisan` no ve dos fragmentos seguidos que se pisan 2 s", JSON.stringify(r));
+  else if (r.cuadro.length || r.foto.length || r.otro.length || r.salteado.length) {
+    mal("`fragmentosQueSePisan` avisa de un cuadro, de una foto, de dos medios distintos o de fragmentos que no van seguidos", JSON.stringify(r));
+  } else if (iLlama === -1 || iResumen === -1) {
+    mal("`armarSecuencia` no avisa de los fragmentos que se pisan", "ese tramo sale dos veces y nada lo dice hasta que se escucha");
+  } else ok("`armarSecuencia` avisa de 2 s de pisado entre fragmentos seguidos, y no de un cuadro, una foto, otro medio o uno salteado");
+}
+
+/*
  * LOS CUATRO PARCHES DEL CHEQUEO DEL 2026-09-30, por posición y sin comentarios. `keyframe` juzga los
  * reemplazados por la transacción y no sólo por el conteo; `colocarLote` relee en la pista de audio lo
  * que no tiene video; el testigo de `copiarEfecto` lee la aparición elegida y no la primera; y
@@ -4457,43 +4552,57 @@ titulo("El estacionado de `cortar` frena en su tope, y la ventana se vacía sola
 
 /*
  * EL PANEL TOCA LO MENOS POSIBLE (2026-09-30). Se EJECUTA `plugin/index.js` en cien vueltas contra un
- * documento y un disco de mentira: el latido al disco una vez cada cinco vueltas —unas 20—, la pantalla
- * casi nunca, el resumen cortado, y un comando que igual se ejecuta y contesta.
+ * documento, un disco y un RELOJ de mentira: a 200 ms por vuelta, el latido al disco una vez por segundo
+ * —unas 20—, la pantalla casi nunca, el resumen cortado, y un comando que igual se ejecuta y contesta.
+ * Y FRENADO (2026-10-07): con Premiere tapado, macOS estira la vuelta a 4–11 s, y el latido tiene que ir
+ * en CADA vuelta. Contado "cada cinco vueltas" eran uno cada 20 a 55 s, y el transporte, que espera 25 s,
+ * daba por muerto a un panel que seguía ejecutando.
  */
-titulo("El panel escribe el latido una vez por segundo y la pantalla casi nunca");
+titulo("El panel escribe el latido una vez por segundo POR RELOJ, también frenado, y la pantalla casi nunca");
 {
   const src = fs.readFileSync(path.join(raiz, "plugin/index.js"), "utf8");
-  const r = (() => {
+  const correr = (msPorVuelta) => {
     const guion = `
       const vm = require("vm"), src = ${JSON.stringify(src)};
       const escrituras = {}, pantalla = { latido: 0, estado: 0, ultimo: 0 }, largo = { ultimo: 0 };
       const el = (id) => { let t = ""; return { get textContent() { return t; }, set textContent(v) { t = v; pantalla[id]++; largo[id] = String(v).length; } }; };
       const els = { latido: el("latido"), estado: el("estado"), ultimo: el("ultimo") };
-      let comando = null;
+      let comando = null, reloj = 1791000000000;
       const carpeta = {
         createFile: async (n) => ({ write: async () => { escrituras[n] = (escrituras[n] || 0) + 1; } }),
         getEntry: async (n) => { if (n !== "comando.json" || !comando) throw new Error("no"); return { read: async () => comando }; }
       };
       const ctx = { document: { getElementById: (id) => els[id] }, console: { log: () => {} }, window: { addEventListener: () => {} },
         uxp: { storage: { localFileSystem: { getEntryWithUrl: async () => carpeta } } }, setInterval: () => 1, clearInterval: () => {},
-        ejecutar: async () => ({ resumen: "x".repeat(500) }) };
+        Date: { now: () => reloj }, ejecutar: async () => ({ resumen: "x".repeat(500) }) };
       vm.runInNewContext(src, ctx);
       (async () => {
-        for (let i = 0; i < 100; i++) { if (i === 50) comando = JSON.stringify({ id: "c1", cmd: "estado", params: {} }); await ctx.vuelta(); }
+        for (let i = 0; i < 100; i++) {
+          if (i === 50) comando = JSON.stringify({ id: "c1", cmd: "estado", params: {} });
+          await ctx.vuelta(); reloj += ${msPorVuelta};
+        }
         console.log(JSON.stringify({ escrituras, pantalla, largo }));
       })();`;
     try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
     catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
-  })();
-  if (r.error) mal("el panel no se pudo ejecutar contra un documento de mentira", r.error);
+  };
+  const r = correr(200), frenado = correr(11000);
+  if (r.error || frenado.error) mal("el panel no se pudo ejecutar contra un documento de mentira", r.error || frenado.error);
   else if (!r.escrituras["latido.json"] || r.escrituras["latido.json"] > 25) {
     mal("el panel escribe el latido en cada vuelta", "cada escritura crea objetos nativos: cinco por segundo eran unos 36.000 por hora · " + JSON.stringify(r.escrituras));
+  } else if (r.escrituras["latido.json"] < 15) {
+    mal("el panel late menos de una vez por segundo", "el servidor da un latido por viejo a los 5 s · " + JSON.stringify(r.escrituras));
+  } else if (frenado.escrituras["latido.json"] !== 100) {
+    mal("con la vuelta frenada, el panel no late en cada vuelta",
+        "con Premiere tapado la vuelta tarda hasta 11 s: cada cinco vueltas es un latido por minuto, y el transporte lo da por muerto a los 25 s · " +
+        JSON.stringify(frenado.escrituras));
   } else if (r.pantalla.latido > 5) {
     mal("el panel reescribe su pantalla en cada vuelta", "cuatro crashes de la noche del 2026-09-29 cayeron en el dibujo de la interfaz · " + JSON.stringify(r.pantalla));
-  } else if (r.escrituras["respuesta.json"] !== 1 || r.largo.ultimo > 161) {
-    mal("el panel dejó de contestar el comando, o muestra el resumen entero", JSON.stringify(r));
+  } else if (r.escrituras["respuesta.json"] !== 1 || r.largo.ultimo > 161 || frenado.escrituras["respuesta.json"] !== 1) {
+    mal("el panel dejó de contestar el comando, o muestra el resumen entero", JSON.stringify({ r, frenado }));
   } else {
-    ok(`el panel escribe el latido ${r.escrituras["latido.json"]} veces en 100 vueltas, la pantalla ${r.pantalla.latido}, y contesta con el resumen cortado`);
+    ok(`el panel escribe el latido ${r.escrituras["latido.json"]} veces en 100 vueltas de 200 ms y en las 100 de 11 s, ` +
+       `la pantalla ${r.pantalla.latido}, y contesta con el resumen cortado`);
   }
 }
 
@@ -4635,6 +4744,70 @@ titulo("El transporte manda en `exportar` con `ame` si Media Encoder está abier
   } else if (r.ya !== "sin dato" || r.otro !== "sin dato") {
     mal("el transporte agrega `ameAbierto` fuera de `exportar` con `ame`", "los demás verbos lo rebotan por clave inventada · " + JSON.stringify(r));
   } else ok("en `exportar` con `ame` va si Media Encoder está abierto —`null` si `ps` no contesta—, sin pisar lo que manda quien llama");
+}
+
+/*
+ * "NO LATE" NO ES UNA SOLA COSA (2026-10-07, un reporte de uso). Con Premiere tapado entero, el panel late cada
+ * tantos segundos y sigue ejecutando; sin Premiere no hay a quién esperar. Se EJECUTA `enviar` contra un
+ * disco, un `ps` y un RELOJ de mentira —la espera de 25 s pasa en milisegundos—: sin el proceso rebota al
+ * instante y sin escribir el comando, aunque quede su crashpad, que vive en el mismo bundle; con el proceso y
+ * un latido que no avanza, el error dice la antigüedad, la vuelta y que Premiere corre; sin `ps`, espera como
+ * siempre; y uno que avanza a los 11 s, como el frenado medido, recibe el comando.
+ */
+titulo("El transporte distingue a Premiere cerrado de un panel frenado, y le manda el comando al que late lento");
+{
+  const src = fs.readFileSync(path.join(raiz, "server/bridge.js"), "utf8");
+  const r = (() => {
+    const guion = `
+      const vm = require("vm"), path = require("path"), src = ${JSON.stringify(src)};
+      const BUNDLE = "/Applications/Adobe Premiere Pro 2026/Adobe Premiere Pro 2026.app/Contents/MacOS/";
+      const PREMIERE = BUNDLE + "Adobe Premiere Pro 2026", CRASHPAD = BUNDLE + "crashpad_handler";
+      const caso = async (ps, avanzaA) => {
+        let reloj = 1791000000000, latido = { vuelta: 42 }, mtime = reloj - 60000;
+        const t0 = reloj, escritos = [];
+        const falso = {
+          readFile: async (p) => { if (p.endsWith("latido.json")) return JSON.stringify(latido); const e = new Error("ENOENT"); e.code = "ENOENT"; throw e; },
+          writeFile: async (p, t) => { if (p.endsWith("comando.json")) escritos.push(JSON.parse(t)); },
+          stat: async (p) => { if (p.endsWith("latido.json")) return { mtimeMs: mtime }; throw new Error("ENOENT"); },
+          mkdir: async () => {}, unlink: async () => {},
+        };
+        const cp = { execFileSync: () => { if (ps === null) throw new Error("ps no contestó"); return ps.join("\\n") + "\\n"; } };
+        const reloJ = (fn, ms) => {
+          reloj += ms;
+          if (avanzaA !== null && reloj - t0 >= avanzaA && latido.vuelta === 42) { latido = { vuelta: 43 }; mtime = reloj; }
+          setImmediate(fn);
+        };
+        const modulo = { exports: {} };
+        vm.runInNewContext(src, { module: modulo, exports: modulo.exports, __dirname: "/falso/server", console: { log() {}, error() {} },
+          setTimeout: reloJ, clearTimeout: () => {}, Date: { now: () => reloj },
+          require: (m) => m === "fs/promises" ? falso : m === "fs" ? { readFileSync: () => { throw new Error("no"); } } :
+                          m === "path" ? path : m === "child_process" ? cp : require(m) });
+        let error = null;
+        try { await modulo.exports.enviar("estado", {}, 300); } catch (e) { error = e.message; }
+        return { error: String(error).slice(0, 400), escribio: escritos.length, espero: reloj - t0 };
+      };
+      (async () => console.log(JSON.stringify({
+        cerrado: await caso([CRASHPAD], null),
+        noAvanza: await caso([PREMIERE, CRASHPAD], null),
+        sinPs: await caso(null, null),
+        lento: await caso([PREMIERE], 11000),
+      })))();`;
+    try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
+    catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
+  })();
+  if (r.error) mal("`enviar` no se pudo ejecutar contra un reloj de mentira", r.error);
+  else if (!/NO está abierto/.test(r.cerrado.error) || r.cerrado.escribio || r.cerrado.espero >= 1000) {
+    mal("sin el proceso de Premiere, el transporte espera al panel o no lo dice",
+        "no hay a quién esperar: son 25 s perdidos y un mensaje que culpa al panel · " + JSON.stringify(r.cerrado));
+  } else if (!/vuelta 42/.test(r.noAvanza.error) || !/sigue corriendo/.test(r.noAvanza.error) || !/FRENANDO/.test(r.noAvanza.error) ||
+             r.noAvanza.escribio || r.noAvanza.espero < 25000) {
+    mal("con Premiere vivo y el latido quieto, el error no dice la vuelta ni que puede estar frenado",
+        "un panel frenado se lee como un crash: la vuelta que sube entre llamadas es lo que lo distingue · " + JSON.stringify(r.noAvanza));
+  } else if (!/no se pudo mirar/.test(r.sinPs.error) || r.sinPs.escribio || r.sinPs.espero < 25000) {
+    mal("sin `ps`, el transporte no espera al panel como antes", "no saber no es saber que está cerrado · " + JSON.stringify(r.sinPs));
+  } else if (r.lento.escribio !== 1 || !/no tuvo respuesta/.test(r.lento.error)) {
+    mal("un panel que late cada 11 s no recibe el comando", JSON.stringify(r.lento));
+  } else ok("sin Premiere rebota al instante, quieto dice la vuelta y que puede estar frenado, sin `ps` espera, y el que late cada 11 s recibe el comando");
 }
 
 /*

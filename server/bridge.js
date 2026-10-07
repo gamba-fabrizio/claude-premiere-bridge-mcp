@@ -30,8 +30,8 @@ const ARCHIVO_COMANDO = path.join(CARPETA, "comando.json");
 const ARCHIVO_RESPUESTA = path.join(CARPETA, "respuesta.json");
 const ARCHIVO_LATIDO = path.join(CARPETA, "latido.json");
 
-// El panel late cada 700ms. Con 5s de margen, un latido viejo significa que el
-// panel no está: no es una demora, está cerrado.
+// El panel late una vez por segundo. Con 5s de margen, un latido viejo es una
+// SOSPECHA: el panel cerrado, Premiere ocupado, o frenado por el sistema (abajo).
 const MS_LATIDO_VIEJO = 5000;
 // Cuánto se espera a que el latido AVANCE antes de darlo por muerto. Premiere
 // ocupado puede tardar más de 10s por vuelta; abajo de eso no es un panel caído.
@@ -92,12 +92,16 @@ async function asegurarCarpeta() {
  * sesión muerta. Se reconoce por su EJECUTABLE, como Premiere en `recargar.js`. `null` si `ps` no contestó,
  * y el panel lo trata como no saber: sigue creyéndole al log.
  */
-function ameAbierto() {
+function procesoAbierto(ejecutable) {
   try {
     const o = require("child_process").execFileSync("ps", ["-axo", "comm="], { encoding: "utf8", timeout: 5000 });
-    return o.split("\n").some((l) => /\/Contents\/MacOS\/Adobe Media Encoder[^/]*$/.test(l.trim()));
+    return o.split("\n").some((l) => ejecutable.test(l.trim()));
   } catch (e) { return null; }
 }
+const ameAbierto = () => procesoAbierto(/\/Contents\/MacOS\/Adobe Media Encoder[^/]*$/);
+/* Y Premiere, con el patrón de `recargar.js`: `pgrep -f` engancha al broker de IPC, que lleva la ruta de
+   Premiere en sus argumentos y sobrevive al cierre. */
+const premiereAbierto = () => procesoAbierto(/\/Contents\/MacOS\/Adobe Premiere Pro[^/]*$/);
 
 /**
  * Manda un comando y espera la respuesta.
@@ -248,6 +252,19 @@ async function enviar(cmd, params = {}, msTimeout = MS_TIMEOUT) {
    * significaba el umbral.
    */
   let edad = await edadDelLatido();
+  /*
+   * Y "NO LATE" TIENE TRES CAUSAS, que piden cosas distintas (2026-10-07, un reporte de uso). Sin el proceso de
+   * Premiere no hay a quién esperar: se dice al instante, en vez de 25 s después y como si el panel
+   * estuviera cerrado. Con el proceso vivo, el latido viejo puede ser un panel cerrado, un Premiere colgado
+   * o uno FRENADO por el sistema —tapado entero por otra ventana, oculto, el protector—, que late cada
+   * tantos segundos y sigue ejecutando. Ese se distingue de afuera por la vuelta, que sube entre una
+   * llamada y otra: el error la dice.
+   */
+  const vivo = edad > MS_LATIDO_VIEJO ? premiereAbierto() : true;
+  if (vivo === false) {
+    throw new Error(`Premiere NO está abierto: no hay proceso${edad === Infinity ? "" : `, y el último latido del panel es de hace ${Math.round(edad / 1000)} s`}. ` +
+      `Abrilo con el proyecto: el panel arranca solo. NO se ejecutó "${cmd}".`);
+  }
   if (edad > MS_LATIDO_VIEJO) {
     const marca = await leerJson(ARCHIVO_LATIDO);
     const vueltaAntes = marca && marca.vuelta;
@@ -262,11 +279,15 @@ async function enviar(cmd, params = {}, msTimeout = MS_TIMEOUT) {
     }
   }
   if (edad > MS_LATIDO_VIEJO) {
+    if (edad === Infinity) throw new Error("El panel del bridge nunca latió. Abrilo en Premiere: Window > Extensions > Claude Bridge.");
+    const ultimo = await leerJson(ARCHIVO_LATIDO);
     throw new Error(
-      edad === Infinity
-        ? "El panel del bridge nunca latió. Abrilo en Premiere: Window > Extensions > Claude Bridge."
-        : `El panel del bridge no latió en ${Math.round(MS_ESPERA_LATIDO / 1000)}s de espera. ` +
-          "Puede estar cerrado, o Premiere puede estar sin responder."
+      `El panel del bridge no latió en ${Math.round(MS_ESPERA_LATIDO / 1000)}s de espera: el último latido es de hace ` +
+      `${Math.round((await edadDelLatido()) / 1000)} s, vuelta ${ultimo && ultimo.vuelta !== undefined ? ultimo.vuelta : "?"}, ` +
+      `y Premiere ${vivo ? "sigue corriendo" : "no se pudo mirar si sigue corriendo"}. ` +
+      "Si en la llamada siguiente la vuelta subió, el panel vive y el sistema lo está FRENANDO —Premiere tapado entero " +
+      "por otra ventana, oculto, o el protector de pantalla—: no es un crash, y se destraba con Premiere al frente. " +
+      "Si no sube, el panel está cerrado o Premiere colgado."
     );
   }
 
@@ -318,4 +339,4 @@ async function enviar(cmd, params = {}, msTimeout = MS_TIMEOUT) {
   );
 }
 
-module.exports = { enviar, edadDelLatido, CARPETA, ponerTraba, sacarTraba, leerTraba, ameAbierto };
+module.exports = { enviar, edadDelLatido, CARPETA, ponerTraba, sacarTraba, leerTraba, ameAbierto, premiereAbierto };
