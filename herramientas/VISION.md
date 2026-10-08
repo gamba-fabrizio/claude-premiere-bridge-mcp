@@ -140,7 +140,8 @@ montaje.**
 
 De la lista que se propuso el 2026-08-19, quedan sin probar: **PySceneDetect** (cortes,
 mejor que el filtro `scene` de ffmpeg), **Depth Anything** (profundidad, la forma correcta
-de medir "la cámara se acerca"), **YOLO / RT-DETR** (personas y objetos en cuadro),
+de medir "la cámara se acerca"), **RT-DETR** (personas y objetos en cuadro; YOLO se midió el
+2026-10-08, al final),
 **pyannote** (diarización), **scoring estético** y **VLMs locales** (Qwen-VL, InternVL).
 
 Sobre los VLMs locales, una nota que ahorra tiempo: **para describir qué hay en un clip,
@@ -645,3 +646,41 @@ Sin flag no pide nada.
 - La unidad del tirón supone que el clip llena el ancho de la secuencia (`--ancho-secuencia`).
 - La traslación sale del origen de la semejanza: un zoom se lee también como `vel` (en el control,
   un zoom parejo da tirón 0,07, así que al tirón no le llega).
+
+## YOLO para el aire sobre la cabeza: MEDIDO, no suma (2026-10-08)
+
+La pregunta fue si Ultralytics YOLO le suma al bridge. Se probó donde un detector tendría que ganarse el lugar:
+el AIRE sobre la cabeza en un plano cerrado, que el editor corrige clip por clip.
+La referencia es la medida contra la pared lisa del `aire_88.py` de un curso,
+validada por sus correcciones. Se usaron los mismos cuadros, dos por segundo del tramo usado, en 39 clips.
+
+```
+                                    contra la pared, en px del 4K (negativo = más arriba)
+la pared, reimplementada            |error| medio 0,9 · máximo 8            <- el control
+YOLO11n-seg, tope de la máscara     sesgo −24,4 · |error| medio 24,4 · máximo 36 · de −36 a −8
+YOLO11n, tope de la caja            sesgo −27,1 · máximo 40
+YuNet, borde de arriba de la cara   pelo − frente = −97,9, desvío 10,0
+```
+
+**Mirado en las hojas, la pared tiene razón.** Su línea cae sobre los rulos, y la de la máscara queda 5 a 9 px
+más arriba a 960, en la pared vacía: la máscara de YOLO es gorda en el borde. 24 px del 4K son ~21 px de la
+secuencia en un 88, del orden del margen con que el editor decide (corrigió 27,7 px de aire y dejó 34,7). Sin
+calibrar decide distinto, y calibrado le queda un desvío de ~5 px de secuencia, justo en ese borde.
+
+Y lo que lo saca de la mesa aunque midiera bien:
+
+- **Es AGPL-3.0.** El repo público es MIT: no va como dependencia sin atarlo a la AGPL o a la licencia paga.
+- **En este Intel corre sobre torch 2.2.2.** Las versiones actuales de ONNX Runtime y OpenVINO, que eran la
+  vía rápida, ya no publican ruedas para Intel Mac.
+- **Las clases de COCO no tienen instrumentos.** Lo suyo son personas, pose y seguir a varias.
+
+La velocidad NO es el problema: con la CPU libre, YOLO11n-seg tarda 73 ms por cuadro a 960x540.
+
+**Lo que sí sirve es YuNet**, el detector de caras del zoo de OpenCV: licencia MIT, corre en el python del
+sistema (OpenCV 5), sin torch, a ~45 ms por cuadro con la CPU ocupada y 39 con la CPU libre. La frente no predice el pelo (±10 px
+del 4K), pero la cara es justo lo que pide "la cara en el mismo lugar" con que el editor reencuadra entre cortes
+de un mismo plano. Para eso no está medido todavía.
+
+El entorno de la prueba (`~/.venvs/yolo`: torch 2.2.2, numpy 1.26.4, ultralytics 8.4.174 y los dos modelos)
+se mandó a la papelera el mismo día. Rearmarlo son ~5 minutos: pip con `--only-binary=:all:` y numpy, torch y
+torchvision clavados en 1.26.4, 2.2.2 y 0.17.2, para que nada compile ni suba de versión.

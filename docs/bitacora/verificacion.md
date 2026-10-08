@@ -1,6 +1,6 @@
 
 
-## Vigente (2026-10-07)
+## Vigente (2026-10-08)
 
 - **Una guarda se verifica haciéndola fallar**, mirando por posición y sin comentarios ni strings.
   → «Una guarda se verifica HACIÉNDOLA FALLAR»
@@ -21,6 +21,8 @@
 - **`clips` y `revisar` leen la salida de cada pista.** → «Una pista con el OJO APAGADO»
 - **`revisar` marca a los vecinos que REPITEN MATERIAL en la fuente**, sólo a 1x y confirmados por la ruta;
   a otra velocidad, sin medir. → «`revisar` no veía el material REPETIDO»
+- **Un verificador que relee un clip lo busca por tiempo Y por medio**: por tiempo solo, uno ajeno que
+  arranca en el mismo punto pasa por el puesto. → «El veredicto releía por TIEMPO»
 - **Un pendiente se cierra en la misma tanda que su trabajo.** → «Un pendiente que no se cierra»
 
 # Método de verificación
@@ -325,6 +327,33 @@ porque una repetición puede ser a propósito. `test.js` ejecuta `revisar` sobre
 Lo que no ve: un clip RENOMBRADO en el timeline (el filtro es el nombre del clip, para no leer el medio de
 todos), una secuencia anidada (no tiene ruta) y los pares a otra velocidad. Y una repetición deliberada
 también se marca: es un hallazgo, no una orden.
+
+## El veredicto releía por TIEMPO: un clip ajeno en el mismo punto pasaba por el puesto (2026-10-08)
+
+Una sesión de uso pegó con `colocarLote` un mp3 —sin video— pidiendo una pista de video que ya tenía una PNG en
+ese mismo `en`. El verbo contestó «0 de 1 … MAL: dura 6,64 (quería 210,32), entrada 3600 (quería 0)», con el mp3
+bien puesto en su audio y la PNG intacta. Los datos del MAL eran los de la PNG: el veredicto releía la pista de
+video y tomaba el primer clip que arrancara en `en`, sin mirar el medio. La búsqueda en audio ya exigía el medio,
+pero sólo corría si en video no había nada. Con un vecino del mismo largo y entrada habría sido un OK falso.
+
+El mismo patrón estaba en dos lugares de `armarSecuencia`, y ahí era peor. Las capas se buscaban en video por
+tiempo solo, y el `nombre` y el `apagado` de la capa iban a ESE clip: una capa de audio con `apagado` sobre el
+`en` de una PNG apagaba la PNG y dejaba el audio sonando. Y la relectura final de las capas daba por intacta a
+una capa que otra del mismo largo había reemplazado entera.
+
+**El arreglo es uno solo, `clipDelMedio`:** el clip que arranca en `en` Y es del mismo medio, comparado
+normalizando. El medio se lee sólo de los que arrancan ahí y queda guardado, así que la pista se relee con
+menos lecturas que antes. El lazo de video de `colocarLote` además saltea el null de `getTrackItems`, y el MAL
+nombra al medio ajeno en vez de decir «NO HAY CLIP». `test.js` ejecuta `clipDelMedio` y mira por posición los
+tres lugares, con mutación: 6 de 6.
+
+Medido en un proyecto de prueba, en una secuencia con una PNG en V2 a los 2 s:
+
+```
+capa de un wav con apagado, en V2 a los 2 s     quedó en A7 y APAGADA; la PNG, prendida
+colocarLote de un wav en V2 a los 2 s           «1 de 1 … 1 SIN VIDEO: releídos en A8, no en V2»
+colocarLote de un video en V2, vacío y encima   1 de 1 cada uno; el de encima pisó 2–3 s y la PNG siguió en 3–6
+```
 
 ## Cerrados: casos resueltos, acotados o desmentidos
 

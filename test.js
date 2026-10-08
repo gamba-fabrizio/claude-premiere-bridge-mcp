@@ -1049,7 +1049,7 @@ if (!cuerpoEditar) {
         "la siguiente a la última se crea con el clon: pedirla antes tira «invalid track index»");
   } else if (iLote === -1 || iTx === -1 || iLote > iTx) {
     mal("`colocarLote` no valida la pista antes de escribir", "lo que Premiere hizo queda hecho y el verbo contesta la excepción cruda");
-  } else if (!/nueva\.getAudioTrack\(pistaAudioIdx\)/.test(capas) || !/esElMedio/.test(capas) || !/\/\^A\/\.test\(c\.pista\)/.test(capas)) {
+  } else if (!/nueva\.getAudioTrack\(pistaAudioIdx\)/.test(capas) || !/clipDelMedio\(enPista, c\.en, mc\.nombre/.test(capas) || !/\/\^A\/\.test\(c\.pista\)/.test(capas)) {
     mal("`armarSecuencia` no busca la capa de un medio sin video en su pista de audio, o no la relee ahí",
         "un .wav puesto como capa se informaba «no apareció» estando en A3");
   } else {
@@ -4361,7 +4361,7 @@ titulo("keyframe, colocarLote, copiarEfecto y transicion: los falsos veredictos 
   if (!/escribio = nuevos > 0 \|\| \(ocupados\.length > 0 && puso/.test(kf) || !/escribio: escribio/.test(kf) ||
       kf.indexOf("getKeyframeListAsTickTimes") === -1 || kf.indexOf("getKeyframeListAsTickTimes") > kf.indexOf("createAddKeyframeAction")) {
     mal("`keyframe` vuelve a juzgar sólo por el conteo", "reemplazar keyframes no mueve el conteo: dijo «NO SE ESCRIBIÓ NADA» sobre 54 escritos");
-  } else if (!/puestosA\.find\([\s\S]{0,160}?igualN\(x\.medio, cache\[f\.medio\]\.nombre\)\)/.test(col)) {
+  } else if (!/clipDelMedio\(puestosA, Number\(f\.en\)/.test(col)) {
     mal("`colocarLote` no relee en la pista de audio lo que no tiene video", "un WAV no pone nada en V: informó «NO HAY CLIP» con los seis en A2");
   } else if (/getComponente\(clip, buscado\)/.test(cop) || !/leer\(orig\.clip, cual === null \? 0 : cual\)/.test(cop) || !/despues > antes && typeof testigoOrigen/.test(cop)) {
     mal("el testigo de `copiarEfecto` vuelve a leer la PRIMERA aparición", "con dos Lumetri compara el primero de los dos lados y dice que viajó sin haber mirado el segundo");
@@ -4370,6 +4370,58 @@ titulo("keyframe, colocarLote, copiarEfecto y transicion: los falsos veredictos 
   } else {
     ok("`keyframe` cuenta los reemplazados, `colocarLote` relee el audio, el testigo de `copiarEfecto` lee la aparición elegida y `transicion` avisa el lado sin medir");
   }
+}
+
+/*
+ * EL CLIP QUE SE PUSO ES EL DEL MISMO MEDIO, no el que arranca ahí (2026-10-08, un reporte de uso). Un mp3 pedido
+ * sobre una pista de video con un PNG en ese punto: `colocarLote` releyó el PNG y contestó MAL con sus datos,
+ * con el mp3 bien puesto en su audio; y las capas de `armarSecuencia` le ponían su nombre y su `apagado` al
+ * clip ajeno. Se EJECUTA `clipDelMedio` —el ajeno no cuenta, el del medio sí aunque venga en otra
+ * normalización, y el medio se lee sólo de los que arrancan en `en`— y por posición, que los dos verbos lo
+ * usen en sus dos pistas, que el video saltee los null y que la relectura final de las capas mire el medio.
+ */
+titulo("`colocarLote` y las capas de `armarSecuencia` releen el clip del MISMO medio, no el que arranca ahí");
+{
+  const f = cuerpoDeFuncion(srcComandos, "async function clipDelMedio(");
+  const limpio = (firma) => (cuerpoDeFuncion(srcComandos, firma) || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const col = limpio("async function colocarLote("), arm = limpio("async function armarSecuencia(");
+  const r = (() => {
+    if (!f) return { error: "falta `clipDelMedio`" };
+    const guion = `
+      const vm = require("vm");
+      const lecturas = { n: 0 };
+      const item = (nombre) => ({ getProjectItem: async () => { lecturas.n++; return { name: nombre }; } });
+      const ctx = { igualN: (a, b) => String(a).normalize("NFC") === String(b).normalize("NFC") };
+      vm.runInNewContext(${JSON.stringify(f)} + "\\nthis.f = clipDelMedio;", ctx);
+      (async () => {
+        const video = [{ desde: 502.6, item: item("barra.png") }, { desde: 600, item: item("otro.mov") }];
+        const audio = [{ desde: 10, item: item("x.wav") }, { desde: 502.6, item: item("tema.mp3") }];
+        const enVideo = await ctx.f(video, 502.6, "tema.mp3", 0.05);
+        const enAudio = await ctx.f(audio, 502.6, "tema.mp3", 0.05);
+        const nfd = await ctx.f([{ desde: 5, item: item("cancio\\u0301n.wav") }], 5, "canci\\u00f3n.wav", 0.05);
+        const sinLeer = await ctx.f([{ desde: 5, item: { getProjectItem: async () => { throw new Error("x"); } } }], 5, "a.wav", 0.05);
+        console.log(JSON.stringify({ enVideo: enVideo ? enVideo.medio : null, enAudio: enAudio ? enAudio.medio : null,
+          nfd: !!nfd, sinLeer: sinLeer === null, lecturas: lecturas.n }));
+      })();`;
+    try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
+    catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
+  })();
+  if (r.error) mal("`clipDelMedio` no se pudo ejecutar", r.error);
+  else if (r.enVideo !== null || r.enAudio !== "tema.mp3") {
+    mal("`clipDelMedio` toma por el puesto un clip AJENO que arranca ahí, o no encuentra el del medio",
+        "un PNG en el mismo punto se leyó como el mp3, con sus datos: un MAL falso, y con el mismo largo, un OK falso · " + JSON.stringify(r));
+  } else if (!r.nfd || !r.sinLeer) {
+    mal("`clipDelMedio` no empareja NFC con NFD, o da por bueno un clip cuyo medio no se pudo leer", JSON.stringify(r));
+  } else if (r.lecturas !== 3) {
+    mal("`clipDelMedio` lee el medio de clips que no arrancan en `en`", "releer una pista de cientos de clips no puede costar una lectura por clip · " + JSON.stringify(r));
+  } else if (!/clipDelMedio\(puestos, Number\(f\.en\)/.test(col) || !/clipDelMedio\(puestosA, Number\(f\.en\)/.test(col) ||
+             !/for \(let k = 0; k < items\.length; k\+\+\) \{\s*if \(!items\[k\]\) continue;/.test(col)) {
+    mal("`colocarLote` relee su pista de video por tiempo solo, o no saltea el null de `getTrackItems`",
+        "con un null, `tiemposDe` tira DESPUÉS de las transacciones y el verbo contesta la excepción cruda");
+  } else if (!/clipDelMedio\(enPista, c\.en, mc\.nombre/.test(arm) || !/igualN\(m, c\.medio\)/.test(arm)) {
+    mal("las capas de `armarSecuencia` se buscan, o se releen al final, por tiempo solo",
+        "una capa de audio sobre el punto de una PNG le ponía su nombre y su `apagado` a la PNG");
+  } else ok("el clip puesto es el del MISMO medio —el ajeno no cuenta, NFD empareja, y el medio se lee sólo en `en`—, en `colocarLote` y en las capas de `armarSecuencia`");
 }
 
 /*

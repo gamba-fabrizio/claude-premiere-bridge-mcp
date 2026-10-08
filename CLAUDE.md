@@ -165,6 +165,9 @@ Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que
   fallo. → `verificacion.md`
 - **Antes de escribir un verificador, preguntate qué hace con un medio SIN VIDEO.** Tres verbos
   informaron "no entró" sobre un audio que sí había entrado. → `verificacion.md`
+- **Un verificador que relee un clip lo busca por tiempo Y por medio** (`clipDelMedio`): por tiempo solo,
+  uno ajeno que arranca en el mismo punto pasa por el puesto —un MAL falso, y con el mismo largo un OK
+  falso—, y lo que se le aplica después va a ese clip. → `verificacion.md`
 - **Un lector nuevo no informa "no hay" sin un control positivo**: un vacío es "no lo encontré".
   → `verificacion.md`, `firmas-y-limites.md`
 - **Un parámetro con el mismo nombre significa lo mismo en todos los verbos**: `pistaAudio` es

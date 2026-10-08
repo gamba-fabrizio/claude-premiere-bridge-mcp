@@ -2949,6 +2949,26 @@ async function inOutMedio(params) {
   };
 }
 
+/*
+ * EL CLIP QUE SE PUSO, al releer una pista: el que arranca en `en` Y es del MISMO medio
+ * (2026-10-08, un reporte de uso). Por tiempo solo, un clip AJENO que arrancaba ahí se tomaba por el puesto: un mp3 pedido
+ * sobre una pista de video donde ya había un PNG en ese punto contestó «MAL: dura 6,64, entrada 3600»
+ * —los datos del PNG— con el mp3 bien puesto en su audio, y con un vecino del mismo largo habría sido un
+ * OK falso. Y en las capas de `armarSecuencia` era peor: el nombre y el `apagado` de la capa iban a ESE
+ * clip. `lista` son `{desde, item}` ya leídos; el medio se lee sólo de los que arrancan en `en`, y queda
+ * guardado en la lista, así que releer la pista no cuesta una lectura por clip.
+ */
+async function clipDelMedio(lista, en, nombre, tolerancia) {
+  for (const x of lista) {
+    if (Math.abs(x.desde - en) >= tolerancia) continue;
+    if (x.medio === undefined) {
+      try { x.medio = String((await x.item.getProjectItem()).name); } catch (e) { x.medio = null; }
+    }
+    if (x.medio !== null && igualN(x.medio, nombre)) return x;
+  }
+  return null;
+}
+
 /* Lo que no tiene tiempo: dos pedazos de una foto arrancan en el mismo punto sin repetir nada. */
 const ES_IMAGEN_FIJA = /\.(png|jpe?g|tiff?|psd|gif|bmp|heic|webp|ai|eps|svg)$/i;
 
@@ -3261,8 +3281,9 @@ async function armarSecuencia(params) {
        * DÓNDE QUEDÓ: en su pista de video, o —si el medio no tiene video, como un .wav— en su pista de
        * AUDIO. Hasta el 2026-09-25 se miraba solo el video, y un tono puesto como capa en A3 se
        * informaba «no tiró pero no apareció» estando ahí: el contador ciego que los fragmentos de este
-       * mismo verbo pagaron el 2026-09-16, una cuarta vez. En audio se exige además el MISMO medio, para
-       * no tomar por la capa otro clip que arranque en ese instante.
+       * mismo verbo pagaron el 2026-09-16, una cuarta vez. Y en las dos pistas se exige el MISMO medio:
+       * en video bastaba el tiempo, y una capa de audio sobre el `en` de una PNG le ponía su nombre y su
+       * `apagado` a la PNG. Ver `clipDelMedio`.
        */
       const pistaAudioIdx = typeof c.pistaAudio === "number" ? c.pistaAudio - 1 : pistaIndex;
       const lugares = [
@@ -3277,46 +3298,44 @@ async function armarSecuencia(params) {
           const track = await lugar.traer();
           its = track ? await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
         } catch (e) { its = []; }
+        const enPista = [];
         for (let k = 0; k < its.length; k++) {
           if (!its[k]) continue;  // el hueco de getTrackItems: ver el lazo de fragmentos
           const t = await tiemposDe(its[k]);
-          let esElMedio = !lugar.audio;
-          if (lugar.audio) {
-            try { esElMedio = String((await its[k].getProjectItem()).name) === mc.nombre; } catch (e) { esElMedio = false; }
+          enPista.push({ desde: t.desde, hasta: t.hasta, item: its[k] });
+        }
+        const x = await clipDelMedio(enPista, c.en, mc.nombre, 0.15);
+        if (x) {
+          ok = true;
+          /*
+           * `nombre` y `apagado` van ACÁ y no en dos llamadas aparte porque cada
+           * una sería otra transacción: nueve capas serían 18 transacciones de
+           * más en ráfaga, y eso es lo que tira Premiere con SIGSEGV.
+           */
+          const acciones = [];
+          if (typeof c.nombre === "string" && c.nombre.trim()) acciones.push(() => x.item.createSetNameAction(c.nombre));
+          if (c.apagado === true) acciones.push(() => x.item.createSetDisabledAction(true));
+          let extras = null;
+          if (acciones.length) {
+            try {
+              project.lockedAccess(() => {
+                transaccion(project, (a) => { for (const f of acciones) a.addAction(f()); }, "nombre y estado de la capa " + (i + 1));
+              });
+            } catch (e) { extras = e && e.message ? e.message : String(e); }
           }
-          if (Math.abs(t.desde - c.en) < 0.15 && esElMedio) {
-            ok = true;
-            /*
-             * `nombre` y `apagado` van ACÁ y no en dos llamadas aparte porque cada
-             * una sería otra transacción: nueve capas serían 18 transacciones de
-             * más en ráfaga, y eso es lo que tira Premiere con SIGSEGV.
-             */
-            const acciones = [];
-            if (typeof c.nombre === "string" && c.nombre.trim()) acciones.push(() => its[k].createSetNameAction(c.nombre));
-            if (c.apagado === true) acciones.push(() => its[k].createSetDisabledAction(true));
-            let extras = null;
-            if (acciones.length) {
-              try {
-                project.lockedAccess(() => {
-                  transaccion(project, (a) => { for (const f of acciones) a.addAction(f()); }, "nombre y estado de la capa " + (i + 1));
-                });
-              } catch (e) { extras = e && e.message ? e.message : String(e); }
-            }
-            const quedoNombre = typeof c.nombre === "string" && c.nombre.trim()
-              ? String(await its[k].getName()) === c.nombre : null;
-            capasPuestas.push({
-              en: t.desde, hasta: t.hasta, pista: lugar.etiqueta, sinVideo: lugar.audio || undefined,
-              medio: mc.nombre, fuenteDesde: fuenteDesde,
-              nombre: typeof c.nombre === "string" ? String(await its[k].getName()) : undefined,
-              nombreQuedo: quedoNombre, apagado: c.apagado === true || undefined,
-              errorExtras: extras || undefined
-            });
-            if (quedoNombre === false) capasFallidas.push(`capa ${i + 1}: NO se renombró a "${c.nombre}"`);
-            // Un audio solo ya quedó apagado arriba: no tiene socios de audio que buscarle.
-            if (c.apagado === true && !lugar.audio) apagadasV.push({ capa: i + 1, item: its[k], puesta: capasPuestas[capasPuestas.length - 1] });
-            avance.capas = capasPuestas.length;
-            break;
-          }
+          const quedoNombre = typeof c.nombre === "string" && c.nombre.trim()
+            ? String(await x.item.getName()) === c.nombre : null;
+          capasPuestas.push({
+            en: x.desde, hasta: x.hasta, pista: lugar.etiqueta, sinVideo: lugar.audio || undefined,
+            medio: mc.nombre, fuenteDesde: fuenteDesde,
+            nombre: typeof c.nombre === "string" ? String(await x.item.getName()) : undefined,
+            nombreQuedo: quedoNombre, apagado: c.apagado === true || undefined,
+            errorExtras: extras || undefined
+          });
+          if (quedoNombre === false) capasFallidas.push(`capa ${i + 1}: NO se renombró a "${c.nombre}"`);
+          // Un audio solo ya quedó apagado arriba: no tiene socios de audio que buscarle.
+          if (c.apagado === true && !lugar.audio) apagadasV.push({ capa: i + 1, item: x.item, puesta: capasPuestas[capasPuestas.length - 1] });
+          avance.capas = capasPuestas.length;
         }
       }
       if (!ok) capasFallidas.push(`capa ${i + 1} (${c.en}s): no tiró pero no apareció, ni en V${pistaIndex + 1} ni en A${pistaAudioIdx + 1}`);
@@ -3348,7 +3367,14 @@ async function armarSecuencia(params) {
       for (let k = 0; k < its.length; k++) {
         if (!its[k]) continue;
         const t = await tiemposDe(its[k]);
-        if (Math.abs(t.desde - c.en) < 0.15 && Math.abs(t.hasta - c.hasta) < 0.15) { sigue = true; break; }
+        if (Math.abs(t.desde - c.en) < 0.15 && Math.abs(t.hasta - c.hasta) < 0.15) {
+          /* Y del MISMO medio (2026-10-08): otra capa del mismo largo en el mismo lugar la reemplaza ENTERA,
+             y por tiempo solo se leía como intacta. Si el medio no se puede leer, no se opina: queda el
+             veredicto por tiempo, el de antes. */
+          let m = null;
+          try { m = String((await its[k].getProjectItem()).name); } catch (e) { m = null; }
+          if (m === null || igualN(m, c.medio)) { sigue = true; break; }
+        }
       }
       if (!sigue) capasRotas.push(`${c.pista} ${c.en.toFixed(2)}–${c.hasta.toFixed(2)}s (${c.medio || "?"})`);
     } catch (e) { capasRotas.push(`${c.pista} ${c.en}s: no se pudo releer`); }
@@ -12727,14 +12753,15 @@ async function colocarLote(params) {
    * "dura undefined" sobre cuatro clips que si tenian largo—, asi que se calcula. */
   const puestos = [];
   for (let k = 0; k < items.length; k++) {
+    if (!items[k]) continue;   // el null de getTrackItems: ver `armarSecuencia`
     const t = await tiemposDe(items[k]);
-    puestos.push({ desde: t.desde, hasta: t.hasta, entrada: t.entrada, dura: t.hasta - t.desde });
+    puestos.push({ desde: t.desde, hasta: t.hasta, entrada: t.entrada, dura: t.hasta - t.desde, item: items[k] });
   }
 
   /* Y LA PISTA DE AUDIO PEDIDA, para los medios SIN VIDEO: un WAV no pone nada en V, y mirando solo
    * el video el verbo informó «0 de 6… NO HAY CLIP ahi» con los seis en A2, en su lugar (un reporte de uso,
-   * 2026-09-29). Es el contador ciego que `insertar` y las capas de `armarSecuencia` ya pagaron. En
-   * audio se exige además el MISMO medio, para no tomar por el fragmento otro clip que arranque ahí. */
+   * 2026-09-29). Es el contador ciego que `insertar` y las capas de `armarSecuencia` ya pagaron. En las
+   * dos pistas se exige el MISMO medio: ver `clipDelMedio`. */
   const puestosA = [];
   let etqA = null;
   try {
@@ -12746,9 +12773,7 @@ async function colocarLote(params) {
       for (let k = 0; k < itsA.length; k++) {
         if (!itsA[k]) continue;   // el null de getTrackItems: ver `armarSecuencia`
         const t = await tiemposDe(itsA[k]);
-        let medio = null;
-        try { medio = String((await itsA[k].getProjectItem()).name); } catch (e) { medio = null; }
-        puestosA.push({ desde: t.desde, hasta: t.hasta, entrada: t.entrada, dura: t.hasta - t.desde, medio: medio });
+        puestosA.push({ desde: t.desde, hasta: t.hasta, entrada: t.entrada, dura: t.hasta - t.desde, item: itsA[k] });
       }
     }
   } catch (e) { /* sin la pista de audio queda el veredicto del video, que es el de antes */ }
@@ -12756,13 +12781,18 @@ async function colocarLote(params) {
   const bien = [], mal = [], soloAudio = [], cuantizados = [];
   for (const f of frags) {
     const dura = Number(f.hasta) - Number(f.desde);
-    let c = puestos.find((x) => Math.abs(x.desde - Number(f.en)) < 0.05);
+    let c = await clipDelMedio(puestos, Number(f.en), cache[f.medio].nombre, 0.05);
     let enAudio = false;
     if (!c) {
-      c = puestosA.find((x) => Math.abs(x.desde - Number(f.en)) < 0.05 && x.medio !== null && igualN(x.medio, cache[f.medio].nombre));
+      c = await clipDelMedio(puestosA, Number(f.en), cache[f.medio].nombre, 0.05);
       enAudio = !!c;
     }
-    if (!c) { mal.push(`${f.medio} en ${f.en}s: NO HAY CLIP ahi, ni en ${pista}` + (etqA ? ` ni en ${etqA}` : "")); continue; }
+    if (!c) {
+      const ajeno = puestos.find((x) => Math.abs(x.desde - Number(f.en)) < 0.05);
+      mal.push(`${f.medio} en ${f.en}s: no está ni en ${pista}` + (etqA ? ` ni en ${etqA}` : "") +
+        (ajeno ? ` (en ${pista} arranca ahí OTRO medio${ajeno.medio ? `, "${ajeno.medio}"` : ""})` : ""));
+      continue;
+    }
     const okDur = Math.abs(c.dura - dura) < 0.05;
     const entrada = c.entrada === null || c.entrada === undefined ? Number(f.desde) : c.entrada;
     const okEnt = Math.abs(entrada - Number(f.desde)) < 0.05;
