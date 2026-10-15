@@ -34,7 +34,9 @@ Hasta el 2026-09-23 era también la bitácora —1.222 líneas, con las reglas r
 
 ```
 USO.md            cómo USAR el bridge desde una sesión de trabajo. Vale también acá, y es corto
-                  a propósito: se lee entero
+                  a propósito: se lee entero. Es la skill `premiere` (skills/premiere/, por
+                  symlink), y su sección «Antes de la primera llamada» son las instructions del
+                  servidor: tope 2.048 caracteres
 docs/bitacora/    las mediciones, movidas TAL CUAL y partidas por tema: ver el índice de abajo
 docs/api.md       las firmas y los comportamientos medidos de la API: se lee ANTES de tocar un verbo
 README.md         el manual: instalar, qué hace cada herramienta, los flujos
@@ -168,6 +170,10 @@ Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que
 - **Un verificador que relee un clip lo busca por tiempo Y por medio** (`clipDelMedio`): por tiempo solo,
   uno ajeno que arranca en el mismo punto pasa por el puesto —un MAL falso, y con el mismo largo un OK
   falso—, y lo que se le aplica después va a ese clip. → `verificacion.md`
+- **Un borde que va a Premiere se lleva al cuadro MÁS CERCANO antes de pasarlo** (`ticksAlCuadro`): lo que pega
+  lo BAJA y lo que recorta o mueve lo deja donde cae, y con seis decimales es un cuadro de menos o uno de más. Las
+  cuentas y los veredictos van en TICKS, no con los segundos redondeados al milisegundo: a 30 fps un cuadro no
+  cae en uno justo. Un audio solo queda exacto. → `cuadros-y-nombres.md`
 - **Un lector nuevo no informa "no hay" sin un control positivo**: un vacío es "no lo encontré".
   → `verificacion.md`, `firmas-y-limites.md`
 - **Un parámetro con el mismo nombre significa lo mismo en todos los verbos**: `pistaAudio` es

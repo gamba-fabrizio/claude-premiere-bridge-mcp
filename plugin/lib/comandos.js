@@ -1729,6 +1729,37 @@ function nivelPedido(e, donde) {
 const aTick = (segundos) =>
   ppro.TickTime.createWithTicks(String(Math.round(segundos * TICKS_POR_SEGUNDO)));
 
+/*
+ * AL CUADRO MÁS CERCANO de la secuencia (2026-10-12, un reporte de uso). Un borde que va a Premiere se redondea
+ * ACÁ, antes de pasarlo, porque Premiere lo resuelve mal de dos maneras distintas:
+ *  - lo que PEGA lo BAJA al cuadro: los in/out del medio en el overwrite —medido en `colocarLote`,
+ *    0,01075 → 0—. Una capa con `dura: 14.733333` a 30 fps son 441,99999 cuadros, y entró con 441: un
+ *    cuadro ENTERO de menos, con seis decimales bien puestos;
+ *  - lo que RECORTA o MUEVE lo deja donde cae: una `salida` de 14,7334 dejó el fin 0,07 ms pasado el
+ *    borde, y Premiere dibujó en el export ese cuadro de más.
+ * `tpf` son los ticks por cuadro de `getTimebase()`; sin ellos no se toca nada, y quien llama lo dice. Es
+ * la aritmética entera de `cuantizarAlFrame`, sin su chequeo de distancia: acá manda el valor pedido.
+ */
+function ticksAlCuadro(ticks, tpf) {
+  return isFinite(tpf) && tpf > 0 ? Math.round(ticks / tpf) * tpf : ticks;
+}
+function tickAlCuadro(segundos, tpf) {
+  return ppro.TickTime.createWithTicks(String(ticksAlCuadro(Math.round(segundos * TICKS_POR_SEGUNDO), tpf)));
+}
+/* Unos ticks en cuadros, con tres decimales: un borde ENTRE cuadros se ve como fracción. Con segundos
+   redondeados al milisegundo no se ve: 45,4667 y 45,46673 dicen los dos «45.467». */
+function enCuadros(ticks, tpf) {
+  return isFinite(tpf) && tpf > 0 ? Number((ticks / tpf).toFixed(3)) : null;
+}
+/* Los tres tiempos de un clip en TICKS, sin redondear: para comparar antes y después, y para hacer cuentas. */
+async function ticksDe(clip) {
+  return {
+    s: Number((await clip.getStartTime()).ticks),
+    e: Number((await clip.getEndTime()).ticks),
+    i: Number((await clip.getInPoint()).ticks)
+  };
+}
+
 /**
  * Los keyframes NO viven en tiempo de secuencia: viven en TIEMPO DE MATERIAL.
  *
@@ -2059,6 +2090,11 @@ async function clips(params) {
 
   const salida = [];
   const apagadas = [];
+  /* Los bordes también en CUADROS, de los ticks (2026-10-12, un reporte de uso): un fin 0,07 ms pasado el borde
+     —que Premiere dibuja como un cuadro de más— se lee «45.467» igual que el bueno, y en cuadros es 1364,002. */
+  let tpf = null;
+  try { tpf = Number(await sequence.getTimebase()); } catch (e) { tpf = null; }
+  if (!isFinite(tpf) || tpf <= 0) tpf = null;
   for (const g of grupos) {
     for (let t = 0; t < g.cuantas; t++) {
       const etiqueta = g.letra + (t + 1);
@@ -2071,6 +2107,7 @@ async function clips(params) {
       if (items.length && apagada !== false) apagadas.push(avisoDeSalida(etiqueta, apagada, items.length));
       for (let i = 0; i < items.length; i++) {
         const t4 = await tiemposDe(items[i]);
+        const k4 = tpf === null ? null : await ticksDe(items[i]);
         salida.push({
           pista: etiqueta,
           indice: i,
@@ -2078,6 +2115,7 @@ async function clips(params) {
           desde: t4.desde,
           hasta: t4.hasta,
           dura: Number((t4.hasta - t4.desde).toFixed(3)),
+          cuadros: k4 === null ? null : { desde: enCuadros(k4.s, tpf), hasta: enCuadros(k4.e, tpf) },
           entrada: t4.entrada,
           desfase: t4.desfase,
           // La velocidad importa para los keyframes y para los tiempos de la
@@ -3135,6 +3173,16 @@ async function armarSecuencia(params) {
     };
   } catch (e) { ajustes = null; }
 
+  /* LA GRILLA, leída DESPUÉS de los ajustes: con `fps` pedidos, es la nueva. Los in/out van al cuadro más
+     cercano —ver `ticksAlCuadro`—, porque Premiere los BAJA al pegar: una `dura` de 14,733333 a 30 fps
+     entró con un cuadro ENTERO de menos (2026-10-12, un reporte de uso). */
+  let tpfNueva = null;
+  try { tpfNueva = Number(await nueva.getTimebase()); } catch (e) { tpfNueva = null; }
+  if (!isFinite(tpfNueva) || tpfNueva <= 0) tpfNueva = null;
+  /* Y el largo RELEÍDO, en cuadros, contra el pedido: un cuadro de menos entra en cualquier tolerancia de
+     segundos y no se veía. */
+  const largoDistinto = [];
+
   const editor = ppro.SequenceEditor.getEditor(nueva);
   const puestos = [];
   const fallidos = [];
@@ -3147,7 +3195,7 @@ async function armarSecuencia(params) {
     try {
       project.lockedAccess(() => {
         transaccion(project, (a) => {
-          a.addAction(m.clipItem.createSetInOutPointsAction(aTick(f.desde), aTick(f.hasta)));
+          a.addAction(m.clipItem.createSetInOutPointsAction(tickAlCuadro(f.desde, tpfNueva), tickAlCuadro(f.hasta, tpfNueva)));
         }, "entrada y salida del fragmento " + (i + 1));
       });
       project.lockedAccess(() => {
@@ -3222,6 +3270,12 @@ async function armarSecuencia(params) {
       sinReleer.push(`${i + 1} (${m.nombre} ${f.desde}-${f.hasta}s)` + (midio ? "" : ": releerlo tiró"));
       if (calculado > fin) fin = calculado;
     }
+    if (tpfNueva !== null && midio && !huecos) {
+      const pedidos = (ticksAlCuadro(Math.round(f.hasta * TICKS_POR_SEGUNDO), tpfNueva) -
+                       ticksAlCuadro(Math.round(f.desde * TICKS_POR_SEGUNDO), tpfNueva)) / tpfNueva;
+      const quedaron = Math.round((fin - cursor) * TICKS_POR_SEGUNDO / tpfNueva);
+      if (quedaron !== pedidos) largoDistinto.push(`fragmento ${i + 1} (${m.nombre}): ${quedaron} cuadros, pedidos ${pedidos}`);
+    }
     puestos.push({
       medio: m.nombre, desdeFuente: f.desde, hastaFuente: f.hasta,
       enLaSecuencia: Number(cursor.toFixed(3)), hasta: fin
@@ -3261,9 +3315,21 @@ async function armarSecuencia(params) {
        * que hace falta para una pista de tomas alternativas.
        */
       const fuenteDesde = typeof c.desde === "number" ? c.desde : 0;
+      /* AL CUADRO: la entrada al más cercano y la DURACIÓN en cuadros enteros, que es lo que `dura` quiere
+         decir. Sin esto, 14,733333 s a 30 fps —442 cuadros con seis decimales— entraron con 441: Premiere
+         baja el out al cuadro (2026-10-12, un reporte de uso). */
+      const kEntrada = ticksAlCuadro(Math.round(fuenteDesde * TICKS_POR_SEGUNDO), tpfNueva);
+      const cuadrosPedidos = tpfNueva !== null ? Math.round(c.dura * TICKS_POR_SEGUNDO / tpfNueva) : null;
+      if (cuadrosPedidos !== null && cuadrosPedidos < 1) {
+        capasFallidas.push(`capa ${i + 1}: dura ${c.dura}s no llega a medio cuadro, y una capa de cero cuadros no entra`);
+        continue;
+      }
+      const kSalida = cuadrosPedidos !== null ? kEntrada + cuadrosPedidos * tpfNueva
+                                              : Math.round((fuenteDesde + c.dura) * TICKS_POR_SEGUNDO);
       project.lockedAccess(() => {
         transaccion(project, (a) => {
-          a.addAction(mc.clipItem.createSetInOutPointsAction(aTick(fuenteDesde), aTick(fuenteDesde + c.dura)));
+          a.addAction(mc.clipItem.createSetInOutPointsAction(
+            ppro.TickTime.createWithTicks(String(kEntrada)), ppro.TickTime.createWithTicks(String(kSalida))));
         }, "duración de la capa " + (i + 1));
       });
       project.lockedAccess(() => {
@@ -3274,7 +3340,7 @@ async function armarSecuencia(params) {
            * índice de pista de audio; si resulta ser otra cosa, el verbo lo
            * informa contando dónde aparecieron los clips de audio. */
           const pistaAudio = typeof c.pistaAudio === "number" ? c.pistaAudio - 1 : pistaIndex;
-          a.addAction(editor.createOverwriteItemAction(mc.medio, aTick(c.en), pistaIndex, pistaAudio));
+          a.addAction(editor.createOverwriteItemAction(mc.medio, tickAlCuadro(c.en, tpfNueva), pistaIndex, pistaAudio));
         }, "poner la capa " + (i + 1));
       });
       /*
@@ -3325,8 +3391,15 @@ async function armarSecuencia(params) {
           }
           const quedoNombre = typeof c.nombre === "string" && c.nombre.trim()
             ? String(await x.item.getName()) === c.nombre : null;
+          /* El largo en CUADROS, releído de los ticks: «en 30.733 · hasta 45.433» no dice que falta uno. */
+          let cuadros = null;
+          try { const k = await ticksDe(x.item); cuadros = enCuadros(k.e - k.s, tpfNueva); } catch (e) { cuadros = null; }
+          if (cuadros !== null && cuadrosPedidos !== null && cuadros !== cuadrosPedidos) {
+            largoDistinto.push(`capa ${i + 1} (${mc.nombre}): ${cuadros} cuadros, pedidos ${cuadrosPedidos}`);
+          }
           capasPuestas.push({
-            en: x.desde, hasta: x.hasta, pista: lugar.etiqueta, sinVideo: lugar.audio || undefined,
+            en: x.desde, hasta: x.hasta, cuadros: cuadros === null ? undefined : cuadros,
+            pista: lugar.etiqueta, sinVideo: lugar.audio || undefined,
             medio: mc.nombre, fuenteDesde: fuenteDesde,
             nombre: typeof c.nombre === "string" ? String(await x.item.getName()) : undefined,
             nombreQuedo: quedoNombre, apagado: c.apagado === true || undefined,
@@ -3493,6 +3566,8 @@ async function armarSecuencia(params) {
         ? ` · ${capasRotas.length} capa(s) SE PISARON entre sí y ya no están enteras: ${capasRotas.join(", ")} — dos capas en la misma pista y la misma posición se comen; poné cada una en su pista`
         : "") +
       (capasFallidas.length ? ` · CAPAS FALLIDAS: ${capasFallidas.join(" | ")}` : "") +
+      (largoDistinto.length ? ` · OJO: ${largoDistinto.length} entraron con OTRO LARGO en cuadros: ${largoDistinto.slice(0, 4).join(" | ")}` : "") +
+      (tpfNueva === null ? " · OJO: no se pudo leer el timebase, y los bordes van sin llevar al cuadro" : "") +
       (audioApagado
         ? (audioApagado.socios
             ? ` · audio de las capas apagadas: ${audioApagado.quedaron}/${audioApagado.socios} clip(s) apagados`
@@ -3526,6 +3601,7 @@ async function armarSecuencia(params) {
     audioApagado: audioApagado,
     sinReleer: sinReleer,
     capasFallidas: capasFallidas,
+    largoDistinto: largoDistinto,
     fallidos: fallidos,
     duracionTotal: Number(cursor.toFixed(3))
   };
@@ -5169,6 +5245,10 @@ async function editar(params) {
   const clip = encontrado.clip;
 
   const antes = await tiemposDe(clip);
+  /* Y en TICKS, que es con lo que se hacen las cuentas y se juzga el cambio: con los segundos redondeados
+     al milisegundo, un delta salía corrido hasta medio milisegundo, y un cambio más chico se leía como
+     «NO CAMBIÓ NADA» habiendo corrido (2026-10-12, un reporte de uso). */
+  const kAntes = await ticksDe(clip);
 
   /*
    * Los vinculados se buscan ANTES de tocar nada: se identifican por rango de
@@ -5182,7 +5262,38 @@ async function editar(params) {
    */
   const vinculados = params.vinculados === false ? [] : await buscarVinculados(sequence, clip);
   const antesVinculados = [];
-  for (let i = 0; i < vinculados.length; i++) antesVinculados.push(await tiemposDe(vinculados[i]));
+  for (let i = 0; i < vinculados.length; i++) antesVinculados.push(await ticksDe(vinculados[i]));
+
+  /*
+   * AL CUADRO, si hay VIDEO y va a 1x (2026-10-12, un reporte de uso). Mover y recortar no se pegan al cuadro
+   * —ver «Sub-frame: mover NO se pega»—, así que un `desde`, una `entrada` o una `salida` con seis
+   * decimales dejaba el borde entre dos cuadros: una salida de 14,7334 terminó 0,07 ms pasado el borde, y
+   * Premiere dibujó en el export el cuadro siguiente del material. Se lleva cada borde al cuadro MÁS
+   * CERCANO de la secuencia, como haría la interfaz, y el resumen dice qué se movió.
+   *
+   * Un clip de AUDIO solo queda exacto: arrastrado no se recuantiza —ver `sincro.md`—, y la sincro fina
+   * lo usa. Lo que lleva video, sí: el socio de un audio es su video, y se mueve con el mismo delta. A otra
+   * velocidad tampoco: el fin depende de la velocidad, y `velocidadDe` la redondea a cuatro decimales.
+   */
+  let tpf = null;
+  try { tpf = Number(await sequence.getTimebase()); } catch (e) { tpf = null; }
+  if (!isFinite(tpf) || tpf <= 0) tpf = null;
+  const conVideo = /^V/.test(String(encontrado.pista)) || vinculados.length > 0;
+  const tocaBordes = ["desde", "entrada", "salida"].some((k) => typeof params[k] === "number");
+  const velocidad = tocaBordes && conVideo ? await velocidadDe(clip) : null;
+  const alCuadro = conVideo && tpf !== null && velocidad === 1;
+  const sinCuadro = tocaBordes && conVideo && !alCuadro
+    ? (tpf === null ? "no se pudo leer el timebase" : `va a ${velocidad === null ? "una velocidad que no se pudo leer" : velocidad + "x"}`)
+    : null;
+  const llevados = [];
+  const llevar = (que, pedidoSeg, ticks) => {
+    if (!alCuadro) return ticks;
+    const q = ticksAlCuadro(ticks, tpf);
+    if (q !== ticks) llevados.push(`${que} ${pedidoSeg} → ${(q / TICKS_POR_SEGUNDO).toFixed(6)}`);
+    return q;
+  };
+  const tickDe = (k) => ppro.TickTime.createWithTicks(String(k));
+  const seg = (k) => (k / TICKS_POR_SEGUNDO).toFixed(3);
 
   const acciones = [];
   const pedido = [];
@@ -5207,7 +5318,7 @@ async function editar(params) {
    * alguna vez no, se vería como un desalineado y el verbo lo informa.
    */
   const aTodos = (fabrica) => {
-    acciones.push(() => fabrica(clip, antes));
+    acciones.push(() => fabrica(clip, kAntes));
     for (let i = 0; i < vinculados.length; i++) {
       const v = vinculados[i], suyo = antesVinculados[i];
       acciones.push(() => fabrica(v, suyo));
@@ -5215,10 +5326,11 @@ async function editar(params) {
   };
 
   if (typeof params.desde === "number") {
-    const delta = aTick(params.desde - antes.desde);
+    const s = llevar("desde", params.desde, Math.round(params.desde * TICKS_POR_SEGUNDO));
+    const dDesde = s - kAntes.s;
     /* Un movimiento que pasa a un vecino deja el clip FUERA DE ORDEN en la lista de su pista, y
        Premiere no lo dibuja ni lo exporta: ver `rompeElOrden`. Se rebota ANTES de tocar nada. */
-    const rotos = await rompeElOrden(sequence, [clip].concat(vinculados), Number(delta.ticks));
+    const rotos = await rompeElOrden(sequence, [clip].concat(vinculados), dDesde);
     if (rotos.length) {
       throw new Error(`Mover "${encontrado.nombre}" a ${params.desde}s lo pasa por encima de ` +
         rotos.map((r) => `${r.pista}[${r.vecino.indice}] (en ${r.vecino.segundos.toFixed(2)}s)`).join(", ") +
@@ -5226,18 +5338,31 @@ async function editar(params) {
         "`clips` lo lea en su lugar (medido el 2026-09-30). Para llevarlo entre otros clips: `clonar` a la posición " +
         "nueva —el clon entra en orden— y `borrar` el original, o moverlo a mano en Premiere. NO se movió nada.");
     }
-    aTodos((c) => c.createMoveAction(delta));
-    pedido.push(`mover a ${params.desde}s (delta ${(params.desde - antes.desde).toFixed(3)}s)`);
+    aTodos((c) => c.createMoveAction(tickDe(dDesde)));
+    pedido.push(`mover a ${seg(s)}s (delta ${seg(dDesde)}s)`);
   }
+  let iNueva = null;
   if (typeof params.entrada === "number") {
-    const delta = params.entrada - antes.entrada;
-    aTodos((c, suyo) => c.createSetInPointAction(aTick(suyo.entrada + delta)));
-    pedido.push(`entrada a ${params.entrada}s (delta ${delta.toFixed(3)}s sobre el material)`);
+    iNueva = llevar("entrada", params.entrada, Math.round(params.entrada * TICKS_POR_SEGUNDO));
+    const dEntrada = iNueva - kAntes.i;
+    aTodos((c, suyo) => c.createSetInPointAction(tickDe(suyo.i + dEntrada)));
+    pedido.push(`entrada a ${seg(iNueva)}s (delta ${seg(dEntrada)}s sobre el material)`);
   }
   if (typeof params.salida === "number") {
-    const delta = params.salida - antes.entrada;
-    aTodos((c, suyo) => c.createSetOutPointAction(aTick(suyo.entrada + delta)));
-    pedido.push(`salida a ${params.salida}s (${delta.toFixed(3)}s después de su entrada)`);
+    let o = Math.round(params.salida * TICKS_POR_SEGUNDO);
+    if (alCuadro) {
+      /* Lo que tiene que caer en un cuadro es el FIN en la secuencia, no el punto de fuente: a 1x el fin es
+         desde + (salida − entrada). Con `entrada` en la misma llamada el in-point mueve el clip, así que
+         ahí se lleva al cuadro la DURACIÓN sobre la entrada nueva. */
+      const q = iNueva !== null
+        ? iNueva + ticksAlCuadro(o - iNueva, tpf)
+        : kAntes.i + ticksAlCuadro(kAntes.s + (o - kAntes.i), tpf) - kAntes.s;
+      if (q !== o) llevados.push(`salida ${params.salida} → ${(q / TICKS_POR_SEGUNDO).toFixed(6)}`);
+      o = q;
+    }
+    const dSalida = o - kAntes.i;
+    aTodos((c, suyo) => c.createSetOutPointAction(tickDe(suyo.i + dSalida)));
+    pedido.push(`salida a ${seg(o)}s (${seg(dSalida)}s después de su entrada)`);
   }
   if (typeof params.apagado === "boolean") {
     acciones.push(() => clip.createSetDisabledAction(params.apagado));
@@ -5265,8 +5390,14 @@ async function editar(params) {
 
   // La prueba: releer. Una transacción puede "salir bien" sin mover nada.
   const despues = await tiemposDe(clip);
-  const cambio =
-    antes.desde !== despues.desde || antes.hasta !== despues.hasta || antes.entrada !== despues.entrada;
+  /* EN TICKS (2026-10-12, un reporte de uso): con los segundos redondeados, una salida de 14,7334 llevada a
+     14,733333 —0,07 ms— contestó «NO CAMBIÓ NADA», y la transacción había corrido: el export siguiente
+     salió distinto. */
+  const kDespues = await ticksDe(clip);
+  const cambio = kAntes.s !== kDespues.s || kAntes.e !== kDespues.e || kAntes.i !== kDespues.i;
+  const cuadros = (k) => (tpf === null ? null : { desde: enCuadros(k.s, tpf), hasta: enCuadros(k.e, tpf), dura: enCuadros(k.e - k.s, tpf) });
+  const cAntes = cuadros(kAntes), cDespues = cuadros(kDespues);
+  const entreCuadros = conVideo && cDespues !== null && (!Number.isInteger(cDespues.desde) || !Number.isInteger(cDespues.hasta));
 
   /*
    * Y releer los vinculados: no alcanza con que se hayan movido, tienen que
@@ -5296,6 +5427,10 @@ async function editar(params) {
       `"${encontrado.nombre}" en ${encontrado.pista}: ` +
       `${antes.desde}–${antes.hasta}s (entrada ${antes.entrada}s) → ` +
       `${despues.desde}–${despues.hasta}s (entrada ${despues.entrada}s, desfase ${despues.desfase}s)` +
+      (cDespues ? ` · cuadros ${cDespues.desde}–${cDespues.hasta} (${cDespues.dura})` : "") +
+      (llevados.length ? ` · al cuadro más cercano: ${llevados.join(", ")}` : "") +
+      (sinCuadro ? ` · OJO: los bordes van sin llevar al cuadro: ${sinCuadro}` : "") +
+      (entreCuadros ? " · OJO: un borde quedó ENTRE cuadros, y Premiere dibuja el cuadro que el clip toca apenas" : "") +
       (vinculados.length ? ` · ${vinculados.length} vinculado(s) movidos con él` : "") +
       (desalineados.length
         ? ` · OJO: ${desalineados.length} quedaron DESALINEADOS (${desalineados.join(", ")})`
@@ -5307,6 +5442,9 @@ async function editar(params) {
     pedido: pedido,
     antes: antes,
     despues: despues,
+    cuadros: { antes: cAntes, despues: cDespues },
+    alCuadro: llevados,
+    entreCuadros: entreCuadros,
     vinculados: vinculados.length,
     desalineados: desalineados,
     cambio: cambio,
@@ -7520,7 +7658,7 @@ async function cerrarHuecos(params) {
   const huecos = [];
   for (let i = 1; i < items.length; i++) {
     const g = tiempos[i].desde - tiempos[i - 1].hasta;
-    if (g > 0.002 && g <= tope) huecos.push({ i: i - 1, hasta: tiempos[i].desde, g: Number(g.toFixed(4)) });
+    if (g > 0.002 && g <= tope) huecos.push({ i: i - 1, hasta: tiempos[i].desde, g: Number(g.toFixed(4)), sig: items[i] });
   }
   if (!huecos.length) {
     return { resumen: `"${sequence.name}" en ${pista}: no hay huecos de hasta ${tope}s.`, cerrados: 0, huecos: [] };
@@ -7539,10 +7677,13 @@ async function cerrarHuecos(params) {
        * volver a pasar.
        */
       const vinc = esAudio ? [] : await buscarVinculados(sequence, items[h.i]);
+      /* Hasta el inicio EXACTO del siguiente, en ticks (2026-10-12): con el redondeado al milisegundo, a 30 fps
+         quedaba un hueco de 0,33 ms —o un solape, cuando el redondeo subía—. */
+      const fin = ppro.TickTime.createWithTicks(String((await h.sig.getStartTime()).ticks));
       project.lockedAccess(() => {
         transaccion(project, (a) => {
-          a.addAction(items[h.i].createSetEndAction(aTick(h.hasta)));
-          for (let k = 0; k < vinc.length; k++) a.addAction(vinc[k].createSetEndAction(aTick(h.hasta)));
+          a.addAction(items[h.i].createSetEndAction(fin));
+          for (let k = 0; k < vinc.length; k++) a.addAction(vinc[k].createSetEndAction(fin));
         }, "cerrar hueco");
       });
     } catch (e) {
@@ -9087,6 +9228,12 @@ async function unirVideo(params) {
 
   const { pista, pistaIndex } = pistaDeVideo(params.pista, "unirVideo");
   const editor = ppro.SequenceEditor.getEditor(sequence);
+  /* El fin estirado va al cuadro MÁS CERCANO: `createSetEndAction` no se pega, y un `hasta` con seis decimales
+     —o el de `clips`, redondeado al milisegundo— dejaba el fin entre cuadros, que Premiere dibuja como un
+     cuadro de más (2026-10-12, un reporte de uso). Es video: la pista es de video. */
+  let tpf = null;
+  try { tpf = Number(await sequence.getTimebase()); } catch (e) { tpf = null; }
+  if (!isFinite(tpf) || tpf <= 0) tpf = null;
 
   const traer = async () => {
     const track = await sequence.getVideoTrack(pistaIndex);
@@ -9124,7 +9271,7 @@ async function unirVideo(params) {
       if (!(await vaciarSeleccion(sequence, sel, resto.map((x) => x.item)))) seleccionSucia++;
       project.lockedAccess(() => {
         transaccion(project, (a) => {
-          a.addAction(primero.item.createSetEndAction(aTick(r.hasta)));
+          a.addAction(primero.item.createSetEndAction(tickAlCuadro(r.hasta, tpf)));
         }, "estirar el primero");
       });
       await esperarEntreTx();
@@ -12699,6 +12846,12 @@ async function colocarLote(params) {
 
   const editor = ppro.SequenceEditor.getEditor(sequence);
   let transacciones = 0, fallosTx = 0;
+  /* LA GRILLA: los in/out van al cuadro MAS CERCANO antes de pegar, porque Premiere los BAJA —un `hasta`
+     con seis decimales apenas debajo del borde perdía un cuadro entero: ver `ticksAlCuadro`—. */
+  let tpf = null;
+  try { tpf = Number(await sequence.getTimebase()); } catch (e) { tpf = null; }
+  if (!isFinite(tpf) || tpf <= 0) tpf = null;
+  const kAlCuadro = (seg) => ticksAlCuadro(Math.round(Number(seg) * TICKS_POR_SEGUNDO), tpf);
 
   /* LOTES SIN MEDIO REPETIDO, armados aca y no pedidos al que llama. Greedy: el
    * fragmento entra al lote actual si su medio no esta ya ahi y todavia hay lugar;
@@ -12721,12 +12874,12 @@ async function colocarLote(params) {
     let okIO = false, okPegar = false;
     project.lockedAccess(() => {
       okIO = transaccion(project, (a) => {
-        for (const f of lote) a.addAction(cache[f.medio].clipItem.createSetInOutPointsAction(aTick(f.desde), aTick(f.hasta)));
+        for (const f of lote) a.addAction(cache[f.medio].clipItem.createSetInOutPointsAction(tickAlCuadro(Number(f.desde), tpf), tickAlCuadro(Number(f.hasta), tpf)));
       }, `in/out de ${lote.length} fragmento(s)`);
     });
     project.lockedAccess(() => {
       okPegar = transaccion(project, (a) => {
-        for (const f of lote) a.addAction(editor.createOverwriteItemAction(cache[f.medio].medio, aTick(f.en), pistaIndex, pistaAudio));
+        for (const f of lote) a.addAction(editor.createOverwriteItemAction(cache[f.medio].medio, tickAlCuadro(Number(f.en), tpf), pistaIndex, pistaAudio));
       }, `pegar ${lote.length} fragmento(s)`);
     });
     transacciones += 2;
@@ -12778,9 +12931,10 @@ async function colocarLote(params) {
     }
   } catch (e) { /* sin la pista de audio queda el veredicto del video, que es el de antes */ }
 
-  const bien = [], mal = [], soloAudio = [], cuantizados = [];
+  const bien = [], mal = [], soloAudio = [], cuantizados = [], largoDistinto = [];
   for (const f of frags) {
-    const dura = Number(f.hasta) - Number(f.desde);
+    /* Contra lo que se PEGÓ, que es el pedido llevado al cuadro: el pedido crudo puede estar entre dos. */
+    const dura = (kAlCuadro(f.hasta) - kAlCuadro(f.desde)) / TICKS_POR_SEGUNDO;
     let c = await clipDelMedio(puestos, Number(f.en), cache[f.medio].nombre, 0.05);
     let enAudio = false;
     if (!c) {
@@ -12799,10 +12953,15 @@ async function colocarLote(params) {
     if (okDur && okEnt) {
       bien.push(f.en);
       if (enAudio) soloAudio.push(f.en);
-      /* Premiere BAJA el in-point al cuadro de la secuencia al pegar, también el del audio (medido:
-         0,01075 → 0 y 72,91056 → 72,90 en una de 50 fps). Entra en la tolerancia, pero para una
-         sincro al sample es el dato: se dice cuánto. */
+      /* El in-point va al cuadro de la secuencia: lo lleva este verbo al más cercano, y si no, Premiere lo
+         BAJA al pegar —también el del audio, medido: 0,01075 → 0 y 72,91056 → 72,90 a 50 fps—. Entra en la
+         tolerancia, pero para una sincro al sample es el dato: se dice cuánto. */
       if (Math.abs(entrada - Number(f.desde)) > 0.0005) cuantizados.push(`${f.en}s: ${Number(f.desde)} → ${entrada}`);
+      /* Y el largo en CUADROS: la tolerancia de 0,05 s se traga un cuadro entero a 25 fps o más. */
+      if (tpf !== null) {
+        const pedidos = Math.round(dura * TICKS_POR_SEGUNDO / tpf), quedaron = Math.round(c.dura * TICKS_POR_SEGUNDO / tpf);
+        if (pedidos !== quedaron) largoDistinto.push(`${f.en}s: ${quedaron} cuadros, pedidos ${pedidos}`);
+      }
     }
     else mal.push(`${f.medio} en ${f.en}s${enAudio ? ` (en ${etqA})` : ""}: dura ${c.dura} (queria ${dura.toFixed(3)}), entrada ${c.entrada} (queria ${f.desde})`);
   }
@@ -12815,10 +12974,13 @@ async function colocarLote(params) {
       (porTx > 1 ? ` de hasta ${porTx}, sin repetir medio` : "") +
       (fallosTx ? ` · ${fallosTx} transacción(es) NO corrieron` : "") +
       (soloAudio.length ? ` · ${soloAudio.length} SIN VIDEO: releídos en ${etqA}, no en ${pista}` : "") +
-      (cuantizados.length ? ` · ${cuantizados.length} con el in-point BAJADO al cuadro por Premiere (${cuantizados.slice(0, 3).join(" | ")}): una sincro al sample va en el archivo` : "") +
+      (cuantizados.length ? ` · ${cuantizados.length} con el in-point llevado al cuadro de la secuencia (${cuantizados.slice(0, 3).join(" | ")}): una sincro al sample va en el archivo` : "") +
+      (largoDistinto.length ? ` · OJO: ${largoDistinto.length} con OTRO LARGO en cuadros: ${largoDistinto.slice(0, 3).join(" | ")}` : "") +
+      (tpf === null ? " · OJO: no se pudo leer el timebase, y los in/out van sin llevar al cuadro" : "") +
       (mal.length ? ` · MAL ${mal.length}: ${mal.slice(0, 3).join(" | ")}` : "") +
       ` · ${textoInOut(inOut)}`,
     pista: pista, colocados: bien.length, total: frags.length, soloAudio: soloAudio, cuantizados: cuantizados,
+    largoDistinto: largoDistinto,
     transacciones: transacciones, mal: mal, inOut: inOut
   };
 }
@@ -13367,6 +13529,11 @@ async function clonar(params) {
   }
 
   const t4 = await tiemposDe(ubic.clip);
+  /* El OFFSET en ticks y desde el inicio EXACTO (2026-10-12): con el redondeado al milisegundo, a 30 fps un
+     clip en 30,73333 se leía 30,733, y el clon caía 0,33 ms pasado el cuadro pedido —sin su primer cuadro y
+     con uno de más al final—. A 25 fps no se veía: ahí cada cuadro son 40 ms justos. */
+  const inicioExacto = Number((await ubic.clip.getStartTime()).ticks);
+  const offsetTicks = Math.round(segDestino * TICKS_POR_SEGUNDO) - inicioExacto;
   const track = pistaNueva ? null : await sequence.getVideoTrack(destIdx);
   const contar = async () => track
     ? (await track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false)).length
@@ -13379,7 +13546,7 @@ async function clonar(params) {
     project.lockedAccess(() => {
       const acc = ed.createCloneTrackItemAction(
         ubic.clip,
-        aTick(segDestino - t4.desde),      /* OFFSET de tiempo, no posición */
+        ppro.TickTime.createWithTicks(String(offsetTicks)),   /* OFFSET de tiempo, no posición */
         destIdx - origenIdx,               /* OFFSET de pista, no índice */
         0
       );

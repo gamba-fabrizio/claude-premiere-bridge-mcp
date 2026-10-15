@@ -1,6 +1,6 @@
 
 
-## Vigente (2026-10-08)
+## Vigente (2026-10-15)
 
 - **Una guarda se verifica haciéndola fallar**, mirando por posición y sin comentarios ni strings.
   → «Una guarda se verifica HACIÉNDOLA FALLAR»
@@ -24,6 +24,9 @@
 - **Un verificador que relee un clip lo busca por tiempo Y por medio**: por tiempo solo, uno ajeno que
   arranca en el mismo punto pasa por el puesto. → «El veredicto releía por TIEMPO»
 - **Un pendiente se cierra en la misma tanda que su trabajo.** → «Un pendiente que no se cierra»
+- **USO.md llega por tres vías y ninguna es una copia**: el `@USO.md` del CLAUDE.md, la skill `premiere`
+  —un symlink a él— y las `instructions` del servidor, su sección `Antes de la primera llamada` leída al
+  arrancar, con tope de 2.048 caracteres. → «Las instructions del servidor y la skill»
 
 # Método de verificación
 
@@ -354,6 +357,37 @@ capa de un wav con apagado, en V2 a los 2 s     quedó en A7 y APAGADA; la PNG, 
 colocarLote de un wav en V2 a los 2 s           «1 de 1 … 1 SIN VIDEO: releídos en A8, no en V2»
 colocarLote de un video en V2, vacío y encima   1 de 1 cada uno; el de encima pisó 2–3 s y la PNG siguió en 3–6
 ```
+
+## Las instructions del servidor y la skill `premiere` salen de USO.md (2026-10-15)
+
+El servidor no mandaba `instructions`. Registrado con `--scope user`, daba 60 herramientas que escriben en
+el timeline en todas las sesiones, y el modelo no recibía ni una advertencia: el README se las daba a la
+persona, no a Claude. Ahora `server/instrucciones.js` las arma al arrancar con la sección `Antes de la
+primera llamada` de USO.md y una cabeza que manda a la skill y nombra la ruta de ESE USO.md: 1.969
+caracteres. No hay copia: lo que se edite en esa sección es lo que reciben todas las sesiones.
+
+Leído en el código de Claude Code 2.1.295 y en transcripts de sesiones largas:
+
+```
+tope          2.048 caracteres; lo que pasa se corta por el final con «… [truncated]». La
+              variable CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH lo sube, y sube también el de las
+              descripciones de las herramientas. Desde la 2.1.296, 4.096.
+cómo llega    como un adjunto en la conversación cuando el servidor está conectado, contra lo
+              ya anunciado: un servidor que conecta tarde entra en el turno siguiente, y si
+              las instructions cambian se re-anuncian.
+compactar     sobreviven: cada compactación (21, de la 2.1.280 a la 2.1.295) tiene al lado el
+              re-anuncio de las instructions del servidor que las mandaba.
+```
+
+USO.md es también la skill `premiere`: arranca con el frontmatter, y `skills/premiere/SKILL.md` es un
+symlink a él; se instala con otro symlink (ver el README). Una skill invocada vuelve sola después de
+compactar, y un archivo leído no. El real es USO.md y no la skill porque un editor que guarda
+reemplazando el archivo convierte en copia el symlink que edita.
+
+`test.js` hace un initialize de verdad con un cliente MCP y compara lo recibido con lo que sale de USO.md;
+la guarda se prueba antes contra tres mutaciones —sin la sección, la sección inflada y un servidor que no
+las pasa—. La de la skill mira que sea un symlink a USO.md, el frontmatter, y que la instalada apunte a
+esta copia del repo.
 
 ## Cerrados: casos resueltos, acotados o desmentidos
 

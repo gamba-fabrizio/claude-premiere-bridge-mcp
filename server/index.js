@@ -17,6 +17,7 @@ const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
 const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
 const { z } = require("zod");
 const { enviar } = require("./bridge.js");
+const { instrucciones } = require("./instrucciones.js");
 
 /*
  * SOLO LAS CLAVES DECLARADAS, Y LAS DEMAS REBOTAN.
@@ -50,7 +51,8 @@ function soloEstas(shape) {
 }
 
 
-const server = new McpServer({ name: "premiere-bridge", version: "0.1.0" });
+// Las instructions salen de USO.md al arrancar, no de una copia: por qué y con qué tope, en instrucciones.js.
+const server = new McpServer({ name: "premiere-bridge", version: "0.1.0" }, { instructions: instrucciones() });
 
 /** Respuesta de texto, con el objeto entero abajo para no perder contexto. */
 function texto(resumen, datos) {
@@ -473,7 +475,10 @@ server.registerTool(
     description:
       "Todos los clips de video con su pista, índice, nombre y tiempos en segundos. " +
       "Es lo que permite trabajar sobre la secuencia entera en vez de solo sobre lo " +
-      "que el usuario tenga seleccionado.",
+      "que el usuario tenga seleccionado.\n\n" +
+      "`cuadros` trae los bordes en cuadros de la secuencia, leídos de los ticks: una fracción " +
+      "(1364,002) es un borde ENTRE cuadros, que los segundos redondeados no muestran —y Premiere " +
+      "dibuja el cuadro que el clip toca apenas—.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       proyecto: z
@@ -585,8 +590,11 @@ server.registerTool(
       "**Los tiempos son de FUENTE**: los campos `desdeFuente` y `hastaFuente` de " +
       "premiere_transcripcion, NO los de secuencia. Pasarle los otros arma un corte equivocado " +
       "sin avisar.\n\n" +
-      "El audio vinculado del medio viene solo y alineado. Los cortes se pegan al frame, así que " +
-      "pueden arrancar hasta un frame antes de lo pedido.\n\n" +
+      "El audio vinculado del medio viene solo y alineado. Los bordes —`desde`, `hasta`, el `en` y la " +
+      "`dura` de las capas— van al cuadro MÁS CERCANO de la secuencia, y `dura` se cuenta en cuadros " +
+      "enteros: Premiere BAJA al cuadro lo que pega, y una `dura` con seis decimales apenas debajo del " +
+      "borde perdía un cuadro entero. Si el largo releído en cuadros no es el pedido, lo dice " +
+      "(`largoDistinto`).\n\n" +
       "Si dos fragmentos SEGUIDOS del mismo medio se pisan en la fuente, lo avisa (`pisados`): ese " +
       "tramo va a sonar dos veces. No lo rebota, por si es a propósito.\n\n" +
       "**La secuencia hereda tamaño y fps del material**, que con una cámara vertical moderna son " +
@@ -645,7 +653,7 @@ server.registerTool(
       /* 10 minutos: apagar el audio de muchas capas va en lotes espaciados —57 capas de 6 streams
          son ~23 s más—, y con 180 s el servidor podía dejar de esperar a un panel que seguía. */
       const r = await enviar("armarSecuencia", args, 600000);
-      return texto(r.resumen, { puestos: r.puestos, capasPuestas: r.capasPuestas, fallidos: r.fallidos, capasFallidas: r.capasFallidas, audioApagado: r.audioApagado, sinReleer: r.sinReleer, duracion: r.duracionTotal, reajuste: r.reajuste, inOut: r.inOut });
+      return texto(r.resumen, { puestos: r.puestos, capasPuestas: r.capasPuestas, fallidos: r.fallidos, capasFallidas: r.capasFallidas, largoDistinto: r.largoDistinto, audioApagado: r.audioApagado, sinReleer: r.sinReleer, duracion: r.duracionTotal, reajuste: r.reajuste, inOut: r.inOut });
     } catch (e) {
       return fallo(e);
     }
@@ -893,8 +901,13 @@ server.registerTool(
       "OJO con `entrada`: recortar la entrada también corre el arranque del clip en la secuencia, " +
       "igual que arrastrar su borde izquierdo. Para dejarlo donde está y cambiar solo qué parte de " +
       "la fuente se ve, no existe una acción directa.\n\n" +
-      "Todo entra en una transacción (un Cmd+Z) y devuelve los tiempos ANTES y DESPUÉS: si no " +
-      "cambió nada, lo dice.\n\n" +
+      "Todo entra en una transacción (un Cmd+Z) y devuelve los tiempos ANTES y DESPUÉS, también en " +
+      "cuadros: si no cambió nada, lo dice, y lo juzga en ticks —un cambio de 0,07 ms se ve—.\n\n" +
+      "En un clip con VIDEO a 1x, `desde`, `entrada` y `salida` van al cuadro MÁS CERCANO de la " +
+      "secuencia —de `salida`, el FIN en la secuencia— y el resumen dice qué movió: mover y recortar " +
+      "no se pegan al cuadro, y una salida con seis decimales dejaba el fin entre dos y Premiere " +
+      "dibujaba uno de más. Un audio solo queda exacto, para la sincro fina; a otra velocidad, también, " +
+      "y lo avisa.\n\n" +
       "Mover un clip POR ENCIMA de otro rebota sin tocar nada: la API no reordena la lista de la " +
       "pista, y un clip fuera de orden no se dibuja ni sale en el export (medido). Para llevarlo entre " +
       "otros clips: premiere_clonar a la posición nueva y premiere_borrar el original.",
@@ -923,7 +936,7 @@ server.registerTool(
   async (args) => {
     try {
       const r = await enviar("editar", args);
-      return texto(r.resumen, { antes: r.antes, despues: r.despues, cambio: r.cambio });
+      return texto(r.resumen, { antes: r.antes, despues: r.despues, cuadros: r.cuadros, alCuadro: r.alCuadro, cambio: r.cambio });
     } catch (e) {
       return fallo(e);
     }

@@ -99,6 +99,15 @@ escritorio sola no lo instala):
 claude mcp add premiere-bridge --scope user -- node /RUTA/A/TU/COPIA/premiere-bridge/server/index.js
 ```
 
+**4. Las reglas de uso.** Lo mínimo llega solo: el servidor manda como `instructions` la sección
+«Antes de la primera llamada» de `USO.md`, y Claude Code se la pone delante al modelo en cada sesión.
+El resto de `USO.md` conviene instalarlo como la skill `premiere` —es el mismo archivo, por
+symlink—, porque una skill vuelve sola después de compactar y un archivo leído no:
+
+```bash
+ln -s /RUTA/A/TU/COPIA/premiere-bridge/skills/premiere ~/.claude/skills/premiere
+```
+
 ## Las herramientas
 
 | Herramienta | Qué hace |

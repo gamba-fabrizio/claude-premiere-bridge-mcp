@@ -1,6 +1,6 @@
 
 
-## Vigente (2026-09-23)
+## Vigente (2026-10-12)
 
 - **Los nombres llegan en NFC y las rutas en NFD**: se compara normalizando, y una ruta de la API
   se pasa tal cual. → «Los nombres vienen en DOS normalizaciones», «Y las RUTAS vienen al revés»
@@ -12,6 +12,9 @@
 - **La grilla es la de la secuencia, no una constante.** → «La grilla es la de LA SECUENCIA»
 - **Una comparación con `>` rechaza el valor que cae exacto a medio cuadro.** → «Una comparación en
   segundos con»
+- **Un borde que va a Premiere se lleva al cuadro MÁS CERCANO**, y los veredictos van en ticks: Premiere
+  BAJA lo que pega, y los segundos redondeados al milisegundo esconden un cuadro de más. → «Los bordes
+  van al cuadro MÁS CERCANO»
 
 # Unicode, cuadros y otras trampas del mundo real
 
@@ -138,3 +141,32 @@ compara **en cuadros** con una tolerancia.
 
 Es la guarda contra el error imaginado rechazando el caso correcto, otra vez, y por punto flotante:
 el mismo `undefined !== undefined` con otro disfraz.
+
+## Los bordes van al cuadro MÁS CERCANO, y los veredictos en ticks (2026-10-12)
+
+Una sesión que armaba un video a 30 fps pidió una capa de 442 cuadros escrita con seis decimales
+—`{en: 30.733333, dura: 14.733333}`— y `armarSecuencia` contestó «en 30.733 · hasta 45.433»: **441**. A
+30 fps, 14,733333 s son 441,99999 cuadros, y Premiere **baja** al cuadro los in/out que se le pegan, así
+que el out cayó al cuadro de abajo. Ninguna tolerancia en segundos lo agarraba: 33 ms entran en cualquiera.
+
+Después, `editar {salida: 14.7334}` dejó el fin 0,07 ms pasado el borde de un cuadro —recortar no se pega
+al cuadro, como mover: ver «Sub-frame: mover NO se pega al frame»— y el export dibujó un cuadro de más.
+`clips` y `editar` decían «45.467», igual que el fin bueno, porque redondean al milisegundo; y al
+corregirlo, `editar` contestó **«NO CAMBIÓ NADA» habiendo corrido**: juzgaba con los segundos redondeados,
+y 0,07 ms no llegan a un milisegundo.
+
+Ahora:
+
+- `armarSecuencia` y `colocarLote` llevan al cuadro más cercano los bordes que se pegan (`ticksAlCuadro`),
+  cuentan la `dura` de las capas en cuadros enteros y releen el largo en cuadros (`largoDistinto`).
+- `editar` juzga el cambio y hace las cuentas en TICKS, y en un clip con video a 1x lleva `desde`,
+  `entrada` y `salida` al cuadro más cercano —de `salida`, el fin en la secuencia—. Un audio solo queda
+  exacto, para la sincro fina; a otra velocidad tampoco se lleva, y lo avisa.
+- `clips` y `editar` traen `cuadros`, leídos de los ticks: 1364,002 es un borde entre cuadros que
+  «45.467» escondía.
+- El mismo error estaba en `clonar`, `cerrarHuecos` y `unirVideo`, que hacían cuentas con los segundos
+  redondeados: el clon caía 0,33 ms pasado el cuadro pedido, y cerrar un hueco dejaba otro de 0,33 ms.
+
+A 25 fps nada de esto se veía: cada cuadro son 40 ms justos. Medido en vivo en un proyecto de prueba a
+30 fps, y en `test.js`, que ejecuta `editar` contra una API de mentira que recorta y mueve al tick, con
+mutación.

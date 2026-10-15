@@ -694,13 +694,155 @@ const cuerpoEditar = srcComandos.match(/async function editar[\s\S]*?\n  if \(!a
 if (!cuerpoEditar) {
   mal("no se encontró `editar` para revisarlo");
 } else if (/createSetOutPointAction\(aTick\(params\.salida\)\)/.test(cuerpoEditar[0]) ||
-           /createSetInPointAction\(aTick\(params\.entrada\)\)/.test(cuerpoEditar[0])) {
+           /createSetInPointAction\(aTick\(params\.entrada\)\)/.test(cuerpoEditar[0]) ||
+           /createSetOutPointAction\(tickDe\(o\)\)/.test(cuerpoEditar[0]) ||
+           /createSetInPointAction\(tickDe\(iNueva\)\)/.test(cuerpoEditar[0])) {
   mal("`editar` le copia a los vinculados el punto de fuente en vez de traducirlo",
       "un vinculado que arranca en otro lugar del material queda con otra duración, o en cero");
-} else if (!/suyo\.entrada \+ delta/.test(cuerpoEditar[0])) {
+} else if (!/suyo\.i \+ dEntrada/.test(cuerpoEditar[0]) || !/suyo\.i \+ dSalida/.test(cuerpoEditar[0])) {
   mal("`editar` no traduce `entrada`/`salida` por el delta de material de cada clip");
 } else {
   ok("`editar` traduce entrada y salida a cada vinculado");
+}
+
+/*
+ * `editar` LLEVA LOS BORDES AL CUADRO y JUZGA EL CAMBIO EN TICKS (2026-10-12, un reporte de uso). Una salida de 14,7334
+ * sobre una capa a 30 fps dejó el fin 0,07 ms pasado el borde —Premiere dibujó un cuadro de más en el export—, y
+ * corregirla a 14,733333 contestó «NO CAMBIÓ NADA» habiendo corrido. Se EJECUTA el `editar` real contra una API de
+ * mentira que recorta y mueve AL TICK, sin pegarse al cuadro, como la medida. Los casos: el del reporte; un audio
+ * solo, que queda exacto —la sincro fina lo usa— y donde un cambio de 0,07 ms tiene que verse; un par vinculado con
+ * in-points distintos, que tiene que terminar en el mismo cuadro; un `desde` con seis decimales; y uno a otra
+ * velocidad, que va sin llevar al cuadro y lo dice.
+ */
+{
+  const fuentes = ["async function editar(", "async function ubicarClip(", "async function buscarVinculados(",
+    "async function rompeElOrden(", "async function tiemposDe(", "async function ticksDe(", "async function velocidadDe(",
+    "function aNumero(", "function ticksAlCuadro(", "function enCuadros("].map((f) => cuerpoDeFuncion(srcComandos, f));
+  const casos = (() => {
+    if (fuentes.some((f) => !f)) return { error: "falta una de: editar, ubicarClip, buscarVinculados, rompeElOrden, tiemposDe, ticksDe, velocidadDe, aNumero, ticksAlCuadro, enCuadros" };
+    const guion = `
+      const vm = require("vm"), fuentes = ${JSON.stringify(fuentes)};
+      const TPS = 254016000000, TPF = TPS / 30;
+      const mundo = (video, audio) => {
+        let tx = 0;
+        const hacer = (x) => {
+          const it = { nombre: x.nombre, medio: x.medio || x.nombre, vel: x.vel || 1, s: x.s, e: x.e, i: x.i };
+          it.getStartTime = async () => ({ ticks: String(it.s) });
+          it.getEndTime = async () => ({ ticks: String(it.e) });
+          it.getInPoint = async () => ({ ticks: String(it.i) });
+          it.getName = async () => it.nombre;
+          it.getProjectItem = async () => ({ name: it.medio });
+          it.getSpeed = async () => it.vel;
+          /* AL TICK, sin pegarse al cuadro: es lo medido para recortar y mover. */
+          it.createSetOutPointAction = (k) => () => { it.e = it.s + Math.round((Number(k.ticks) - it.i) / it.vel); };
+          it.createMoveAction = (k) => () => { const d = Number(k.ticks); it.s += d; it.e += d; };
+          return it;
+        };
+        const V = video.map((l) => l.map(hacer)), A = audio.map((l) => l.map(hacer));
+        const pista = (l) => (l ? { getTrackItems: async () => l.slice() } : null);
+        const sequence = { name: "PRUEBA", getVideoTrackCount: async () => V.length, getAudioTrackCount: async () => A.length,
+          getVideoTrack: async (i) => pista(V[i]), getAudioTrack: async (i) => pista(A[i]), getTimebase: async () => String(TPF) };
+        const project = { lockedAccess: (f) => f(),
+          executeTransaction: (cb) => { const l = []; cb({ addAction: (x) => l.push(x) }); tx++; l.forEach((f) => f()); return true; } };
+        return { V, A, sequence, project, tx: () => tx };
+      };
+      const correr = async (w, params) => {
+        const ctx = { ppro: { TickTime: { createWithTicks: (x) => ({ ticks: String(x) }) }, Constants: { TrackItemType: { CLIP: "CLIP" } } },
+          getProyectoYSecuencia: async () => ({ project: w.project, sequence: w.sequence }), TICKS_POR_SEGUNDO: TPS,
+          contieneN: (a, b) => a.indexOf(b) !== -1, transaccion: (p, f) => p.executeTransaction(f),
+          aSegundos: (k) => Number(k.ticks) / TPS, aTick: (x) => ({ ticks: String(Math.round(x * TPS)) }) };
+        try {
+          vm.runInNewContext(fuentes.join("\\n") + "\\nthis.editar = editar;", ctx);
+          const r = await ctx.editar(params);
+          return { cambio: r.cambio, cuadros: r.cuadros.despues, alCuadro: r.alCuadro.length, entre: r.entreCuadros, resumen: r.resumen,
+                   iniV: w.V.flat().map((x) => x.s / TPF), finV: w.V.flat().map((x) => x.e / TPF), finA: w.A.flat().map((x) => x.e / TPF) };
+        } catch (e) { return { error: String(e.message || e).slice(0, 200) }; }
+      };
+      const f = (n) => Math.round(n * TPF);
+      (async () => {
+        const reporte = await correr(mundo([[], [{ nombre: "clip30.mp4", s: f(922), e: f(1363), i: 0 }]], []), { pista: "V2", indice: 0, salida: 14.7334 });
+        const wa = mundo([], [[{ nombre: "tono.wav", s: f(922), e: f(1363), i: 0 }]]);
+        const audio1 = await correr(wa, { pista: "A1", indice: 0, salida: 14.7334 });
+        const audio2 = await correr(wa, { pista: "A1", indice: 0, salida: 442 / 30 });
+        const vinc = await correr(mundo([[{ nombre: "cam.mp4", s: f(30), e: f(300), i: f(150) }]], [[{ nombre: "cam.mp4", s: f(30), e: f(300), i: f(240) }]]),
+                                  { pista: "V1", indice: 0, salida: 10.123456 });
+        const desde = await correr(mundo([[{ nombre: "cam.mp4", s: f(30), e: f(300), i: 0 }]], []), { pista: "V1", indice: 0, desde: 40.000333 });
+        const lento = await correr(mundo([[{ nombre: "cam.mp4", s: f(30), e: f(300), i: 0, vel: 0.5 }]], []), { pista: "V1", indice: 0, salida: 5.0004 });
+        console.log(JSON.stringify({ reporte, audio1, audio2, vinc, desde, lento }));
+      })();`;
+    try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
+    catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
+  })();
+  const err = casos.error || ["reporte", "audio1", "audio2", "vinc", "desde", "lento"].map((k) => casos[k] && casos[k].error).find(Boolean);
+  const { reporte: r, audio1: a1, audio2: a2, vinc: v, desde: d, lento: l } = casos;
+  if (err) mal("el `editar` de mentira no se pudo ejecutar", err);
+  else if (r.finV[0] !== 1364 || !r.cambio || r.alCuadro !== 1 || !r.cuadros || r.cuadros.dura !== 442) {
+    mal("`editar salida` no lleva el FIN al cuadro más cercano",
+        "una salida con seis decimales deja el borde entre dos cuadros, y Premiere dibuja uno de más · " + JSON.stringify(r));
+  } else if (a1.finA[0] === 1364 || a1.alCuadro !== 0) {
+    mal("`editar` lleva al cuadro un AUDIO solo", "arrastrado no se recuantiza, y la sincro fina lo usa · " + JSON.stringify(a1));
+  } else if (!a2.cambio || /NO CAMBIÓ NADA/.test(a2.resumen) || a2.finA[0] !== 1364) {
+    mal("`editar` dice NO CAMBIÓ NADA ante un cambio de menos de un milisegundo",
+        "juzga con los segundos redondeados, y la transacción corrió · " + JSON.stringify(a2));
+  } else if (v.finV[0] !== 184 || v.finA[0] !== 184) {
+    mal("`editar` no deja al vinculado en el mismo cuadro que el clip", JSON.stringify(v));
+  } else if (d.iniV[0] !== 1200 || d.alCuadro !== 1) {
+    mal("`editar desde` no lleva el inicio al cuadro más cercano", JSON.stringify(d));
+  } else if (l.alCuadro !== 0 || !/sin llevar al cuadro/.test(l.resumen)) {
+    mal("`editar` lleva al cuadro a otra velocidad, o no dice que no lo hizo", JSON.stringify(l));
+  } else {
+    ok("`editar` lleva los bordes de video al cuadro más cercano, deja exacto el audio solo y juzga el cambio en ticks");
+  }
+}
+
+/*
+ * LOS IN/OUT QUE SE PEGAN VAN AL CUADRO (2026-10-12, un reporte de uso). Premiere los BAJA al pegar, y una `dura` con seis
+ * decimales apenas debajo del borde —14,733333 s a 30 fps— entró con un cuadro ENTERO de menos. Por posición y sin
+ * comentarios: en `armarSecuencia` y `colocarLote` ningún `createSetInOutPointsAction` recibe un `aTick` crudo, las
+ * capas cuentan la duración en cuadros enteros, y el largo releído en cuadros llega al resumen de los dos.
+ */
+{
+  const sinCom = (x) => (x ? x.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "") : "");
+  const cArmar = sinCom(cuerpoDeFuncion(srcComandos, "async function armarSecuencia("));
+  const cLote = sinCom(cuerpoDeFuncion(srcComandos, "async function colocarLote("));
+  const crudo = /createSetInOutPointsAction\(\s*aTick\(/;
+  if (!cArmar || !cLote) {
+    mal("no se encontraron `armarSecuencia` o `colocarLote` para revisarlos");
+  } else if (crudo.test(cArmar) || crudo.test(cLote)) {
+    mal("`armarSecuencia` o `colocarLote` pegan in/out sin llevarlos al cuadro",
+        "Premiere los BAJA al pegar: con seis decimales apenas debajo del borde, un cuadro entero de menos");
+  } else if (!/cuadrosPedidos \* tpfNueva/.test(cArmar)) {
+    mal("las capas de `armarSecuencia` no cuentan la duración en cuadros enteros");
+  } else if (!/largoDistinto\.length \?/.test(cArmar) || !/largoDistinto\.length \?/.test(cLote)) {
+    mal("el largo releído en cuadros no llega al resumen de `armarSecuencia` o de `colocarLote`",
+        "un cuadro de menos entra en cualquier tolerancia de segundos");
+  } else {
+    ok("`armarSecuencia` y `colocarLote` pegan los in/out en el cuadro y avisan si el largo en cuadros no es el pedido");
+  }
+}
+
+/*
+ * NINGÚN BORDE SE ESCRIBE CON LOS SEGUNDOS REDONDEADOS (2026-10-12). `tiemposDe` redondea al milisegundo, y a 30 fps
+ * un cuadro no cae en un milisegundo justo: 30,73333 se lee 30,733. `clonar` sacaba el offset de ahí y el clon caía
+ * 0,33 ms pasado el cuadro; `cerrarHuecos` estiraba hasta el inicio redondeado del vecino y dejaba un hueco —o un
+ * solape— de 0,33 ms; `unirVideo` ponía el fin tal cual se lo pedían. Por posición y sin comentarios.
+ */
+{
+  const sinCom = (x) => (x ? x.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "") : "");
+  const cClonar = sinCom(cuerpoDeFuncion(srcComandos, "async function clonar("));
+  const cHuecos = sinCom(cuerpoDeFuncion(srcComandos, "async function cerrarHuecos("));
+  const cUnir = sinCom(cuerpoDeFuncion(srcComandos, "async function unirVideo("));
+  if (!cClonar || !cHuecos || !cUnir) {
+    mal("no se encontraron `clonar`, `cerrarHuecos` o `unirVideo` para revisarlos");
+  } else if (/aTick\(segDestino - t4\.desde\)/.test(cClonar) || !/getStartTime\(\)\)\.ticks\)[\s\S]*createCloneTrackItemAction\([\s\S]*offsetTicks/.test(cClonar)) {
+    mal("`clonar` saca el offset del inicio redondeado al milisegundo", "a 30 fps el clon cae 0,33 ms pasado el cuadro: sin su primer cuadro y con uno de más");
+  } else if (/createSetEndAction\(\s*aTick\(/.test(cHuecos) || !/h\.sig\.getStartTime\(\)/.test(cHuecos)) {
+    mal("`cerrarHuecos` estira hasta el inicio redondeado del vecino", "a 30 fps deja un hueco o un solape de 0,33 ms");
+  } else if (/createSetEndAction\(\s*aTick\(/.test(cUnir)) {
+    mal("`unirVideo` pone el fin sin llevarlo al cuadro", "createSetEndAction no se pega, y un fin entre cuadros dibuja uno de más");
+  } else {
+    ok("`clonar`, `cerrarHuecos` y `unirVideo` escriben los bordes en ticks exactos o en el cuadro, no con los segundos redondeados");
+  }
 }
 
 /*
@@ -1316,6 +1458,95 @@ if (unicas.length > 1) {
   mal("no se encontró ninguna herramienta registrada en el servidor");
 } else {
   ok(`las ${formas.length} herramientas usan la misma forma`, unicas[0]);
+}
+
+/*
+ * LAS INSTRUCTIONS DEL SERVIDOR (2026-10-15) son lo único que le llega al modelo de CUALQUIER
+ * instalación sin tocar su CLAUDE.md, y se rompen en silencio de tres formas: si se renombra la
+ * sección de USO.md de donde salen, el servidor manda solo el aviso de que no la encontró; si la
+ * sección crece, Claude Code corta el FINAL —lo ACUMULADO— sin decir nada; y si el servidor deja de
+ * pasarlas, no llega nada. Por eso se mira lo que recibe un CLIENTE en un initialize de verdad, y la
+ * guarda se prueba antes contra sus tres mutaciones.
+ */
+{
+  const ins = require("./server/instrucciones.js");
+  const uso = fs.existsSync(ins.RUTA_USO) ? fs.readFileSync(ins.RUTA_USO, "utf8") : "";
+  const defectos = (texto, recibidas) => {
+    const d = [];
+    if (!ins.seccionDe(texto, ins.SECCION)) d.push(`USO.md no tiene la sección «${ins.SECCION.slice(3)}»`);
+    if (typeof recibidas !== "string" || !recibidas) d.push("el servidor no manda instructions");
+    else if (recibidas.length > ins.TOPE_INSTRUCCIONES)
+      d.push(`${recibidas.length} caracteres, y Claude Code las corta a ${ins.TOPE_INSTRUCCIONES} por el final`);
+    return d;
+  };
+  const sinSeccion = uso.replace(ins.SECCION, "## Otra cosa");
+  const inflada = uso.replace(ins.SECCION, ins.SECCION + "\n\n- " + "relleno ".repeat(300));
+  const ciega = [
+    ["sin la sección", defectos(sinSeccion, ins.instruccionesDe(sinSeccion, ins.RUTA_USO))],
+    ["con la sección inflada", defectos(inflada, ins.instruccionesDe(inflada, ins.RUTA_USO))],
+    ["con un servidor que no las pasa", defectos(uso, undefined)],
+  ].filter(([, d]) => !d.length).map(([n]) => n);
+  /* El initialize va en otro proceso y con `cwd` en server/, para que el SDK salga de donde lo saca
+   * el servidor —en el público, de NODE_PATH—; conectado acá, dejaría handles abiertos en el test. */
+  const guion = `
+    const { server } = require(${JSON.stringify(path.join(raiz, "server/index.js"))});
+    const { Client } = require("@modelcontextprotocol/sdk/client/index.js");
+    const { InMemoryTransport } = require("@modelcontextprotocol/sdk/inMemory.js");
+    (async () => {
+      const [a, b] = InMemoryTransport.createLinkedPair();
+      await server.connect(a);
+      const cliente = new Client({ name: "test.js", version: "0" });
+      await cliente.connect(b);
+      process.stdout.write(JSON.stringify({ instructions: cliente.getInstructions() ?? null }));
+      process.exit(0);
+    })().catch((e) => { process.stdout.write(JSON.stringify({ error: String((e && e.message) || e) })); process.exit(0); });`;
+  let r;
+  try {
+    r = JSON.parse(execFileSync(process.execPath, ["-e", guion], { cwd: path.join(raiz, "server"), encoding: "utf8", timeout: 30000 }));
+  } catch (e) {
+    r = { error: String((e && e.message) || e).split("\n")[0] };
+  }
+  if (ciega.length) mal("la guarda de las instructions no ve sus propias mutaciones: " + ciega.join(", "));
+  else if (r.error) mal("no se pudo hacer un initialize contra el servidor para leer sus instructions", r.error);
+  else {
+    const d = defectos(uso, r.instructions);
+    if (!d.length && r.instructions !== ins.instrucciones()) d.push("lo que recibe un cliente no es lo que sale de USO.md");
+    if (d.length) mal("las instructions del servidor: " + d.join("; "));
+    else ok(`un cliente recibe las instructions de USO.md: ${r.instructions.length} caracteres (tope ${ins.TOPE_INSTRUCCIONES})`);
+  }
+}
+
+/*
+ * LA SKILL `premiere` ES USO.md (2026-10-15), por symlink: dos textos se desactualizan sin que nada lo
+ * vea. Y el archivo real es USO.md, no la skill, porque un editor que guarda REEMPLAZANDO el archivo
+ * convierte en copia el symlink que edita: así lo que se edita nunca es el symlink. Se mira que resuelva
+ * a USO.md, que USO.md arranque con el frontmatter de una skill y, si esta máquina la tiene instalada,
+ * que `~/.claude/skills/premiere` apunte a ESTE repo y no a una copia vieja.
+ */
+{
+  const usoReal = fs.realpathSync(path.join(raiz, "USO.md"));
+  const fm = fs.readFileSync(usoReal, "utf8").match(/^---\n([\s\S]*?)\n---\n/);
+  const entradas = fm ? fm[1].split(/\n(?=\S)/) : [];
+  const campo = (nombre) => (entradas.find((e) => e.startsWith(nombre + ":")) || "")
+    .slice(nombre.length + 1).replace(/^\s*[>|]?\s*/, "").replace(/^"|"$/g, "").replace(/\s+/g, " ").trim();
+  const skill = path.join(raiz, "skills/premiere/SKILL.md");
+  let esLink = false, real = null;
+  try { esLink = fs.lstatSync(skill).isSymbolicLink(); real = fs.realpathSync(skill); } catch (e) { /* falta: lo dice abajo */ }
+  if (!real) mal("falta la skill `premiere` en skills/premiere/", "es USO.md por symlink: `mkdir -p skills/premiere && ln -s ../../USO.md skills/premiere/SKILL.md`");
+  else if (!esLink || real !== usoReal) mal("el archivo de la skill `premiere` no es un symlink a USO.md", "una copia se desactualiza sin aviso: `ln -sf ../../USO.md skills/premiere/SKILL.md`");
+  else if (campo("name") !== "premiere" || !campo("description")) mal("USO.md no arranca con el frontmatter de la skill: `name: premiere` y una `description`");
+  else if (campo("description").length > 1536)
+    mal(`la description de la skill tiene ${campo("description").length} caracteres`, "Claude Code la corta a 1.536 en la lista de skills");
+  else ok("la skill `premiere` es USO.md, por symlink, con su frontmatter", campo("description").length + " caracteres de description");
+
+  const instalada = path.join(os.homedir(), ".claude/skills/premiere");
+  let hay = false, destino = null, carpeta = null;
+  try { hay = !!fs.lstatSync(instalada); destino = fs.realpathSync(instalada); } catch (e) { /* no está, o apunta a la nada */ }
+  try { carpeta = fs.realpathSync(path.join(raiz, "skills/premiere")); } catch (e) { /* ya lo dijo el chequeo de arriba */ }
+  if (!hay) ok("la skill `premiere` no está instalada en esta máquina", "se instala con un symlink: ver el README");
+  else if (!destino) mal("~/.claude/skills/premiere apunta a algo que no existe", "¿se movió el repo? Rehacé el symlink: ver el README");
+  else if (destino !== carpeta) mal("~/.claude/skills/premiere no apunta a este repo", "apunta a " + destino + ": se carga eso y no este USO.md");
+  else ok("~/.claude/skills/premiere apunta a este repo");
 }
 
 /*
@@ -4234,7 +4465,7 @@ titulo("El orden de la lista de cada pista: `revisar` lo detecta y `editar` no l
     try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
     catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
   })();
-  const iGuarda = cEditar.indexOf("rompeElOrden(sequence"), iMover = cEditar.indexOf("createMoveAction(delta)");
+  const iGuarda = cEditar.indexOf("rompeElOrden(sequence"), iMover = cEditar.indexOf("createMoveAction(");
   if (casos.error) mal("el chequeo del orden de la lista no se pudo ejecutar", casos.error);
   else if (casos.desordenada.n !== 1 || !/FUERA DE ORDEN/.test(casos.desordenada.resumen)) {
     mal("`revisar` no encuentra un clip fuera de orden en la lista de su pista",
@@ -6980,7 +7211,7 @@ titulo("`relink` y `clonar` conservan lo que costo medirlos");
 
   if (!cClonar) {
     mal("no existe el verbo `clonar`");
-  } else if (!/destIdx\s*-\s*origenIdx/.test(cClonar) || !/segDestino\s*-\s*t4\.desde/.test(cClonar)) {
+  } else if (!/destIdx\s*-\s*origenIdx/.test(cClonar) || !/segDestino\s*\*\s*TICKS_POR_SEGUNDO\)\s*-\s*inicioExacto/.test(cClonar)) {
     /*
      * LA PROPIEDAD QUE IMPORTA. `createCloneTrackItemAction` toma OFFSETS relativos al clip
      * origen, no posiciones: pedir "tick 40" sobre un clip que arranca en 2,52 deja el clon

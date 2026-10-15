@@ -1,7 +1,13 @@
+---
+name: premiere
+description: "Reglas para OPERAR Adobe Premiere Pro con el bridge: las herramientas premiere_* (estado, clips, frame, insertar, cortar, editar, fijar, keyframe, armar_secuencia, exportar...) y los scripts de herramientas/ del repo, que leen y escriben el timeline del editor. Invocala ANTES de la primera llamada a premiere_* o al bridge: cada regla salió de un crash o de material roto. Es para editar en Premiere; no para componer video en HTML (eso es HyperFrames) ni para modificar el código del bridge, que se hace en una sesión abierta en su repo."
+---
+
 # Usar el bridge
 
 Para las sesiones que OPERAN Premiere desde un trabajo, no para editar el bridge: eso se hace en
 una sesión abierta en el repo, con su `CLAUDE.md`. Es corto a propósito, así que se lee entero.
+Es también la skill `premiere` —la misma, por symlink—: si la invocaste, no hace falta leerlo aparte.
 Cada regla salió de un daño real; el caso completo está en `docs/bitacora/`, y el índice por tema
 en `CLAUDE.md`.
 
@@ -51,6 +57,9 @@ en `CLAUDE.md`.
   roto, leé su firma; y si el editor dice que "siempre funcionó", el problema es la llamada.
 - **Un dato que está en la respuesta y no en el resumen también cuenta**: `medios` tiene tope de 60
   e informa `total`; leé el campo, no el largo de la lista.
+- **Los segundos vienen redondeados al milisegundo; los `cuadros`, no.** `clips` y `editar` los
+  traen leídos de los ticks: una fracción —1364,002— es un borde ENTRE cuadros, y Premiere dibuja el
+  cuadro que el clip toca apenas. «45.467» decía lo mismo del fin bueno y del que mostraba uno de más.
 
 ## Trampas por verbo, medidas
 
@@ -62,7 +71,9 @@ en `CLAUDE.md`.
   `motion` avisa si el playhead no está sobre el clip, porque lo animado se lee en el borde.
 - **`editar salida` es un punto de FUENTE, no una duración.** Un PNG o un Transparent Video entran
   con in-point ~3600: leé la `entrada` real y sumale la duración. Y **`editar entrada` además
-  MUEVE el clip**: la entrada en una llamada y `desde` en otra.
+  MUEVE el clip**: la entrada en una llamada y `desde` en otra. En un clip con video, a 1x, `desde`,
+  `entrada` y `salida` van al cuadro MÁS CERCANO —de `salida`, el fin en la secuencia— y el resumen
+  dice qué movió. Un audio solo queda exacto, para la sincro fina, y a otra velocidad también.
 - **`borrar` y `editar` arrastran el audio vinculado**, que se deduce por medio y rango iguales.
   `desactivar` y el `apagado` de las capas apagan también el audio socio: TODOS los streams de un
   medio multicanal. Si dos planos del mismo medio están en el mismo instante y el in-point no
@@ -78,7 +89,10 @@ en `CLAUDE.md`.
 - **`armarSecuencia` crea aunque el nombre exista**, no reemplaza. `fragmentos` son
   `{desde, hasta, medio}` en segundos de FUENTE; `capas`, `{en, dura, pista, medio, desde,
   pistaAudio}`. Pone los fps y el formato del reloj que les toca, y lo relee: si no entra, lo
-  dice. Y Premiere corta el nombre después del último punto: `secuencia` trae el que quedó. Si se
+  dice. Los bordes van al cuadro más cercano y `dura` en cuadros enteros: Premiere BAJA al cuadro lo
+  que pega, y una `dura` con seis decimales apenas debajo del borde perdía un cuadro entero. Si el
+  largo releído en cuadros no es el pedido, lo dice (`largoDistinto`); `colocarLote`, igual. Y
+  Premiere corta el nombre después del último punto: `secuencia` trae el que quedó. Si se
   corta a mitad, el error dice qué secuencia dejó y con cuántos fragmentos y capas. Los in/out de
   los medios los devuelve a como estaban (`inOut` dice cuántos): hasta el 2026-09-24 los limpiaba, y
   un PNG limpiado entra con DOCE HORAS. Un still que ya quedó así NO se arregla
