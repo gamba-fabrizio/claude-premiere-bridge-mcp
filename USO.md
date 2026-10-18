@@ -184,7 +184,8 @@ en `CLAUDE.md`.
   otros monitores pueden tener cosas privadas.
 - **Con la pantalla bloqueada no entra ningún macro de Keyboard Maestro**, y con el Privacy Mode de
   Jump fallan los que buscan por imagen. Los dos fallan callados. El protector de pantalla marca la
-  sesión como bloqueada aunque no tenga contraseña: `--reiniciar` lo saca y vuelve a mirar.
+  sesión como bloqueada aunque no tenga contraseña: `--reiniciar` lo saca y vuelve a mirar, y si la marca
+  sigue —pasó con el protector el 2026-10-18— lo dice: hay que sacarlo en la máquina, con un clic.
 - **Con Premiere tapado entero por otra ventana, oculto o con el protector, macOS lo FRENA (App Nap)**:
   al minuto, el panel pasa a dar una vuelta cada 10 a 20 s, y cada llamada tarda eso. Contesta, lento.
   Si igual sale "el panel no latió", el error dice la vuelta del latido: si subió en la llamada

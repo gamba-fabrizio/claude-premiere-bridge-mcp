@@ -307,10 +307,14 @@ function pantallaBloqueada() {
  * "delay is 14400 seconds"). Medido a propósito: con el protector SIN contraseña
  * `CGSSessionScreenIsLocked` da Yes, igual que con el bloqueo de verdad.
  *
- * Así que antes de frenar se SACA el protector y se vuelve a mirar: si la clave se fue, era él; si
- * queda, hay una contraseña de por medio y ahí sí no llega ningún macro. Se saca con el `stop` de
- * System Events: `pkill` al ScreenSaverEngine NO sirve, el módulo del protector sigue vivo y la
- * clave queda en Yes.
+ * Así que antes de frenar se SACA el protector y se vuelve a mirar: si la clave se fue, era él. Se saca
+ * con el `stop` de System Events: `pkill` al ScreenSaverEngine NO sirve, el módulo del protector sigue
+ * vivo y la clave queda en Yes.
+ *
+ * Y SI LA CLAVE QUEDA, NO SE SABE POR QUÉ (2026-10-18). Decía «hay una contraseña de por medio», y esa
+ * tarde era el protector: siguió marcando la sesión después del `stop`, y el editor lo sacó con un clic.
+ * Tampoco lo distingue el proceso: con la clave en Yes no había ningún ScreenSaverEngine corriendo. Así
+ * que se dicen las dos posibilidades y qué hacer, que en los dos casos es lo mismo: alguien en la máquina.
  */
 async function exigirPantallaDesbloqueada(paraQue) {
   if (!pantallaBloqueada()) return true;
@@ -321,10 +325,11 @@ async function exigirPantallaDesbloqueada(paraQue) {
     return true;
   }
   console.error(`  LA PANTALLA ESTA BLOQUEADA, asi que ${paraQue} no va a llegar.`);
-  console.error("  Saqué el protector de pantalla y la sesión sigue bloqueada: hay una contraseña de por medio.");
-  console.error("  Keyboard Maestro no puede inyectar teclas con el login screen puesto: el macro");
+  console.error("  Intenté sacar el protector de pantalla y la sesión sigue marcada como bloqueada. Desde acá no se");
+  console.error("  distingue si es el PROTECTOR, que en esta máquina bloquea la sesión y se saca con un clic, o el");
+  console.error("  bloqueo con contraseña. Con cualquiera de los dos, Keyboard Maestro no inyecta teclas: el macro");
   console.error("  corre, KM no tira error, y la app no se entera. NO disparo nada.");
-  console.error("  Desbloquea la pantalla y volve a correr esto.");
+  console.error("  Sacalo en la máquina —un clic, o la contraseña— y volvé a correr esto.");
   return false;
 }
 
