@@ -68,7 +68,9 @@ function ahora() {
 /* Lo que sale del volcado de `clips`: las mismas reglas que tenía el script del proyecto que esto
  * generaliza, con los prefijos de títulos y las pistas de audio sacados del código. */
 function armar(clips, fps, secuencia, de) {
-  const esTitulo = (c) => prefijos.some((p) => String(c.nombre).startsWith(p));
+  /* Normalizado: el nombre viene de Premiere en NFC, y el prefijo, del JSON del proyecto, tipeado en la
+     forma que sea (auditoría 2026-10-17). */
+  const esTitulo = (c) => prefijos.some((p) => String(c.nombre).normalize("NFC").startsWith(String(p).normalize("NFC")));
   const T = {
     secuencia: secuencia,
     leido: ahora() + ", " + de,

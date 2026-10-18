@@ -1,6 +1,6 @@
 
 
-## Vigente (2026-10-15)
+## Vigente (2026-10-17)
 
 - **Una guarda se verifica haciéndola fallar**, mirando por posición y sin comentarios ni strings.
   → «Una guarda se verifica HACIÉNDOLA FALLAR»
@@ -16,7 +16,8 @@
 - **Antes de informar que algo no está, un control positivo.** → «Antes de informar que algo no
   está»
 - **Lo que se escribe tiene que poder releerse.** → «Escribir algo que nada puede releer»
-- **Un item nulo no voltea un recorrido: se cuenta.** → «Recorrer bins: un item nulo»
+- **Un item nulo no voltea un recorrido: se cuenta.** Los que leen `h.name` —el de `importar` y los de
+  bins— todavía no: pendiente. → «Recorrer bins: un item nulo»
 - **Un nombre parcial que engancha más de uno rebota.** → «El match parcial del proyecto»
 - **`clips` y `revisar` leen la salida de cada pista.** → «Una pista con el OJO APAGADO»
 - **`revisar` marca a los vecinos que REPITEN MATERIAL en la fuente**, sólo a 1x y confirmados por la ruta;
@@ -26,7 +27,10 @@
 - **Un pendiente se cierra en la misma tanda que su trabajo.** → «Un pendiente que no se cierra»
 - **USO.md llega por tres vías y ninguna es una copia**: el `@USO.md` del CLAUDE.md, la skill `premiere`
   —un symlink a él— y las `instructions` del servidor, su sección `Antes de la primera llamada` leída al
-  arrancar, con tope de 2.048 caracteres. → «Las instructions del servidor y la skill»
+  arrancar, con tope de 4.096 caracteres. → «Las instructions del servidor y la skill»
+- **Una regla pagada se chequea en todo su mecanismo, no en el verbo donde se pagó**: un barrido de
+  `test.js` por mecanismo, con las excepciones anotadas, que falla en las dos direcciones. → «Una regla
+  pagada se chequea en todo su mecanismo»
 
 # Método de verificación
 
@@ -388,6 +392,57 @@ reemplazando el archivo convierte en copia el symlink que edita.
 la guarda se prueba antes contra tres mutaciones —sin la sección, la sección inflada y un servidor que no
 las pasa—. La de la skill mira que sea un symlink a USO.md, el frontmatter, y que la instalada apunte a
 esta copia del repo.
+
+Visto llegar en una sesión nueva el mismo día: el bloque entra entero, en el turno en que el servidor
+termina de conectar. Con Claude Code 2.1.299 el tope ya es 4.096, y `test.js` exige ése: la regla de
+releer el estado en vez de creerle al mensaje pasó a esa sección, y las instructions miden unos 2.500.
+
+## Una regla pagada se chequea en todo su mecanismo: la auditoría con agentes (2026-10-17)
+
+**Lo que se hizo.** Siete agentes revisaron, cada uno, una regla ya pagada contra TODO el código —cada
+verbo, cada helper, cada herramienta—, sólo leyendo: ninguno tocó Premiere. Cada uno armó su
+inventario POR MECANISMO —cada llamada a la API donde la regla aplica—, porque buscando por nombre de
+verbo se pierden los helpers compartidos. Y antes de mirar el código de hoy, cada uno corrió su método
+sobre el commit que tenía el bug histórico de su regla: los siete lo detectaron, uno recién en su
+segunda versión. Las reglas: los bordes al cuadro, releer el clip por tiempo y medio, el audio
+vinculado, el clip nombrado y la selección, el orden de la lista, las tandas, y USO.md y el README
+contra el código.
+
+**Lo que encontró.** Más de cien hallazgos, casi todos del mismo tipo: **una regla aprendida en un verbo
+que no había llegado al de al lado**, con `test.js` en verde, porque las guardas chequeaban el verbo
+donde se pagó. Los más caros:
+
+- El desempate por in-point del audio vinculado entró en `sociosDe` y no en `buscarVinculados`:
+  `borrar` y `editar` sobre un plano con un gemelo del mismo archivo en el mismo instante se llevan el
+  audio del otro.
+- `premiere_efectos` no dejaba nombrar el clip desde MCP, y leía siempre el seleccionado.
+- `param` pedía un `getKeyframePtr` por keyframe: el patrón del SIGBUS que ya se había sacado de otro
+  verbo.
+- Las sesiones que usan el bridge recibían, en las instructions, una regla equivocada sobre cómo falla
+  el panel cerrado.
+
+**Lo que se cerró sin Premiere**: los textos —descripciones MCP, README, USO.md—, el servidor, y las
+herramientas que no pasan por el plugin. Lo del plugin se mide en el proyecto de prueba antes de
+cerrarlo; mientras tanto, lo que más muerde está en «Defectos conocidos» de USO.md.
+
+**Y la regla nueva, mecanizada.** `test.js` suma barridos POR MECANISMO, cada uno con su mutación o su
+control y probado contra el código viejo:
+
+- ningún borde va a Premiere con un `aTick` crudo;
+- ningún `getKeyframePtr` en un bucle;
+- todo lo que corre un clip consulta `rompeElOrden`;
+- todo borrado de clips vacía la selección;
+- las herramientas MCP que apuntan a un clip dejan nombrarlo;
+- las herramientas que barren cuentan antes contra el tope de `borrar`;
+- las herramientas comparan los nombres normalizados.
+
+Lo que no cumple la regla está anotado en una lista con su razón —o como PENDIENTE—, y el barrido falla
+en las dos direcciones: un sitio nuevo sin anotar, y uno anotado que ya no está.
+
+**El costo, para la próxima.** Unos 3,9 millones de tokens en los agentes, más de lo estimado, y el
+límite de 5 horas de la cuenta se agotó a mitad: un agente se cortó y se relanzó cuando se renovó el
+límite. Un barrido así no reemplaza al uso: lo que la API hace distinto de lo documentado sigue
+apareciendo usándola. Lo que sí encuentra es la regla que no se propagó.
 
 ## Cerrados: casos resueltos, acotados o desmentidos
 

@@ -14,12 +14,18 @@ en `CLAUDE.md`.
 ## Antes de la primera llamada
 
 - **El panel tiene que estar abierto en Premiere.** El plugin está instalado y arranca con
-  Premiere. Si las herramientas fallan al instante con "el panel nunca latió", no hay panel: se le
-  dice al editor, no se insiste.
+  Premiere. Sin Premiere, las herramientas fallan al instante con "Premiere NO está abierto"; con
+  Premiere y sin panel, a los 25 s, con "el panel no latió" o "nunca latió". Se le dice al editor y
+  no se insiste, salvo que la vuelta del latido suba en la llamada siguiente: eso es Premiere frenado
+  por el sistema, no sin panel (ver «Premiere y la máquina»).
 - **Todo opera sobre el proyecto CON FOCO y su secuencia ACTIVA**, no sobre la carpeta de la
   sesión. `estado` empieza por el nombre del proyecto: leelo. En toda llamada que escriba pasá
   `proyecto` —y `secuencia` si hay dos parecidas—: rebota si no coinciden, o si el nombre parcial
   engancha más de una. Las herramientas de `herramientas/` lo deducen solas.
+- **Cada verbo devuelve qué encontró, no si salió bien, y el veredicto sale de RELEER el estado**
+  —`clips`, `revisar`, un `frame`—, no del mensaje. Esta API acepta escrituras que no aplica, y a
+  veces "NO CAMBIÓ NADA" es la respuesta correcta. Darlo por bueno sin mirar es el error que más caro
+  salió.
 - **Si el editor está trabajando en Premiere, no operes sin que te lo pida.**
 - **Guardá (`premiere_guardar`) antes y después de cada tanda.** Es lo que volvió gratis cada crash.
 - **Lo que no usaste nunca, o una tanda grande, se prueba primero en un proyecto de prueba**
@@ -35,9 +41,6 @@ en `CLAUDE.md`.
 
 ## Cómo leer lo que contesta
 
-- **Cada verbo devuelve qué encontró, no si salió bien, y el veredicto sale de RELEER el estado**
-  —`clips`, `revisar`, un `frame`—, no del mensaje. Esta API acepta escrituras que no aplica, y a
-  veces "NO CAMBIÓ NADA" es la respuesta correcta.
 - **`insertar` se juzga por `entro`.** Con `entro !== true` no edites el clip que haya en ese
   punto: puede ser uno viejo del mismo medio.
 - **`frame` es la mejor verificación: mirá en vez de deducir.** Y cuando importa, MEDÍ el cuadro
@@ -53,8 +56,9 @@ en `CLAUDE.md`.
   repara DUPLICANDO la secuencia, si no está anidada en otra: medido con `duplicarSecuencia`, que no es
   herramienta MCP a propósito, así que se corre por el transporte directo, o lo hace el editor
   con Duplicar. Mover el clip a mano en Premiere también lo reordena.
-- **Un parámetro inventado rebota** nombrando los que acepta. Antes de concluir que un verbo está
-  roto, leé su firma; y si el editor dice que "siempre funcionó", el problema es la llamada.
+- **Un parámetro inventado rebota**: por MCP, nombrando la clave que sobra; por el transporte directo,
+  nombrando las que acepta. Antes de concluir que un verbo está roto, leé su firma; y si el editor dice
+  que "siempre funcionó", el problema es la llamada.
 - **Un dato que está en la respuesta y no en el resumen también cuenta**: `medios` tiene tope de 60
   e informa `total`; leé el campo, no el largo de la lista.
 - **Los segundos vienen redondeados al milisegundo; los `cuadros`, no.** `clips` y `editar` los
@@ -106,8 +110,9 @@ en `CLAUDE.md`.
   corte borra por dentro un clon estacionado, con su propio tope: 15 por minuto, medido sin problemas a 23.
   `sacar_rangos` va de a ~7 rangos por minuto y, si el tope no alcanza para el rango siguiente, frena limpio:
   los que faltan quedan sin tocar y se piden de nuevo tal cual. `borrar` suelto sigue en 5.
-- **`borrar_secuencia` elige por el nombre EXACTO**; si coinciden varias rebota, y dos con el mismo
-  nombre se eligen con `duracion`. Dos gemelas —mismo nombre y mismo largo— se borran a mano.
+- **`borrar_secuencia` prefiere el nombre EXACTO, y si no hay ninguno toma una PARCIAL**: con una sola
+  secuencia que contenga el texto, borra ésa. Si coinciden varias rebota, y dos con el mismo nombre se
+  eligen con `duracion`. Dos gemelas —mismo nombre y mismo largo— se borran a mano.
 - **`marcar` cuantiza al cuadro.** Con `clip`, el marcador va al MEDIO: `segundos` es tiempo de
   fuente y aparece en toda instancia de ese material.
 - **`transicion` es solo video** —el crossfade de audio va a mano— y no se puede releer: el conteo
@@ -126,9 +131,9 @@ en `CLAUDE.md`.
   dice, no reintenta y repone el in/out. El preset H.264 va de la carpeta `4E49434B_48323634`: el
   mismo nombre en la de QuickTime escribe `.mov`. Respeta los in/out de la secuencia, que
   `limpiarRangos` saca. Y el archivo se mide de afuera: duración por stream y paquetes de video.
-- **La escala de un medio que ya está en la secuencia se lee con `leerEscalas`**, no se calcula de
-  las dimensiones del archivo. `escalaFija` va de a 30 clips (`limite` y `siguiente`): sin tope,
-  sobre material 4K pesado, tiró Premiere.
+- **La escala de un clip que ya está en la secuencia se LEE** —con `motion` uno, con `leer_param` un
+  rango—, no se calcula de las dimensiones del archivo. `escala` va de a 30 clips: la respuesta trae
+  `siguiente`, que se pasa como `desdeIndice`. Sin tope, sobre material 4K pesado, tiró Premiere.
 - **Las capas de ajuste no se crean por API y no se escalan**: se inserta una que ya exista, y
   escalada la corrección queda en un rectángulo.
 - **`relink` no tiene Cmd+Z.** `clonar` a la pista SIGUIENTE a la última la crea —es la forma de agregar
@@ -145,6 +150,21 @@ en `CLAUDE.md`.
   cierra el editor. Si el que cerrás tenía el foco, el foco se va solo a otro, y el resumen dice a
   cuál.
 
+## Defectos conocidos, sin arreglar todavía
+
+Leídos en el código por la auditoría del 2026-10-17 y sin medir: el arreglo se mide en Premiere, y
+al cerrarlo se saca de acá. Hasta entonces:
+
+- **`borrar` y `editar` sobre un plano que tiene un gemelo del mismo medio en el mismo instante** —un
+  suplente sacado del mismo archivo— arrastran también el audio del otro. Ese caso, a mano.
+- **Sobre un stream de audio de un multicanal**, `borrar`, `editar` y `desactivar` arrastran sólo el
+  video, y los otros streams quedan. Apuntá al VIDEO del plano.
+- **`editar` con sólo `apagado`** apaga el clip y contesta «NO CAMBIÓ NADA», y su audio sigue
+  sonando: para apagar todo, `desactivar`.
+- **`param` sobre un param con decenas de keyframes** pide un puntero por keyframe, el patrón del
+  SIGBUS diferido. El valor, con `leer_param`, que lee con `getValueAtTime`.
+- **`cortar` a 50 o 60 fps** rebota un corte a un cuadro de un borde, que es válido: ése, a mano.
+
 ## Lo que NO se hace por el bridge
 
 - Barrer o vaciar pistas: ver `borrar`, arriba.
@@ -153,13 +173,15 @@ en `CLAUDE.md`.
 - Importar una transcripción: el Import del panel Text, a mano. Y los captions: un SRT entra con
   `importar`, pero ponerlo en la secuencia —que crea la pista de captions— es a mano.
 - Cerrar un proyecto DESCARTANDO sus cambios, tampoco por el transporte directo: lo decide el
-  editor, a mano.
+  editor, a mano. La única excepción es `recargar.js --reiniciar`, abajo.
 - Formatos de intercambio (AAF, FCPXML, OTIO): a mano, porque pierden cosas en silencio.
 
 ## Premiere y la máquina
 
 - **Nunca `pkill` a Premiere.** Cerrar y reabrir es `node herramientas/recargar.js --reiniciar`:
-  guarda todos los proyectos abiertos, cierra con el macro y exige que el panel vuelva.
+  guarda los proyectos abiertos, cierra con el macro y exige que el panel vuelva. Uno abierto cuyo
+  `.prproj` ya no está en disco —carpeta movida o renombrada, disco desmontado— lo cierra DESCARTANDO,
+  porque guardarlo abre un cartel que traba el Cmd+Q: si puede pasar, avisale al editor antes.
 - **Un panel, un cliente por vez.** Mientras una tanda corre, el avance se mira en el disco o en el
   log: preguntarle al panel en el medio le hace vencer una llamada a la tanda.
 - **Mirar la pantalla contesta en segundos, pero SOLO la ventana de Premiere**: el número de

@@ -222,7 +222,9 @@ if (ETIQUETAS && fs.existsSync(ETIQUETAS)) {
   }
   const filas = [];
   for (const [clip, vs] of porClip) {
-    const x = salida.find((s) => s.nombre === clip);
+    /* Normalizado: los nombres de la salida salen del disco y los de las etiquetas, de Premiere o de lo
+       tipeado, y pueden venir en dos formas Unicode (auditoría 2026-10-17). */
+    const x = salida.find((s) => String(s.nombre).normalize("NFC") === String(clip).normalize("NFC"));
     if (!x || x.puntaje === null) continue;
     const noOk = vs.some((v) => v === "roto");     // binario: si alguna vez lo llamo roto
     filas.push({ clip, puntaje: x.puntaje, humano: vs.join("/"), noOk });

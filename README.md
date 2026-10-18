@@ -1,7 +1,8 @@
 # Claude ↔ Premiere Pro
 
 Un bridge que le da a Claude acceso de lectura y escritura a Premiere Pro: leer la
-secuencia, **mirar el frame** bajo el playhead, animar, editar y armar timeline.
+secuencia, **mirar el frame** bajo el playhead, animar, editar y armar timeline,
+sobre el clip que se le nombra.
 **60 herramientas MCP sobre 76 verbos del panel.**
 
 > **Esto salió de un flujo de trabajo real, no de un ejercicio.** Se usó para armar
@@ -85,7 +86,7 @@ contra el del repo y falla si difieren.
 **3. El servidor.**
 
 ```bash
-cd /RUTA/A/TU/COPIA/premiere-bridge/server && npm install
+cd "/RUTA/A/TU/COPIA/premiere-bridge/server" && npm install
 ```
 
 El repo trae un `.mcp.json` que registra el servidor para las sesiones abiertas
@@ -96,7 +97,7 @@ Si preferís tenerlo en todas tus sesiones y **tenés el CLI instalado** (la app
 escritorio sola no lo instala):
 
 ```bash
-claude mcp add premiere-bridge --scope user -- node /RUTA/A/TU/COPIA/premiere-bridge/server/index.js
+claude mcp add premiere-bridge --scope user -- node "/RUTA/A/TU/COPIA/premiere-bridge/server/index.js"
 ```
 
 **4. Las reglas de uso.** Lo mínimo llega solo: el servidor manda como `instructions` la sección
@@ -105,7 +106,7 @@ El resto de `USO.md` conviene instalarlo como la skill `premiere` —es el mismo
 symlink—, porque una skill vuelve sola después de compactar y un archivo leído no:
 
 ```bash
-ln -s /RUTA/A/TU/COPIA/premiere-bridge/skills/premiere ~/.claude/skills/premiere
+ln -s "/RUTA/A/TU/COPIA/premiere-bridge/skills/premiere" ~/.claude/skills/premiere
 ```
 
 ## Las herramientas
@@ -115,16 +116,16 @@ ln -s /RUTA/A/TU/COPIA/premiere-bridge/skills/premiere ~/.claude/skills/premiere
 | `premiere_estado` | Secuencia, medida, fps, pistas, clip seleccionado y su pista |
 | `premiere_secuencias` | Lista las secuencias del proyecto, o cambia la activa |
 | `premiere_clips` | Todos los clips con pista, índice, nombre y tiempos |
-| `premiere_radiografia` | Una pista entera con TODO lo necesario para reconstruirla —Motion, efectos con valores, deshabilitado, velocidad— y el veredicto `intacto`: qué se perdería si la rehago |
-| `premiere_leer_param` | UN param para un RANGO de clips en una llamada. `limite` 25 por defecto: el umbral que tira Premiere está entre 176 (medido bueno) y 560 (medido malo). El nivel de un audio viene también en dB |
-| `premiere_seleccionar` | Cambia el clip seleccionado, por nombre o por pista+índice |
+| `premiere_radiografia` | Una pista entera clip por clip —tiempos, velocidad, deshabilitado y QUÉ efectos se agregaron, sin sus valores— y el veredicto `intacto`: qué se perdería si la rehago |
+| `premiere_leer_param` | UN param para un RANGO de clips en una llamada. `limite` 25 por defecto, del lado seguro: 176 lecturas en una llamada anduvieron y 560 tiraron Premiere, pero no hay un umbral —120 repartidas en tres llamadas también lo tiraron—. El nivel de un audio viene también en dB |
+| `premiere_seleccionar` | Selecciona un clip, por nombre o por pista+índice, para mostrárselo al editor; para apuntar las demás no hace falta |
 | `premiere_playhead` | Lee o mueve el playhead, en segundos |
 | `premiere_frame` | El cuadro bajo el playhead, como imagen |
 | `premiere_vistazo` | Varios cuadros repartidos, para ver de qué es el material |
 | `premiere_analizar` | Cuadros Y el texto que se dice en cada uno, alineados |
-| `premiere_catalogo` | Busca entre los efectos instalados (330 acá) |
+| `premiere_catalogo` | Busca entre los efectos instalados (330 acá, contados el 2026-08-14) |
 | `premiere_agregar_efecto` | Le agrega un efecto al clip nombrado (`pista` + `indice`) o al seleccionado |
-| `premiere_efectos` | Los efectos del clip y los nombres exactos de sus params; los repetidos, con su `indiceEfecto` (#0, #1) |
+| `premiere_efectos` | Los efectos del clip nombrado (`pista` + `indice`) o el seleccionado, y los nombres exactos de sus params; los repetidos, con su `indiceEfecto` (#0, #1) |
 | `premiere_param` | El valor de un param y en qué segundos tiene keyframes |
 | `premiere_motion` | Atajo: Position y escala del clip nombrado o el seleccionado, con sus keyframes; avisa si el playhead no está sobre él |
 | `premiere_keyframe` | Escribe uno o varios keyframes en el clip nombrado (`pista` + `indice`) o el seleccionado; con `lista`, anima; un punto fuera del clip rebota |
@@ -149,7 +150,7 @@ ln -s /RUTA/A/TU/COPIA/premiere-bridge/skills/premiere ~/.claude/skills/premiere
 | `premiere_editar_marcador` | Mueve un marcador, le cambia el color o el rango, sin rehacerlo |
 | `premiere_transcripcion` | El texto del clip con tiempos de secuencia, o dónde dice algo |
 | `premiere_armar_secuencia` | Crea una secuencia y le pega fragmentos de un medio; las `capas` con `apagado` quedan sin verse ni sonar, con TODO su audio |
-| `premiere_borrar_secuencia` | Saca una secuencia del proyecto por su nombre exacto; si coinciden varias rebota, y dos homónimas se eligen con `duracion` |
+| `premiere_borrar_secuencia` | Saca una secuencia del proyecto: el nombre exacto gana, y si no hay, una PARCIAL única —la borra—; si coinciden varias rebota, y dos homónimas se eligen con `duracion` |
 | `premiere_renombrar_secuencia` | Renombra una secuencia en el lugar, elegida como en `borrar_secuencia`; rebota si el nombre nuevo ya existe, y relee por guid |
 | `premiere_cortes_de_escena` | Detecta cambios de plano en un clip; `marcar` no toca el timeline, `cortar` lo parte, `subclips` los crea |
 | `premiere_etiquetar` | Etiquetas de color en el panel de proyecto; sin `color` sólo lee |
@@ -158,7 +159,7 @@ ln -s /RUTA/A/TU/COPIA/premiere-bridge/skills/premiere ~/.claude/skills/premiere
 | `premiere_proxy` | Lee o adjunta el proxy de un medio; sin `archivo` sólo lee |
 | `premiere_relink` | Repunta un medio a otro archivo; el archivo tiene que existir y NO hay Cmd+Z |
 | `premiere_transicion` | Pone un fundido en un corte. Default Cross Dissolve moderno; el AUDIO no lo toca |
-| `premiere_clonar` | Duplica un clip con sus efectos; el clon es INDEPENDIENTE del original. A la pista siguiente a la última, la crea |
+| `premiere_clonar` | Duplica un clip con sus efectos; el clon es INDEPENDIENTE del original y nace SIN su audio vinculado. A la pista siguiente a la última, la crea |
 | `premiere_subclip` | Un pedazo con nombre de un medio, en el panel; verifica que el item aparezca |
 | `premiere_desactivar` | Apaga o prende el ojito DE UN CLIP, o de una pista entera, con TODOS los streams del audio vinculado y en lotes de 10 acciones; existe para dejar los suplentes a la vista sin que tapen el corte |
 | `premiere_renombrar_pista` | Le pone nombre a una pista de video o audio; relee para confirmar |
@@ -170,11 +171,13 @@ ln -s /RUTA/A/TU/COPIA/premiere-bridge/skills/premiere ~/.claude/skills/premiere
 | `premiere_crear_proyecto` | Crea un .prproj nuevo y lo deja con el foco |
 | `premiere_guardar` | Guarda el proyecto, y comprueba que el archivo se escribió |
 | `premiere_importar` | Importa archivos al panel de proyecto, opcionalmente a un bin; no necesita secuencia activa |
-| `premiere_bins` | Lista el árbol de bins, crea los que falten, mueve medios adentro y borra bins vacíos |
+| `premiere_bins` | Lista el árbol de bins, crea los que falten, mueve medios adentro y borra bins vacíos, o con contenido si se pide `aunqueTengaCosas` |
 | `premiere_revisar` | Recorre la secuencia y devuelve lo que quedó mal: clips fuera de orden en su pista —que no se dibujan—, ceros, solapes, huecos en frames, juntas, y vecinos que repiten material en la fuente |
 
-Las de Motion operan sobre **el clip seleccionado**. Empezá por `premiere_estado`
-o `premiere_clips`: sin eso se escribe a ciegas.
+Las que escriben se apuntan con `pista` + `indice` —los de `premiere_clips`— o con
+`nombre`. El seleccionado no es un objetivo seguro: con «Selection Follows Playhead»,
+mover el playhead cambia la selección. Empezá por `premiere_estado` o
+`premiere_clips`: sin eso se escribe a ciegas.
 
 ### Verbos que NO son herramienta
 
@@ -214,9 +217,10 @@ por eso los verbos de la tabla de acá van sin el prefijo `premiere_`: cualquier
 cosa escrita como una herramienta entre comillas invertidas tiene que existir
 de verdad.
 
-`premiere_seleccionar` y `premiere_playhead` son las que hacen que el resto
-sirva. Sin ellas, el bridge solo ve lo que el usuario dejó seleccionado y el
-momento donde dejó el cursor — una mirilla que mueve otro.
+`premiere_playhead` mueve el cursor, que es lo que mira `premiere_frame`, y
+`premiere_seleccionar` le muestra un clip al editor. Para apuntar las demás no
+hacen falta: se les nombra el clip, porque con «Selection Follows Playhead» mover
+el playhead cambia la selección.
 
 ## Transcribir en tanda — `herramientas/audio.js`
 
@@ -497,7 +501,8 @@ pasó algo. Los errores siguen la misma regla: dicen qué había, no qué faltab
 ## Límites reales
 
 - **El panel tiene que estar abierto.** Cerrarlo corta el acceso, a propósito.
-  El servidor mira el latido y contesta al instante en vez de colgarse.
+  El servidor mira el latido y no se cuelga: sin Premiere contesta al instante, y
+  con Premiere y el panel cerrado, a los 25 s.
 - **Claude ve FOTOS, no video.** Con `premiere_vistazo` reconoce de qué es el
   material —escenario, quién aparece, si hay gráficos, dónde cambia el
   contenido— pero un plano fijo y una cámara que volvió al mismo encuadre se ven
@@ -505,9 +510,10 @@ pasó algo. Los errores siguen la misma regla: dicen qué había, no qué faltab
   está `performSceneEditDetectionOnSelection`, no el muestreo.
 - **No escucha nada.** Música, tono y ritmo quedan afuera, y eso incluye juzgar
   si un corte "suena bien".
-- **`keyframe`, `motion` y `agregarEfecto` usan el clip seleccionado**, y `transcripcion`
-  también si no se le pasa `pista` e `indice`, `nombre` o `medio`. Los verbos destructivos exigen
-  el clip por nombre o por pista e índice.
+- **La selección es el respaldo, no el objetivo.** `keyframe`, `motion`, `agregarEfecto`,
+  `efectos`, `param` y `transcripcion` usan el seleccionado sólo si no se les nombra el clip
+  (`transcripcion` acepta también `medio`); los demás verbos que escriben lo exigen por nombre o
+  por pista e índice. Con «Selection Follows Playhead», mover el playhead cambia la selección.
 - **El techo es la API de `premierepro`**, no el bridge.
 
 ## Estructura

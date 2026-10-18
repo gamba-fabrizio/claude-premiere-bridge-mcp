@@ -450,7 +450,9 @@ function aSRT(palabras, topeChars) {
  */
 function aSecuencia(palabras, clips, nombreMedio) {
   const suyos = clips.filter((c) => {
-    if (nombreMedio && c.nombre !== nombreMedio) return false;
+    /* Normalizado: el nombre del clip viene de Premiere en NFC, y `nombreMedio` puede salir de un
+       archivo en NFD. Por bytes, ninguna palabra caía en la secuencia (auditoría 2026-10-17). */
+    if (nombreMedio && String(c.nombre).normalize("NFC") !== String(nombreMedio).normalize("NFC")) return false;
     return typeof c.entrada === "number" && typeof c.desde === "number";
   });
   const fuera = [];

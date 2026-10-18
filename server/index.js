@@ -75,10 +75,11 @@ server.registerTool(
   {
     title: "Estado de la secuencia",
     description:
-      "Qué hay abierto en Premiere ahora mismo: secuencia activa, medida, fps, " +
-      "cuántas pistas de video, y qué clip está seleccionado (con su pista). " +
-      "Empezá por acá: el resto de las herramientas operan sobre el clip seleccionado, " +
-      "así que sin esto estás escribiendo a ciegas.",
+      "Qué hay abierto en Premiere ahora mismo: el proyecto con foco, la secuencia activa, medida, " +
+      "fps, cuántas pistas de video, y qué clip está seleccionado (con su pista). Empezá por acá. " +
+      "El seleccionado NO es un objetivo seguro: con «Selection Follows Playhead» —prendido en esta " +
+      "máquina— mover el playhead cambia la selección. Las herramientas que escriben se apuntan con " +
+      "`pista` + `indice` (de premiere_clips) o con `nombre`.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       proyecto: z
@@ -270,12 +271,14 @@ server.registerTool(
   {
     title: "Los efectos del clip y sus params",
     description:
-      "Lista los efectos del clip seleccionado con los nombres EXACTOS de sus parámetros. " +
+      "Lista los efectos de un clip —el que se nombra con `pista` e `indice` (o `nombre`), o si no " +
+      "el seleccionado— con los nombres EXACTOS de sus parámetros. Nombrá el clip: con «Selection " +
+      "Follows Playhead» —prendido en esta máquina— mover el playhead cambia la selección, y el " +
+      "resumen sólo dice el nombre del clip que leyó.\n\n" +
       "Empezá por acá antes de leer o escribir cualquier param: los nombres de esta API no " +
       "son adivinables (el Gaussian Blur se llama \"Gaussian Blur (Legacy)\", Motion expone " +
       "\"Scale\" y \"Scale Width\" pero no \"Scale Height\", y el efecto Transform al revés).",
     inputSchema: soloEstas({
-      secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       proyecto: z
         .string()
@@ -284,12 +287,15 @@ server.registerTool(
           "GUARDA: nombre (o parte) del proyecto sobre el que se quiere operar. Si el que tiene "
           + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
           + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
-        )
+        ),
+      pista: z.union([z.number().int().min(1), z.string()]).optional().describe("Etiqueta de pista del clip: \"V2\", \"A1\". Va con `indice`."),
+      indice: z.number().int().min(0).optional().describe("Índice del clip dentro de la pista, de premiere_clips."),
+      nombre: z.string().optional().describe("Parte del nombre del clip. Sin esto ni `pista`/`indice`, el seleccionado.")
     })
   },
-  async ({ proyecto, secuencia }) => {
+  async ({ proyecto, secuencia, pista, indice, nombre }) => {
     try {
-      const r = await enviar("efectos", { proyecto, secuencia });
+      const r = await enviar("efectos", { proyecto, secuencia, pista, indice, nombre });
       return texto(r.resumen, r.efectos);
     } catch (e) {
       return fallo(e);
@@ -548,9 +554,10 @@ server.registerTool(
     title: "Seleccionar un clip",
     description:
       "Selecciona un clip en el timeline, por nombre (coincidencia parcial) o por pista " +
-      "e índice de `premiere_clips`. El resto de las herramientas operan sobre el clip " +
-      "seleccionado, así que esto es lo que permite pasar de uno a otro sin tocar el mouse. " +
-      "Confirma releyendo la selección: si no quedó, lo dice.",
+      "e índice de `premiere_clips`: sirve para MOSTRARLE un clip al editor. Para apuntar otras " +
+      "herramientas no hace falta y no conviene: las que escriben se apuntan con `pista` + `indice` " +
+      "o con `nombre`, y la selección se mueve sola con el playhead («Selection Follows Playhead», " +
+      "prendido en esta máquina). Confirma releyendo la selección: si no quedó, lo dice.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       proyecto: z
@@ -563,7 +570,7 @@ server.registerTool(
         ),
       nombre: z.string().optional().describe("Parte del nombre del clip. No distingue mayúsculas."),
       pista: z.union([z.number().int().min(1), z.string()]).optional()
-        .describe("Pista como en el timeline: 1 o \"V1\" es V1, \"A1\" es la primera de audio —para `premiere_keyframe` sobre el nivel de un audio—."),
+        .describe("Pista como en el timeline: 1 o \"V1\" es V1, \"A1\" es la primera de audio."),
       indice: z.number().int().min(0).optional().describe("Índice dentro de la pista, de premiere_clips.")
     })
   },
@@ -653,7 +660,7 @@ server.registerTool(
       /* 10 minutos: apagar el audio de muchas capas va en lotes espaciados —57 capas de 6 streams
          son ~23 s más—, y con 180 s el servidor podía dejar de esperar a un panel que seguía. */
       const r = await enviar("armarSecuencia", args, 600000);
-      return texto(r.resumen, { puestos: r.puestos, capasPuestas: r.capasPuestas, fallidos: r.fallidos, capasFallidas: r.capasFallidas, largoDistinto: r.largoDistinto, audioApagado: r.audioApagado, sinReleer: r.sinReleer, duracion: r.duracionTotal, reajuste: r.reajuste, inOut: r.inOut });
+      return texto(r.resumen, { secuencia: r.secuencia, puestos: r.puestos, capasPuestas: r.capasPuestas, fallidos: r.fallidos, capasFallidas: r.capasFallidas, largoDistinto: r.largoDistinto, pisados: r.pisados, audioApagado: r.audioApagado, sinReleer: r.sinReleer, duracion: r.duracionTotal, reajuste: r.reajuste, inOut: r.inOut });
     } catch (e) {
       return fallo(e);
     }
@@ -767,7 +774,8 @@ server.registerTool(
   async ({ buscar, proyecto, secuencia }) => {
     try {
       const r = await enviar("medios", { buscar, proyecto, secuencia });
-      return texto(r.resumen, r.medios);
+      /* `total` va con la lista: la lista tiene tope de 60, y contarla daba 60 con más en el proyecto. */
+      return texto(r.resumen, { total: r.total, saltados: r.saltados, medios: r.medios });
     } catch (e) {
       return fallo(e);
     }
@@ -840,7 +848,7 @@ server.registerTool(
   async (args) => {
     try {
       const r = await enviar("borrar", args);
-      return texto(r.resumen, { clipsAntes: r.clipsAntes, clipsDespues: r.clipsDespues });
+      return texto(r.resumen, { clipsAntes: r.clipsAntes, clipsDespues: r.clipsDespues, seleccionVaciada: r.seleccionVaciada });
     } catch (e) {
       return fallo(e);
     }
@@ -910,7 +918,9 @@ server.registerTool(
       "y lo avisa.\n\n" +
       "Mover un clip POR ENCIMA de otro rebota sin tocar nada: la API no reordena la lista de la " +
       "pista, y un clip fuera de orden no se dibuja ni sale en el export (medido). Para llevarlo entre " +
-      "otros clips: premiere_clonar a la posición nueva y premiere_borrar el original.",
+      "otros clips, lo seguro es moverlo a mano en Premiere. premiere_clonar a la posición nueva y " +
+      "premiere_borrar del original sirve sólo para un clip SIN audio vinculado: el clon no trae el " +
+      "audio y el borrado se lo lleva, así que el plano quedaría mudo.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       proyecto: z
@@ -930,7 +940,7 @@ server.registerTool(
       desde: z.number().min(0).optional().describe("Mover el clip para que arranque en este segundo de la secuencia."),
       entrada: z.number().min(0).optional().describe("Punto de entrada, en segundos dentro de la fuente."),
       salida: z.number().min(0).optional().describe("Punto de salida, en segundos dentro de la fuente."),
-      apagado: z.boolean().optional().describe("true lo apaga (sigue en el timeline pero no se ve).")
+      apagado: z.boolean().optional().describe("true apaga SÓLO este clip (sigue en el timeline pero no se ve): su audio vinculado sigue sonando. Para apagar un plano con todo su audio, premiere_desactivar.")
     })
   },
   async (args) => {
@@ -1144,7 +1154,7 @@ server.registerTool(
   async (args) => {
     try {
       const r = await enviar("escalaFija", args, 600000);
-      return texto(r.resumen, { hechos: r.hechos, total: r.total, via: r.via });
+      return texto(r.resumen, { hechos: r.hechos, total: r.total, via: r.via, siguiente: r.siguiente });
     } catch (e) {
       return fallo(e);
     }
@@ -1304,7 +1314,7 @@ server.registerTool(
       db: z.number().optional().describe("Solo para Volume > Level: el nivel en dB, que se convierte al crudo de Premiere (0 dB = 0.1778, +15 dB = 1, medido exportando). Con Level, `valor` es el CRUDO: pasarle -6 deja el clip MUDO, por eso rebota."),
       x: z.number().optional().describe("Para params de punto (Position), la horizontal en 0-1."),
       y: z.number().optional().describe("Idem, la vertical."),
-      nombre: z.string().optional().describe("Parte del nombre del clip. Sin nada, el seleccionado."),
+      nombre: z.string().optional().describe("Parte del nombre del clip, o si no `pista` + `indice`. Sin ninguno rebota: no usa el seleccionado."),
       pista: z.union([z.number().int().min(1), z.string()]).optional().describe("Etiqueta de pista: \"V2\", \"A1\"."),
       indice: z.number().int().min(0).optional().describe("Índice dentro de la pista."),
       indiceEfecto: z.number().int().min(0).optional().describe("Cuál de los efectos con ese nombre, si el clip tiene más de uno: 0 el primero, en el orden de la cadena (premiere_efectos los marca #0, #1). Sin esto, con dos o más, REBOTA sin tocar nada: elegir por vos escribiría en uno sin saber cuál.")
@@ -1654,6 +1664,8 @@ server.registerTool(
       "**La pista destino tiene que existir, o ser la SIGUIENTE a la última**: ésa la CREA —una sola, " +
       "medido— y es la forma de agregar una pista de video desde acá. Más arriba rebota sin tocar nada. " +
       "No hay API para borrar pistas.\n\n" +
+      "**Clona SÓLO el clip**: su audio vinculado no viene —la API clona un item, medido— y sobre un " +
+      "clip de audio rebota. El clon de un plano con sonido nace mudo.\n\n" +
       "Un Cmd+Z lo saca.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
@@ -1774,9 +1786,10 @@ server.registerTool(
   {
     title: "Radiografia de una pista: que se perderia si la reconstruyo",
     description:
-      "Lee una pista de punta a punta y devuelve, clip por clip, TODO lo que hace falta para " +
-      "reproducirlo: tiempos, entrada, salida de fuente, velocidad, si esta deshabilitado, si es " +
-      "capa de ajuste, su Motion y los efectos que se le agregaron CON SUS VALORES.\n\n" +
+      "Lee una pista de punta a punta y devuelve, clip por clip, lo que hace falta para saber que " +
+      "se perderia al reconstruirla: tiempos, entrada, salida de fuente, velocidad, si esta " +
+      "deshabilitado, si es capa de ajuste y QUE efectos se le agregaron, por nombre. Los VALORES " +
+      "de esos efectos no: ver abajo.\n\n" +
       "**Existe porque el armado es destructivo.** Rehacer una pista desde un JSON pisa todo lo que " +
       "el usuario hizo a mano --una exposicion corregida, una rotacion, un clip apagado, un plano " +
       "corrido un frame--. Antes eso se compensaba REAPLICANDO DE MEMORIA lo que yo recordaba, que es " +
@@ -1784,11 +1797,11 @@ server.registerTool(
       "Por eso el veredicto de cada clip es **`intacto`**: false significa que carga trabajo manual y " +
       "que reconstruir esa pista sin restaurarlo lo destruye. El `resumen` los lista con QUE tienen.\n\n" +
       "**Barato por triage**: un clip de video intacto trae exactamente 2 componentes (Opacity y " +
-      "Motion), medido. Los params completos se leen solo en los clips que tienen algo agregado, y " +
-      "de Motion solo cinco params por nombre. Aun asi va con `limite`/`siguiente`, porque una " +
-      "rafaga de lecturas ya tiro Premiere: el 2026-08-21 una vuelta de este mismo verbo se llevo " +
-      "Premiere con un fatal en `NAPIContextAdapter::CallCallback` durante `PromiseFulfillment`. La " +
-      "Paso TRES veces, con el mismo stack, y las cuatro mitigaciones que se probaron no lo evitaron. " +
+      "Motion), medido. Va con `limite`/`siguiente` porque una rafaga de lecturas ya tiro Premiere: " +
+      "el 2026-08-21, cuando todavia leia los params de los clips con algo agregado, una vuelta de " +
+      "este mismo verbo se llevo Premiere con un fatal en `NAPIContextAdapter::CallCallback` durante " +
+      "`PromiseFulfillment`. Paso TRES veces, con el mismo stack, y las cuatro mitigaciones que se " +
+      "probaron no lo evitaron. " +
       "Por eso este verbo YA NO LEE PARAMS: es solo triage. Para los valores usa `premiere_leer_param` " +
       "(un param por tandas) o `premiere_param` (uno solo).\n\n" +
       "Solo LEE: no escribe nada. Corralo ANTES de cualquier reconstruccion.",
@@ -2353,7 +2366,7 @@ server.registerTool(
           + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
         ),
       nuevo: z.string().describe("El nombre que va a tener el clip."),
-      nombre: z.string().optional().describe("Parte del nombre ACTUAL del clip. Sin nada, el seleccionado."),
+      nombre: z.string().optional().describe("Parte del nombre ACTUAL del clip, o si no `pista` + `indice`. Sin ninguno rebota: no usa el seleccionado."),
       pista: z.union([z.number().int().min(1), z.string()]).optional().describe("Etiqueta de pista: \"V2\", \"A1\"."),
       indice: z.number().int().min(0).optional().describe("Índice dentro de la pista, de premiere_clips.")
     })

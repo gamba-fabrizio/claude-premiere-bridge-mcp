@@ -40,8 +40,15 @@ secuencia taparía todos los cortes de abajo.
   secuencia    el nombre EXACTO de la secuencia; va por video en `videos` (ver `subtitular.py`).
   titulos      los prefijos de los clips que no son planos: títulos, zócalos, logos.
 """
-import glob, gzip, json, os, sys, time
+import gzip, json, os, sys, time, unicodedata
 import xml.etree.ElementTree as ET
+
+
+def nfc(s):
+    """Los nombres llegan en dos formas Unicode: Premiere los guarda en NFC, el disco puede darlos en NFD
+    —medido en una carpeta de trabajo real: el único .prproj con tilde, en NFC, y dos de sus autoguardados, en NFD—, y lo
+    tipeado en el JSON del proyecto, en la que sea. Comparados por bytes, «Edición» no es «Edición»."""
+    return unicodedata.normalize("NFC", s or "")
 
 TPS = 254016000000                        # ticks por segundo de Premiere
 AJUSTE = ("Adjustment Layer", "Capa de ajuste")
@@ -68,10 +75,10 @@ class Prproj:
         return int(e.text) / TPS if e is not None and e.text else 0.0
 
     def secuencia(self, nombre):
-        s = [e for e in self.root.iter("Sequence") if e.findtext("Name") == nombre and "ObjectUID" in e.attrib]
+        s = [e for e in self.root.iter("Sequence") if nfc(e.findtext("Name")) == nfc(nombre) and "ObjectUID" in e.attrib]
         if len(s) != 1:
             parecidas = sorted({e.findtext("Name") for e in self.root.iter("Sequence")
-                                if nombre.lower() in (e.findtext("Name") or "").lower()})
+                                if nfc(nombre).lower() in nfc(e.findtext("Name")).lower()})
             raise SystemExit(f"«{nombre}»: {len(s)} secuencias con ese nombre EXACTO"
                              + (f"; parecidas: {', '.join(parecidas)}" if parecidas else ""))
         return s[0]
@@ -153,8 +160,12 @@ def aplanar(P, seq, tipo, prof=0):
 def elegir(ruta):
     """El .prproj o su autoguardado más nuevo: el autoguardado tiene lo que el editor todavía no guardó."""
     madre = os.path.join(os.path.dirname(ruta), "Adobe Premiere Pro Auto-Save")
-    base = os.path.splitext(os.path.basename(ruta))[0]
-    cand = [ruta] + glob.glob(os.path.join(madre, glob.escape(base) + "--*.prproj"))
+    base = nfc(os.path.splitext(os.path.basename(ruta))[0])
+    # Listando y normalizando, no con glob: glob compara bytes y, con el nombre en la otra forma, no
+    # veía el autoguardado más nuevo, y los subtítulos salían de un timeline viejo sin aviso.
+    hijos = os.listdir(madre) if os.path.isdir(madre) else []
+    cand = [ruta] + [os.path.join(madre, n) for n in hijos
+                     if n.endswith(".prproj") and nfc(n).startswith(base + "--")]
     return max(cand, key=os.path.getmtime)
 
 
@@ -213,7 +224,7 @@ def main():
         if c["apagado"]: continue
         if any(x in c["nombre"] for x in AJUSTE):
             ajustes += 1; continue
-        if prefijos and c["nombre"].startswith(prefijos):
+        if prefijos and nfc(c["nombre"]).startswith(tuple(nfc(p) for p in prefijos)):
             titulos.append([c["nombre"], round(c["desde"], 6), round(c["hasta"], 6)]); continue
         V.setdefault(c["pista"], []).append([round(c["desde"], 6), round(c["hasta"], 6)])
         if c["anidada"] is not None:

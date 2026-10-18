@@ -46,6 +46,12 @@ const path = require("path");
 const fs = require("fs");
 const BR = require("path").join(__dirname, "..", "server", "bridge.js");
 const { enviar } = require(BR);
+/* Los nombres de Premiere vienen en NFC, y los del plan o de la línea de comandos, en la forma en que
+ * se escribieron. Se comparan como `contieneN` del panel, que es como `insertar` y `colocarLote`
+ * encuentran el medio: normalizado, sin mayúsculas y por inclusión. */
+const contieneN = (heno, aguja) =>
+  String(heno == null ? "" : heno).normalize("NFC").toLowerCase()
+    .indexOf(String(aguja == null ? "" : aguja).normalize("NFC").toLowerCase()) !== -1;
 const { execFileSync } = require("child_process");
 
 const args = process.argv.slice(2);
@@ -272,7 +278,7 @@ if (!HAY_MATERIAL) {
 
 (async () => {
   const est = await enviar("estado", g({}));
-  if (String(est.resumen).indexOf(SEC) === -1) {
+  if (String(est.resumen).normalize("NFC").indexOf(String(SEC).normalize("NFC")) === -1) {
     console.error(`\nLa secuencia activa no es "${SEC}": ${String(est.resumen).split("·")[0]}`);
     console.error("Activala en Premiere (o con el verbo `secuencias`) y volve a correr.");
     process.exit(1);
@@ -338,16 +344,20 @@ if (!HAY_MATERIAL) {
     }
 
     console.log(`  limpiando V${PISTA}: ${cs.length} clip(s)`);
-    let saco = 0;
+    let saco = 0, seleccionSucia = false;
     for (let i = cs.length - 1; i >= 0; i--) {
       await dormir(PAUSA);
       /* Se CORTA en el primer rechazo en vez de seguir. Con 58 clips, seguir eran 53 intentos
        * mas que rebotan igual: ruido, y ~27s de espera para terminar en el mismo lugar. */
-      try { await enviar("borrar", g({ pista: "V" + PISTA, indice: i, dejarHueco: true }), 300000); saco++; }
+      let rb = null;
+      try { rb = await enviar("borrar", g({ pista: "V" + PISTA, indice: i, dejarHueco: true }), 300000); saco++; }
       catch (e) {
         console.log(`   ✗ no se pudo borrar [${i}]: ${String(e.message || e).slice(0, 80)}`);
         break;
       }
+      /* `borrar` vacía la selección y lo informa en `seleccionVaciada`: si no pudo, el clip borrado sigue
+       * adentro, y la edición siguiente en ese lugar tiró Premiere (2026-09-24). Se corta y no se coloca. */
+      if (rb && rb.seleccionVaciada === false) { seleccionSucia = true; break; }
     }
     /* SIN PAUSA: el espaciado es contra rafagas de TRANSACCIONES, y `clips` no transacciona
      * ni lee valores de param. Medido el 2026-09-05 en un proyecto pesado: la lectura inmediata
@@ -355,6 +365,11 @@ if (!HAY_MATERIAL) {
      * recien insertado, con solo los ~203ms del transporte en el medio. */
     const quedan = ((await enviar("clips", g({ pista: "V" + PISTA }))).clips || []).length;
     console.log(`  saque ${saco}, quedan ${quedan}`);
+    if (seleccionSucia) {
+      console.error("\n  " + "la selección quedó con un clip borrado adentro: deseleccioná en Premiere —clic en un lugar vacío del " +
+                    "timeline— y volvé a correr. Editar con el clip borrado seleccionado tiró Premiere (2026-09-24).");
+      process.exit(1);
+    }
     if (quedan) { console.error("  NO SE VACIO: aborto para no armar encima."); process.exit(1); }
   }
 
@@ -594,7 +609,10 @@ if (!HAY_MATERIAL) {
   console.log(`\nrelectura: V${PISTA} ${finV.length} clips · A${PISTA_AUDIO} ${finA.length} clips`);
   let malos = 0;
   for (const p of plan) {
-    const c = fin.find((x) => Math.abs(x.desde - p.desde) < 0.05);
+    /* Por tiempo Y por medio, como `clipDelMedio` en el panel: por tiempo solo, la PNG que arranca en
+     * el mismo punto pasaba por la locución que se pidió ahí —un PROBLEMA falso, o un OK falso con el
+     * mismo largo— (auditoría 2026-10-17). */
+    const c = fin.find((x) => Math.abs(x.desde - p.desde) < 0.05 && contieneN(x.nombre, p.clip));
     if (!c) { console.log(`  ✗ nada en ${p.desde}s (esperaba ${p.clip.slice(-22)})`); malos++; continue; }
     if (Math.abs(c.dura - p.dura) > 0.05) {
       console.log(`  ✗ ${p.desde}s dura ${c.dura} y se pidio ${p.dura}  ${c.nombre.slice(-22)}`); malos++;

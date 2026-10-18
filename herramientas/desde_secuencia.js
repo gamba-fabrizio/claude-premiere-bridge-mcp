@@ -196,9 +196,15 @@ for (const c of clips) {
   const dura = cuadro(c.hasta - c.desde);
   const entrada = typeof c.entrada === "number" ? cuadro(c.entrada) : undefined;
   /* La grilla se comprueba, no se asume: un valor a medio frame es la firma de un corte entre
-   * frames, y rearmar desde ahí propaga el hueco. Se informa en vez de redondear callado. */
+   * frames, y rearmar desde ahí propaga el hueco. Se informa en vez de redondear callado.
+   *
+   * Los tiempos del estado vienen redondeados al MILISEGUNDO —`radiografia` los lee con `tiemposDe`—,
+   * y a 30 o 29,97 fps un cuadro no cae en un milisegundo justo: con una tolerancia de 1e-6 cuadros,
+   * dos de cada tres bordes buenos salían FUERA DE LA GRILLA (auditoría 2026-10-17). Se mide la
+   * distancia al cuadro más cercano en segundos: hasta medio milisegundo es el redondeo; más, un corte
+   * entre cuadros. Uno corrido menos de medio milisegundo no se ve desde acá: el dato no lo trae. */
   for (const [nom, val] of [["desde", c.desde], ["hasta", c.hasta], ["entrada", c.entrada]]) {
-    if (typeof val === "number" && Math.abs(val / F - Math.round(val / F)) > 1e-6) {
+    if (typeof val === "number" && Math.abs(val - Math.round(val / F) * F) > 0.0005 + 1e-9) {
       fueraDeGrilla.push(`${c.nombre} ${nom}=${val}`);
     }
   }

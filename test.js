@@ -1480,7 +1480,9 @@ if (unicas.length > 1) {
     return d;
   };
   const sinSeccion = uso.replace(ins.SECCION, "## Otra cosa");
-  const inflada = uso.replace(ins.SECCION, ins.SECCION + "\n\n- " + "relleno ".repeat(300));
+  // Inflada por encima del tope que rija, no de un número fijo: con 2.400 caracteres de relleno,
+  // un tope que siguiera subiendo dejaría pasar la mutación y la guarda quedaría ciega sin avisar.
+  const inflada = uso.replace(ins.SECCION, ins.SECCION + "\n\n- " + "relleno ".repeat(Math.ceil(ins.TOPE_INSTRUCCIONES / 8) + 1));
   const ciega = [
     ["sin la sección", defectos(sinSeccion, ins.instruccionesDe(sinSeccion, ins.RUTA_USO))],
     ["con la sección inflada", defectos(inflada, ins.instruccionesDe(inflada, ins.RUTA_USO))],
@@ -2737,6 +2739,33 @@ titulo("desde_secuencia: las anotaciones se copian por EXCLUSIÓN");
         excluidos.length + " campos calculados");
     }
   }
+}
+
+titulo("desde_secuencia: la grilla tolera el redondeo al milisegundo del estado, y ve un corte entre cuadros");
+
+/*
+ * El estado sale de `radiografia`, con los segundos redondeados al milisegundo, y a 30 fps un cuadro no
+ * cae en un milisegundo justo: con la tolerancia de 1e-6 cuadros, 30,733 —el cuadro 922— salía FUERA
+ * DE LA GRILLA, y el aviso, que es «la firma de un corte entre frames», mandaba a buscar cortes rotos
+ * que no existían. A 25 y 50 fps no se veía. Se corre la herramienta de verdad, a 30 fps: tres bordes
+ * buenos redondeados y uno a MEDIO cuadro, que es el único que tiene que avisar.
+ */
+{
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "grilla-"));
+  fs.writeFileSync(path.join(tmp, "estado.json"), JSON.stringify({ clips: [
+    { nombre: "A.mp4", desde: 0, hasta: 30.733, entrada: 1.367 },
+    { nombre: "B.mp4", desde: 30.733, hasta: 61.467, entrada: 0 },
+    { nombre: "C.mp4", desde: 61.467, hasta: 62.75, entrada: 0 },
+  ] }));
+  const r = require("child_process").spawnSync(process.execPath, [path.join(raiz, "herramientas", "desde_secuencia.js"),
+    "--estado", path.join(tmp, "estado.json"), "--salida", path.join(tmp, "nueva.json"), "--fps", "30"], { encoding: "utf8" });
+  fs.rmSync(tmp, { recursive: true, force: true });
+  const salida = String(r.stdout || "") + String(r.stderr || "");
+  const aviso = /FUERA DE LA GRILLA DE 30fps — (\d+) valor/.exec(salida);
+  if (r.status !== 0) mal("`desde_secuencia.js` no corrió sobre el estado de prueba", salida.trim().split("\n").slice(-2).join(" | "));
+  else if (!aviso || !/C\.mp4 hasta=62\.75/.test(salida)) mal("`desde_secuencia.js` no avisa un borde a medio cuadro", "62,75 a 30 fps es el cuadro 1882,5");
+  else if (aviso[1] !== "1") mal(`\`desde_secuencia.js\` marca ${aviso[1]} valores fuera de la grilla, y sólo uno lo está`, "los otros son cuadros enteros redondeados al milisegundo, como los trae el estado");
+  else ok("a 30 fps, tres cuadros redondeados al milisegundo pasan y el borde a medio cuadro avisa");
 }
 
 /* ---------- desde_secuencia: la lista vieja, y el fallo vacio ---------- */
@@ -4136,6 +4165,625 @@ titulo("ninguna herramienta MCP declara un parametro que el verbo no lee");
   const u = [...new Set(problemas)];
   if (u.length) mal("hay herramientas MCP que declaran parametros muertos", u.slice(0, 5).join(" · "));
   else ok(`${n} herramientas MCP, ninguna declara un parametro que el verbo ignore`);
+}
+
+/* ---------- la auditoría de reglas del 2026-10-17: barridos por MECANISMO, no por verbo ---------- */
+
+/*
+ * La auditoría del 2026-10-17 barrió siete reglas ya pagadas contra todo el código, y el patrón que más
+ * encontró es una regla chequeada sólo en el verbo donde se pagó: el resto la incumplía igual, con este
+ * archivo en verde. Los barridos de abajo miran TODOS los sitios de un mecanismo —cada llamada a la API
+ * donde la regla aplica— y lo que no la cumple tiene que estar anotado con su razón o con el pendiente
+ * que lo cierra, en las dos direcciones: un sitio nuevo falla, y uno arreglado obliga a sacarlo de la
+ * lista.
+ *
+ * EL CÓDIGO SIN COMENTARIOS, STRINGS NI REGEX, CON LAS MISMAS POSICIONES. Un comentario o un mensaje que
+ * nombra una llamada no es una llamada. `sinCom` saca los comentarios pero corre las posiciones y deja
+ * los strings; acá cada caracter de un comentario, un string, un template o una regex pasa a ser un
+ * espacio y los saltos de línea quedan, así que la línea de un hallazgo es la del archivo.
+ */
+function blanquear(src) {
+  const n = src.length, out = src.split("");
+  const tapar = (a, b) => { for (let k = a; k < b; k++) if (out[k] !== "\n") out[k] = " "; };
+  const DESPUES_DE_ESTAS = /^(return|typeof|case|in|of|delete|void|throw|new|else|do|yield|await)$/;
+  const saltarString = (k) => {
+    const q = src[k];
+    k++;
+    while (k < n && src[k] !== q) { if (src[k] === "\\") k++; k++; }
+    return k + 1;
+  };
+  function saltarTemplate(k) {
+    k++;
+    while (k < n) {
+      if (src[k] === "\\") { k += 2; continue; }
+      if (src[k] === "`") return k + 1;
+      if (src[k] === "$" && src[k + 1] === "{") { k = saltarCodigo(k + 2); continue; }
+      k++;
+    }
+    return n;
+  }
+  function saltarCodigo(k) {
+    let prof = 0;
+    while (k < n) {
+      const c = src[k];
+      if (c === "'" || c === '"') { k = saltarString(k); continue; }
+      if (c === "`") { k = saltarTemplate(k); continue; }
+      if (c === "{") prof++;
+      else if (c === "}") { if (prof === 0) return k + 1; prof--; }
+      k++;
+    }
+    return n;
+  }
+  /* Una `/` abre una regex si lo de antes no puede cerrar una expresión: `x = /a/`, `return /a/`. */
+  function abreRegex(i) {
+    let k = i - 1;
+    while (k >= 0 && /\s/.test(out[k])) k--;
+    if (k < 0) return true;
+    if (/[(,=:[!&|?{};+\-*%<>~^]/.test(out[k])) return true;
+    if (!/[\w$]/.test(out[k])) return false;
+    let j = k;
+    while (j >= 0 && /[\w$]/.test(out[j])) j--;
+    return DESPUES_DE_ESTAS.test(out.slice(j + 1, k + 1).join(""));
+  }
+  let i = 0;
+  while (i < n) {
+    const c = src[i], d = src[i + 1];
+    if (c === "/" && d === "/") { const f = src.indexOf("\n", i); const fin = f === -1 ? n : f; tapar(i, fin); i = fin; continue; }
+    if (c === "/" && d === "*") { const f = src.indexOf("*/", i + 2); const fin = f === -1 ? n : f + 2; tapar(i, fin); i = fin; continue; }
+    if (c === "'" || c === '"') { const fin = saltarString(i); tapar(i + 1, fin - 1); i = fin; continue; }
+    if (c === "`") { const fin = saltarTemplate(i); tapar(i + 1, fin - 1); i = fin; continue; }
+    if (c === "/" && abreRegex(i)) {
+      let k = i + 1, clase = false;
+      while (k < n && src[k] !== "\n") {
+        if (src[k] === "\\") { k += 2; continue; }
+        if (src[k] === "[") clase = true;
+        else if (src[k] === "]") clase = false;
+        else if (src[k] === "/" && !clase) break;
+        k++;
+      }
+      tapar(i + 1, k);
+      i = k + 1;
+      continue;
+    }
+    i++;
+  }
+  return out.join("");
+}
+
+/** El índice del `)` o `}` que cierra el que está en `abre`, sobre código ya blanqueado. */
+function cierreDe(B, abre) {
+  const a = B[abre], z = a === "(" ? ")" : "}";
+  let p = 0;
+  for (let k = abre; k < B.length; k++) {
+    if (B[k] === a) p++;
+    else if (B[k] === z && --p === 0) return k;
+  }
+  return -1;
+}
+
+/** Las funciones declaradas con `function`: nombre, argumentos y el tramo de su cuerpo. */
+function funcionesDe(B) {
+  const fns = [];
+  for (const m of B.matchAll(/(?:^|\n)[ \t]*(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const par = m.index + m[0].length - 1;
+    const finPar = cierreDe(B, par);
+    const abre = finPar === -1 ? -1 : B.indexOf("{", finPar);
+    if (abre === -1) continue;
+    fns.push({ nombre: m[1], args: B.slice(par + 1, finPar).split(",").map((x) => x.trim()).filter(Boolean), ini: abre, fin: cierreDe(B, abre) });
+  }
+  return fns;
+}
+/** La función MÁS ADENTRO que contiene `pos`. */
+const duenoDe = (fns, pos) => fns.filter((f) => f.ini <= pos && pos <= f.fin).sort((a, b) => b.ini - a.ini)[0] || null;
+const lineaDe = (src, pos) => src.slice(0, pos).split("\n").length;
+
+titulo("El código blanqueado: sin comentarios, strings ni regex, y con las mismas líneas");
+
+{
+  const B = blanquear(SRC_CMD);
+  /* [fuente, ¿la llamada tiene que quedar?, qué prueba]. Los que dicen `true` son el control positivo:
+     un lexer que se traga el resto del archivo pasaría los `false` sin ver nada. */
+  const casos = [
+    ['f("p.getKeyframePtr(t)")', false, "un string"],
+    ["// p.getKeyframePtr(t)\n", false, "un comentario"],
+    ["/* p.getKeyframePtr(t) */", false, "un comentario de bloque"],
+    ["`a ${f(`p.getKeyframePtr(t)`)} b`", false, "un template anidado"],
+    ["x = /'/.test(s); p.getKeyframePtr(t)", true, "una regex con una comilla, antes de la llamada"],
+    ["if (a) return /\"/.test(s) && p.getKeyframePtr(t)", true, "una regex después de return"],
+    ["const r = a / b; p.getKeyframePtr(t)", true, "una división, que no es una regex"],
+    ["s = `x ${y}`; p.getKeyframePtr(t)", true, "un template que termina"],
+  ];
+  const malos = casos.filter(([s, queda]) => /getKeyframePtr\(/.test(blanquear(s)) !== queda);
+  if (B.length !== SRC_CMD.length || B.split("\n").length !== SRC_CMD.split("\n").length) {
+    mal("`blanquear` cambia el largo o las líneas de comandos.js", "los barridos de abajo darían líneas corridas");
+  } else if (malos.length) {
+    mal(`\`blanquear\` falla ${malos.length} de ${casos.length} controles`, malos.map((c) => c[2]).join(" · "));
+  } else {
+    ok(`${casos.length} controles —strings, comentarios, templates anidados y regex— y comandos.js conserva sus ${B.split("\n").length} líneas`);
+  }
+}
+
+titulo("Las herramientas MCP que apuntan a un clip dejan nombrarlo, y no prometen un seleccionado que el verbo no usa");
+
+/*
+ * «Nombrá el objetivo» (2026-10-01) llegó a los verbos y no a todas sus herramientas. El verbo `efectos`
+ * acepta `pista`, `indice` y `nombre` desde el 2026-08-16, y `premiere_efectos` no los declaraba —con el
+ * schema estricto, pasarlos rebotaba—: desde MCP leía siempre el seleccionado, que con Selection Follows
+ * Playhead es el que quedó bajo el playhead. Y al revés: `premiere_fijar` y `premiere_renombrar`
+ * prometían «Sin nada, el seleccionado», y sus verbos rebotan sin objetivo.
+ *
+ * Un verbo apunta a un clip si le pasa `params` a `ubicarClip` o a `clipPedidoOSeleccionado`, siguiendo
+ * los helpers; tiene RESPALDO en la selección si llega a `clipPedidoOSeleccionado` o llama a
+ * `exigirClip`. Cada herramienta que lo llama declara y reenvía las claves de objetivo que el verbo lee,
+ * y promete el seleccionado sólo si hay respaldo.
+ */
+function defectosDeObjetivo(srcServidor, srcComandos) {
+  const FN = {};
+  const B = blanquear(srcComandos);
+  for (const f of funcionesDe(B)) FN[f.nombre] = { args: f.args, cuerpo: B.slice(f.ini, f.fin + 1) };
+  function llega(nombre, pos, destinos, visto) {
+    visto = visto || new Set();
+    const id = nombre + "#" + pos, out = new Set();
+    if (visto.has(id)) return out;
+    visto.add(id);
+    const f = FN[nombre];
+    if (!f || !f.args[pos]) return out;
+    const alias = f.args[pos].replace(/\s*=.*$/, "").trim();
+    for (const m of f.cuerpo.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(([^()]*)\)/g)) {
+      const i = m[2].split(",").map((x) => x.trim()).indexOf(alias);
+      if (i === -1) continue;
+      if (destinos.includes(m[1])) out.add(m[1]);
+      else if (FN[m[1]] && m[1] !== nombre) for (const d of llega(m[1], i, destinos, visto)) out.add(d);
+    }
+    return out;
+  }
+  const derivada = derivarParams(srcComandos);
+  const OBJETIVO = ["pista", "indice", "nombre"];
+  const PROMESA = /(sin (nada|esto)[^."\n]{0,60}|o si no)[ ,]*el (clip )?seleccionado|operan? sobre el clip seleccionado/i;
+  const problemas = [], herramientas = new Set();
+  for (const b of srcServidor.split(/registerTool\(/).slice(1)) {
+    const nom = /^\s*["'`](\w+)["'`]/.exec(b);
+    const iSchema = b.indexOf("inputSchema:");
+    const iEnviar = b.search(/enviar\(\s*["'`](\w+)["'`]/);
+    if (!nom || iSchema === -1 || iEnviar === -1) continue;
+    const declaradas = new Set([...b.slice(iSchema, iEnviar).matchAll(/\n {6}([A-Za-z_$][\w$]*)\s*:\s*z\s*\./g)].map((x) => x[1]));
+    const manija = /\}\s*,\s*async\s*\(\s*([A-Za-z_$][\w$]*|\{[^}]*\})\s*\)\s*=>/.exec(b.slice(iSchema));
+    for (const m of b.slice(iEnviar).matchAll(/enviar\(\s*["'`](\w+)["'`]\s*,\s*([A-Za-z_$][\w$]*|\{[^}]*\})/g)) {
+      const verbo = m[1];
+      const toma = llega(verbo, 0, ["ubicarClip", "clipPedidoOSeleccionado"]);
+      if (!toma.size) continue;
+      herramientas.add(nom[1]);
+      const lee = OBJETIVO.filter((k) => (derivada[verbo] || []).includes(k));
+      const faltan = lee.filter((k) => !declaradas.has(k));
+      if (faltan.length) problemas.push(`${nom[1]} no declara ${faltan.join(", ")}, y ${verbo} lo lee`);
+      /* `args` entero, o un objeto con las claves: un `{ proyecto, secuencia }` las perdía. */
+      const arg = m[2];
+      const todo = /^[A-Za-z_$][\w$]*$/.test(arg) ? !!manija && manija[1] === arg : /\.\.\./.test(arg);
+      if (!todo) {
+        const pasa = new Set([...arg.matchAll(/([A-Za-z_$][\w$]*)\s*(?=[,}:])/g)].map((x) => x[1]));
+        const sinPasar = lee.filter((k) => declaradas.has(k) && !pasa.has(k));
+        if (sinPasar.length) problemas.push(`${nom[1]} declara ${sinPasar.join(", ")} y no se lo pasa a ${verbo}`);
+      }
+      const respaldo = toma.has("clipPedidoOSeleccionado") || /\bexigirClip\s*\(/.test((FN[verbo] || {}).cuerpo || "");
+      if (!respaldo && PROMESA.test(b.slice(0, iEnviar))) problemas.push(`${nom[1]} promete el seleccionado, y ${verbo} rebota sin objetivo`);
+    }
+  }
+  return { problemas: [...new Set(problemas)], herramientas: herramientas.size };
+}
+{
+  const base = defectosDeObjetivo(srcServidor, SRC_CMD);
+  /* Cada mutación tiene que aparecer como problema de ESA herramienta. Una que no se puede aplicar
+     tampoco vale: el control no probaría nada. */
+  const mutar = (src, herramienta, de, a) => {
+    const m = new RegExp("registerTool\\(\\s*\"" + herramienta + "\"").exec(src);
+    if (!m) return null;
+    const sig = src.indexOf("registerTool(", m.index + 1);
+    const fin = sig === -1 ? src.length : sig;
+    const tramo = src.slice(m.index, fin), nuevo = tramo.replace(de, a);
+    return nuevo === tramo ? null : src.slice(0, m.index) + nuevo + src.slice(fin);
+  };
+  const MUTACIONES = [
+    ["premiere_keyframe", /\n {6}indice:[^\n]*/, "", "sin `indice` en el schema"],
+    ["premiere_motion", "enviar(\"motion\", { proyecto, secuencia, pista, indice, nombre })", "enviar(\"motion\", { proyecto, secuencia })", "sin reenviar el objetivo"],
+    ["premiere_borrar", "description:", "description: \"Sin nada, el seleccionado. \" +", "prometiendo el seleccionado"],
+  ];
+  const ciegas = [];
+  for (const [h, de, a, que] of MUTACIONES) {
+    const src = mutar(srcServidor, h, de, a);
+    if (src === null) { ciegas.push(`${h} ${que}: la mutación no se pudo aplicar`); continue; }
+    if (!defectosDeObjetivo(src, SRC_CMD).problemas.some((p) => p.startsWith(h + " "))) ciegas.push(`${h} ${que}`);
+  }
+  if (base.problemas.length) mal("hay herramientas MCP que no dejan nombrar el clip, o prometen un seleccionado que no hay", base.problemas.slice(0, 4).join(" · "));
+  else if (ciegas.length) mal("la guarda del objetivo no ve sus mutaciones", ciegas.join(" · "));
+  else ok(`las ${base.herramientas} herramientas que apuntan a un clip declaran y reenvían su objetivo, y ninguna promete un seleccionado sin respaldo`, `${MUTACIONES.length} mutaciones vistas`);
+}
+
+titulo("Ningún borde va a Premiere con un `aTick` crudo, salvo los anotados con su razón");
+
+/*
+ * La regla del cuadro más cercano (2026-10-12) se chequeaba verbo por verbo, en los que la pagaron, y
+ * así `unirAudio` —el de al lado de `unirVideo`— siguió estirando hasta un fin redondeado al
+ * milisegundo. Acá se mira TODA acción que recibe un borde: si su argumento es un `aTick(` crudo, o una
+ * variable que salió de uno, la función tiene que estar anotada con cuántos sitios y por qué. Las
+ * sondas no cuentan: no son herramientas, y probar formas es su trabajo.
+ */
+const ACCIONES_DE_BORDE = [
+  "createSetInOutPointsAction", "createSetInPointAction", "createSetOutPointAction", "createSetStartAction",
+  "createSetEndAction", "createSetDurationAction", "createMoveAction", "createOverwriteItemAction",
+  "createSubClipAction", "createCloneTrackItemAction", "createAddMarkerAction", "createMoveMarkerAction",
+];
+const ATICK_ANOTADOS = {
+  limpiarRangos: [2, "pone un SENTINEL fuera de todo rango, no un borde"],
+  inOutMedio: [1, "escribe el valor tal cual: no tiene una secuencia de referencia (insertar-y-armado.md)"],
+  cortar: [1, "`tickCorte` sale de aTick y se REASIGNA al cuadro con alignToNearestFrame antes de usarse"],
+  /* PENDIENTES de la auditoría del 2026-10-17: se cierran midiendo en Premiere. */
+  unirAudio: [1, "PENDIENTE: estira hasta el fin de tiemposDe, redondeado al milisegundo"],
+  insertar: [1, "PENDIENTE: la posición del overwrite; no está medido hacia dónde la pega Premiere"],
+  armarSecuencia: [1, "PENDIENTE: la posición de cada fragmento, ídem"],
+  exportar: [2, "PENDIENTE: el in/out de la secuencia, que es el rango del export"],
+  subclip: [3, "PENDIENTE: el rango del subclip"],
+  marcar: [4, "PENDIENTE: la duración del marcador; el tiempo sí va al cuadro"],
+};
+function bordesConATick(src) {
+  const B = blanquear(src);
+  const fns = funcionesDe(B);
+  const sitios = {};
+  for (const m of B.matchAll(new RegExp("\\.(" + ACCIONES_DE_BORDE.join("|") + ")\\s*\\(", "g"))) {
+    const par = m.index + m[0].length - 1;
+    const f = duenoDe(fns, m.index);
+    const nombre = f ? f.nombre : "(global)";
+    if (/^sonda/.test(nombre)) continue;
+    const args = B.slice(par + 1, cierreDe(B, par));
+    const cuerpo = f ? B.slice(f.ini, f.fin + 1) : B;
+    const deATick = [...cuerpo.matchAll(/\b([A-Za-z_$][\w$]*)\s*=\s*aTick\s*\(/g)].map((x) => x[1]);
+    const crudo = /\baTick\s*\(/.test(args) ||
+      deATick.some((v) => new RegExp("(?<![\\w$.])" + v.replace(/\$/g, "\\$") + "(?![\\w$])").test(args));
+    if (crudo) (sitios[nombre] = sitios[nombre] || []).push(lineaDe(src, m.index));
+  }
+  return sitios;
+}
+{
+  const sitios = bordesConATick(SRC_CMD);
+  const problemas = [];
+  for (const [f, ls] of Object.entries(sitios)) {
+    if (!ATICK_ANOTADOS[f]) problemas.push(`${f} (línea ${ls.join(", ")}) pasa un borde con aTick crudo y no está anotada`);
+    else if (ATICK_ANOTADOS[f][0] !== ls.length) problemas.push(`${f}: anotados ${ATICK_ANOTADOS[f][0]}, y hay ${ls.length} (línea ${ls.join(", ")})`);
+  }
+  for (const f of Object.keys(ATICK_ANOTADOS)) if (!sitios[f]) problemas.push(`${f} ya no pasa ningún aTick crudo: sacala de ATICK_ANOTADOS`);
+  /* Controles: la regresión de feed2c2 en unirVideo, una variable que sale de aTick, y lo que no cuenta. */
+  const ciegos = [];
+  const regresion = SRC_CMD.replace("createSetEndAction(tickAlCuadro(r.hasta, tpf))", "createSetEndAction(aTick(r.hasta))");
+  if (regresion === SRC_CMD) ciegos.push("la mutación de unirVideo no se pudo aplicar");
+  else if (!(bordesConATick(regresion).unirVideo || []).length) ciegos.push("no ve la regresión de unirVideo (feed2c2)");
+  const sint = bordesConATick(
+    "function variable(p) { const fin = aTick(p.hasta); it.createSetEndAction(fin); }\n" +
+    "function bien(p) { it.createSetEndAction(tickAlCuadro(p.hasta, tpf)); }\n" +
+    "function mensaje() { log(\"it.createSetEndAction(aTick(x))\"); }\n" +
+    "function sondaFormas(p) { it.createSetEndAction(aTick(p)); }\n");
+  if (!sint.variable) ciegos.push("no sigue una variable que sale de aTick");
+  const deMas = Object.keys(sint).filter((k) => k !== "variable");
+  if (deMas.length) ciegos.push("marca lo que no cuenta: " + deMas.join(", "));
+  const pendientes = Object.keys(ATICK_ANOTADOS).filter((f) => /^PENDIENTE/.test(ATICK_ANOTADOS[f][1]));
+  if (problemas.length) mal("hay bordes que van a Premiere con un aTick crudo sin anotar", problemas.slice(0, 4).join(" · "));
+  else if (ciegos.length) mal("el barrido de aTick no ve sus controles", ciegos.join(" · "));
+  else ok("ninguna acción de borde recibe un aTick crudo fuera de la lista", `PENDIENTES de la auditoría: ${pendientes.join(", ")}`);
+}
+
+titulo("Ningún `getKeyframePtr` adentro de un bucle");
+
+/*
+ * `getKeyframePtr` en ráfaga es un SIGBUS diferido: 90 punteros en ~2 s tiraron Premiere, y el arreglo
+ * del 2026-08-15 lo sacó de `leerEscalas` (crashes.md, «`getKeyframePtr` en ráfaga»). De `param`, que
+ * pide uno por keyframe, no lo sacó: lo encontró la auditoría del 2026-10-17. Una llamada suelta —el
+ * último recurso de `valorEnTiempo`— no hace daño; adentro de un for, un while o un forEach/map, sí.
+ * Lo que este barrido NO ve: una función con una llamada suelta que otra llama en un bucle, que es
+ * justo `valorEnTiempo` —sin medir, en la auditoría—.
+ */
+const PTR_PENDIENTES = {
+  param: "PENDIENTE de la auditoría: leer cada keyframe con getValueAtTime, midiendo en Premiere",
+};
+function punterosEnBucle(src) {
+  const B = blanquear(src);
+  const fns = funcionesDe(B);
+  const hallados = {};
+  for (const m of B.matchAll(/\.getKeyframePtr\s*\(/g)) {
+    const pos = m.index, f = duenoDe(fns, pos);
+    const ini = f ? f.ini : 0, fin = f ? f.fin : B.length;
+    let enBucle = false;
+    for (const l of B.slice(ini, fin).matchAll(/\b(for|while)\s*\(|\.(forEach|map|flatMap|reduce|filter|some|every|find)\s*\(/g)) {
+      const a = ini + l.index + l[0].length - 1, b = cierreDe(B, a);
+      let desde = a, hasta = b;
+      if (l[1]) {
+        let k = b + 1;
+        while (/\s/.test(B[k])) k++;
+        desde = k;
+        hasta = B[k] === "{" ? cierreDe(B, k) : B.indexOf(";", k);
+      }
+      if (pos > desde && pos < hasta) { enBucle = true; break; }
+    }
+    if (enBucle) {
+      const nombre = f ? f.nombre : "(global)";
+      (hallados[nombre] = hallados[nombre] || []).push(lineaDe(src, pos));
+    }
+  }
+  return hallados;
+}
+{
+  const h = punterosEnBucle(SRC_CMD);
+  const problemas = [];
+  for (const [f, ls] of Object.entries(h)) if (!PTR_PENDIENTES[f]) problemas.push(`${f} (línea ${ls.join(", ")})`);
+  for (const f of Object.keys(PTR_PENDIENTES)) if (!h[f]) problemas.push(`${f} ya no lo usa en un bucle: sacala de PTR_PENDIENTES`);
+  const sint = punterosEnBucle(
+    "function enFor(p, ts) { for (let i = 0; i < ts.length; i++) { p.getKeyframePtr(ts[i]); } }\n" +
+    "function enWhile(p, t) { while (t) t = p.getKeyframePtr(t); }\n" +
+    "function enMap(p, ts) { return ts.map((t) => p.getKeyframePtr(t)); }\n" +
+    "function suelta(p, t) { for (const x of []) {} return p.getKeyframePtr(t); }\n" +
+    "function comentada(p, ts) { for (const t of ts) { /* p.getKeyframePtr(t) */ } }\n");
+  const ciegos = [];
+  for (const f of ["enFor", "enWhile", "enMap"]) if (!sint[f]) ciegos.push(`no ve ${f}`);
+  for (const f of ["suelta", "comentada"]) if (sint[f]) ciegos.push(`marca ${f}`);
+  if (problemas.length) mal("hay getKeyframePtr adentro de un bucle", problemas.join(" · ") + ". Los valores salen de getValueAtTime: ver crashes.md");
+  else if (ciegos.length) mal("el barrido de getKeyframePtr no ve sus controles", ciegos.join(" · "));
+  else ok("ningún getKeyframePtr en un bucle fuera de la lista", `PENDIENTE de la auditoría: ${Object.keys(PTR_PENDIENTES).join(", ")}`);
+}
+
+titulo("Todo lo que corre un clip en la secuencia pasa por `rompeElOrden`, salvo lo anotado");
+
+/*
+ * `createMoveAction` no reordena la lista de la pista, y un clip FUERA DE ORDEN no se dibuja ni se
+ * exporta (2026-09-30): `editar` rebota el movimiento que pasa a un vecino, con `rompeElOrden`. Lo que
+ * corre el inicio de un clip —`createMoveAction`, `createSetStartAction`— en una función que no lo
+ * consulta tiene que estar anotado con por qué no puede pasar a un vecino. Las sondas no cuentan.
+ */
+const MUEVEN_ANOTADOS = {
+  cortar: "recorta el INICIO de la cola estacionada pasado el final de la secuencia, donde no tiene vecinos; la cola llega a su lugar CLONADA, no movida",
+};
+function muevenSinOrden(src) {
+  const B = blanquear(src), fns = funcionesDe(B);
+  const out = {};
+  for (const m of B.matchAll(/\.(createMoveAction|createSetStartAction)\s*\(/g)) {
+    const f = duenoDe(fns, m.index), n = f ? f.nombre : "(global)";
+    if (/^sonda/.test(n)) continue;
+    if (f && /\brompeElOrden\s*\(/.test(B.slice(f.ini, f.fin + 1))) continue;
+    (out[n] = out[n] || []).push(lineaDe(src, m.index));
+  }
+  return out;
+}
+{
+  const h = muevenSinOrden(SRC_CMD);
+  const problemas = [];
+  for (const [f, ls] of Object.entries(h)) if (!MUEVEN_ANOTADOS[f]) problemas.push(`${f} (línea ${ls.join(", ")})`);
+  for (const f of Object.keys(MUEVEN_ANOTADOS)) if (!h[f]) problemas.push(`${f} ya no corre clips sin consultar el orden: sacala de MUEVEN_ANOTADOS`);
+  const ciegos = [];
+  const sinConsulta = SRC_CMD.replace("const rotos = await rompeElOrden(", "const rotos = await (async () => [])(");
+  if (sinConsulta === SRC_CMD) ciegos.push("la mutación de editar no se pudo aplicar");
+  else if (!muevenSinOrden(sinConsulta).editar) ciegos.push("no ve a editar sin rompeElOrden");
+  const sint = muevenSinOrden("function nuevo(c, t) { c.createMoveAction(t); }\nfunction sondaX(c, t) { c.createMoveAction(t); }\n");
+  if (!sint.nuevo || sint.sondaX) ciegos.push("los controles sintéticos no dan lo esperado: " + JSON.stringify(sint));
+  if (problemas.length) mal("hay verbos que corren clips sin consultar el orden de la lista", problemas.join(" · ") + ". Un clip fuera de orden no se dibuja ni se exporta");
+  else if (ciegos.length) mal("el chequeo del orden no ve sus controles", ciegos.join(" · "));
+  else ok("lo que corre un clip consulta rompeElOrden, salvo la cola estacionada de cortar", "1 mutación y 2 controles");
+}
+
+titulo("Todo borrado de clips por dentro vacía la selección, salvo lo anotado");
+
+/*
+ * `createRemoveItemsAction` saca el clip del timeline y lo deja adentro de la selección, y la edición
+ * siguiente en ese lugar tiró Premiere en Effect Controls (2026-09-24). `borrar` lo arregló y
+ * `vaciarSeleccion` lo copió para `vaciarSecuencia`, `unirAudio` y `unirVideo` dos días después: la
+ * regla se pagó en un verbo y llegó tarde a los otros. Toda función que borra clips llama a
+ * `vaciarSeleccion`, o está anotada con la prueba de que vacía por su cuenta.
+ */
+const BORRAN_ANOTADOS = {
+  borrar: [/seleccionVaciada\s*=\s*\(await seleccion\.getTrackItems\(\)\)\.length === 0/, "vacía con su propio código —el medido, que `vaciarSeleccion` copió— y lo informa en `seleccionVaciada`"],
+};
+function borranSinVaciar(src) {
+  const B = blanquear(src), fns = funcionesDe(B);
+  const out = {};
+  for (const m of B.matchAll(/\.createRemoveItemsAction\s*\(/g)) {
+    const f = duenoDe(fns, m.index), n = f ? f.nombre : "(global)";
+    if (/^sonda/.test(n)) continue;
+    const anot = BORRAN_ANOTADOS[n];
+    const cuerpo = f ? B.slice(f.ini, f.fin + 1) : "";
+    if (/\bvaciarSeleccion\s*\(/.test(cuerpo) || (anot && anot[0].test(cuerpo))) continue;
+    (out[n] = out[n] || []).push(lineaDe(src, m.index));
+  }
+  return out;
+}
+{
+  const h = borranSinVaciar(SRC_CMD);
+  const problemas = Object.entries(h).map(([f, ls]) => `${f} (línea ${ls.join(", ")})`);
+  const B = blanquear(SRC_CMD), fns = funcionesDe(B);
+  for (const f of Object.keys(BORRAN_ANOTADOS)) {
+    const d = fns.find((x) => x.nombre === f);
+    if (!d || !/\.createRemoveItemsAction\s*\(/.test(B.slice(d.ini, d.fin + 1))) problemas.push(`${f} ya no borra clips: sacala de BORRAN_ANOTADOS`);
+  }
+  const ciegos = [];
+  const sinVaciar = SRC_CMD.replace("if (!(await vaciarSeleccion(sequence, sel, [its[par]]))) seleccionSucia++;", "");
+  if (sinVaciar === SRC_CMD) ciegos.push("la mutación de unirAudio no se pudo aplicar");
+  else if (!borranSinVaciar(sinVaciar).unirAudio) ciegos.push("no ve a unirAudio sin vaciarSeleccion");
+  if (problemas.length) mal("hay funciones que borran clips y no vacían la selección", problemas.join(" · ") + ". El clip borrado queda en la selección y la edición siguiente puede tirar Premiere");
+  else if (ciegos.length) mal("el chequeo de la selección no ve sus controles", ciegos.join(" · "));
+  else ok("todo borrado de clips por dentro vacía la selección, borrar con su propio código", "1 mutación vista");
+}
+
+titulo("Las herramientas que barren cuentan antes, cortan en el primer rechazo, y su tope es el de `borrar`");
+
+/*
+ * El «cuenta primero» del 2026-09-21 llegó sólo a `colocar_fragmentos`: `colocar_sincro` y
+ * `colocar_propuesta` barrían sin contar, seguían intentando después del rechazo de `borrar`, y
+ * `colocar_sincro` colocaba igual encima de lo que quedaba. Por mecanismo, en todo `herramientas/`:
+ * cada llamada a `borrar` va en un bloque de `--limpiar` con una comparación viva contra
+ * `TOPE_BARRIDO` y un `process.exit(1)` ANTES de ella, y con un `break` en su `catch`. Y el tope de
+ * cada herramienta es el `BORRAR_TOPE` del panel.
+ */
+function barridosSinContar(src) {
+  const B = blanquear(src);
+  const problemas = [];
+  let llamadas = 0;
+  for (const m of B.matchAll(/\benviar\(\s*["'`]/g)) {
+    if (!/^enviar\(\s*["'`]borrar["'`]/.test(src.slice(m.index, m.index + 30))) continue;
+    llamadas++;
+    const p = m.index, linea = lineaDe(src, p);
+    const bloques = [...B.slice(0, p).matchAll(/\bif\s*\(\s*(?:LIMPIAR_PISTA|LIMPIAR|flag\()/g)];
+    if (!bloques.length) { problemas.push(`línea ${linea}: un borrar fuera de un bloque de --limpiar`); continue; }
+    const tramo = B.slice(bloques[bloques.length - 1].index, p);
+    const cmp = tramo.search(/>\s*TOPE_BARRIDO\b/);
+    if (cmp === -1) problemas.push(`línea ${linea}: barre sin comparar contra TOPE_BARRIDO`);
+    else if (!/process\.exit\(\s*1\s*\)/.test(tramo.slice(cmp))) problemas.push(`línea ${linea}: compara contra TOPE_BARRIDO y no aborta`);
+    const iCatch = B.indexOf("catch", p);
+    const abre = iCatch === -1 ? -1 : B.indexOf("{", iCatch);
+    if (abre === -1 || !/\bbreak\b/.test(B.slice(abre, cierreDe(B, abre) + 1))) problemas.push(`línea ${linea}: sigue barriendo después de un rechazo`);
+    /* Y mira lo que `borrar` dice de la selección, que se tiraba: si no quedó vacía, el clip borrado
+       sigue adentro y la edición siguiente tiró Premiere (2026-09-24). */
+    else if (!/\.seleccionVaciada\s*===\s*false\s*\)\s*\{[^}]*\bbreak\b/.test(B.slice(cierreDe(B, abre), cierreDe(B, abre) + 300))) {
+      problemas.push(`línea ${linea}: no corta si la selección quedó con el clip borrado`);
+    }
+  }
+  const tope = /const TOPE_BARRIDO\s*=\s*(\d+)/.exec(B);
+  return { problemas, llamadas, tope: tope ? Number(tope[1]) : null };
+}
+{
+  const panel = /const BORRAR_TOPE\s*=\s*(\d+)/.exec(SRC_CMD);
+  const dirH = path.join(raiz, "herramientas");
+  const problemas = [];
+  let llamadas = 0, herramientas = 0;
+  const fuentes = {};
+  for (const nom of fs.readdirSync(dirH).filter((n) => n.endsWith(".js"))) {
+    const src = fs.readFileSync(path.join(dirH, nom), "utf8");
+    fuentes[nom] = src;
+    const r = barridosSinContar(src);
+    if (!r.llamadas) continue;
+    herramientas++;
+    llamadas += r.llamadas;
+    for (const x of r.problemas) problemas.push(`${nom} ${x}`);
+    if (!panel || r.tope !== Number(panel[1])) problemas.push(`${nom}: TOPE_BARRIDO es ${r.tope} y BORRAR_TOPE del panel ${panel ? panel[1] : "?"}`);
+  }
+  /* Mutaciones sobre las fuentes de verdad: cada una tiene que aparecer. */
+  const ciegos = [];
+  const muta = (nom, de, a, que) => {
+    const src = fuentes[nom] || "";
+    const m = src.replace(de, a);
+    if (m === src) { ciegos.push(`${nom} ${que}: la mutación no se pudo aplicar`); return; }
+    if (!barridosSinContar(m).problemas.length) ciegos.push(`${nom} ${que}`);
+  };
+  muta("colocar_sincro.js", "aBorrar > TOPE_BARRIDO", "false", "sin comparar contra el tope");
+  muta("colocar_propuesta.js", /cortado = true; break; \}/, "cortado = true; }", "sin cortar en el rechazo");
+  muta("colocar_fragmentos.js", /if \(cs\.length > TOPE_BARRIDO\) \{[\s\S]*?process\.exit\(1\);\s*\}/, "", "sin el rebote previo");
+  muta("colocar_sincro.js", /if \(rb && rb\.seleccionVaciada === false\) \{ seleccionSucia = true; cortado = true; break; \}/, "", "sin mirar la selección");
+  if (problemas.length) mal("hay barridos que no cuentan antes o no cortan en el rechazo", problemas.slice(0, 4).join(" · "));
+  else if (ciegos.length) mal("el chequeo de los barridos no ve sus mutaciones", ciegos.join(" · "));
+  else ok(`las ${llamadas} llamadas a borrar de ${herramientas} herramientas cuentan antes, cortan en el rechazo o con la selección sucia, y su tope es el del panel (${panel[1]})`, "4 mutaciones vistas");
+}
+
+titulo("Los colocadores releen el clip por tiempo Y por medio, y no adivinan cuál es");
+
+/*
+ * La relectura final de `colocar_fragmentos` buscaba por tiempo solo: la PNG que arranca en el mismo
+ * punto pasaba por la locución que se pidió ahí. Y el `--sin-lote` de `colocar_propuesta`, si no
+ * encontraba el clip recién puesto, tomaba el ÚLTIMO de la pista y le aplicaba tres `editar`
+ * (auditoría 2026-10-17). Es `clipDelMedio` del panel, del lado de las herramientas.
+ */
+function relecturasFlojas(srcFrag, srcProp) {
+  const problemas = [];
+  const Bf = blanquear(srcFrag), Bp = blanquear(srcProp);
+  const fin = /const c = fin\.find\(\(x\) =>([^;]*)\);/.exec(Bf);
+  if (!fin) problemas.push("colocar_fragmentos: no encuentro la relectura final (`fin.find`)");
+  else if (!/contieneN\(/.test(fin[1])) problemas.push("colocar_fragmentos: la relectura final busca por tiempo solo");
+  const ix = /const ix = cs\.findIndex\(\(c\) =>([^;]*)\);([\s\S]{0,200})/.exec(Bp);
+  if (!ix) problemas.push("colocar_propuesta: no encuentro cómo ubica el clip recién puesto (`cs.findIndex`)");
+  else {
+    if (!/contieneN\(/.test(ix[1])) problemas.push("colocar_propuesta: ubica el clip recién puesto por tiempo solo");
+    if (!/if \(ix === -1\) throw\b/.test(ix[2])) problemas.push("colocar_propuesta: sin el clip recién puesto, no rebota");
+  }
+  if (/\bix\s*=\s*cs\.length\s*-\s*1\b/.test(Bp)) problemas.push("colocar_propuesta: adivina el último clip de la pista");
+  return problemas;
+}
+{
+  const srcFrag = fs.readFileSync(path.join(raiz, "herramientas/colocar_fragmentos.js"), "utf8");
+  const srcProp = fs.readFileSync(path.join(raiz, "herramientas/colocar_propuesta.js"), "utf8");
+  const base = relecturasFlojas(srcFrag, srcProp);
+  const ciegos = [];
+  const mutaciones = [
+    ["la relectura final por tiempo solo", srcFrag.replace("&& contieneN(x.nombre, p.clip)", ""), srcProp],
+    ["adivinando el último clip", srcFrag, srcProp.replace(/if \(ix === -1\) throw new Error\([^;]*\);/, "if (ix === -1) ix = cs.length - 1;").replace("const ix =", "let ix =")],
+  ];
+  for (const [que, f, p] of mutaciones) {
+    if (f === srcFrag && p === srcProp) { ciegos.push(que + ": la mutación no se pudo aplicar"); continue; }
+    if (!relecturasFlojas(f, p).length) ciegos.push(que);
+  }
+  if (base.length) mal("hay colocadores que releen por tiempo solo o adivinan el clip", base.join(" · "));
+  else if (ciegos.length) mal("el chequeo de las relecturas no ve sus mutaciones", ciegos.join(" · "));
+  else ok("las relecturas de los colocadores buscan por tiempo y por medio, y sin el clip rebotan en vez de adivinar", `${mutaciones.length} mutaciones vistas`);
+}
+
+titulo("`quirurgico.js --reponer` cuenta las apariciones en el orden del tiempo, no en el de la lista");
+
+/*
+ * Emparejaba la n-ésima aparición de un nombre en el estado guardado con la n-ésima de la pista
+ * rearmada, contadas en el orden de la LISTA. La guardada podía tener un clip fuera de orden y la
+ * rearmada sale ordenada: el punch-in o el Lumetri iban a otro plano del mismo medio, sin aviso
+ * (auditoría 2026-10-17). Los dos conteos tienen que salir de copias ordenadas por `desde`.
+ */
+{
+  const q = blanquear(fs.readFileSync(path.join(raiz, "herramientas", "quirurgico.js"), "utf8"));
+  const ordena = (txt) => /ahora\.slice\(\)\.sort\(porTiempo\)\.forEach\(/.test(txt) &&
+    /for \(const c of \(S\.clips \|\| \[\]\)\.slice\(\)\.sort\(porTiempo\)\)/.test(txt) &&
+    /const porTiempo = \(a, b\) => \(a\.desde \|\| 0\) - \(b\.desde \|\| 0\);/.test(txt);
+  const mutado = q.replace("ahora.slice().sort(porTiempo).forEach(", "ahora.forEach(");
+  if (!ordena(q)) mal("`quirurgico.js --reponer` cuenta las apariciones en el orden de la lista", "un clip fuera de orden manda el trabajo manual a otro plano del mismo medio");
+  else if (mutado === q || ordena(mutado)) mal("el chequeo del orden de `quirurgico.js` no ve su mutación");
+  else ok("`quirurgico.js --reponer` numera las apariciones de los dos lados en el orden del tiempo", "1 mutación vista");
+}
+
+titulo("Las herramientas comparan los nombres normalizados");
+
+/*
+ * Premiere devuelve los nombres en NFC y el disco puede darlos en NFD: comparados por bytes, un medio
+ * con tilde no era el mismo. La auditoría del 2026-10-17 encontró diez comparaciones así en
+ * `herramientas/`. Por mecanismo: toda comparación de un `.nombre` —igualdad, `indexOf`, `startsWith`—
+ * pasa por `normalize`, `nfc`, `norm` o `contieneN`, salvo la que es contra un texto fijo —un nombre de
+ * la API— y las anotadas abajo con su razón.
+ */
+const NOMBRES_ANOTADOS = {
+  "quirurgico.js": [6, "cinco son nombres de efectos y params de la API, que vienen de Premiere de los dos lados, y la sexta compara el VALOR de un param leído por su nombre (`actual.get(q.nombre) !== q.valor`)"],
+};
+function comparacionesSinNormalizar(src) {
+  const B = blanquear(src);
+  const sitios = [];
+  const lineas = B.split("\n");
+  lineas.forEach((l, i) => {
+    if (!/\.nombre\b/.test(l)) return;
+    const compara = /\.nombre\)?\s*(?:===|!==)|(?:===|!==)\s*[\w$.]*\.nombre\b|\.nombre\b[^;]{0,40}?\.(?:indexOf|includes|startsWith|endsWith)\(|nombre\.replace\([^)]*\)\s*(?:===|!==)/.test(l);
+    if (!compara) return;
+    if (/normalize\(|\bnfc\(|\bnorm\(|contieneN\(|igualN\(/.test(l)) return;
+    /* contra un texto fijo: en el código blanqueado, unas comillas vacías */
+    if (/\.nombre\)?\s*(?:===|!==)\s*(["'`])\s*\1/.test(l) || /(["'`])\s*\1\s*(?:===|!==)\s*[\w$.]*\.nombre\b/.test(l)) return;
+    sitios.push(i + 1);
+  });
+  return sitios;
+}
+{
+  const dirH = path.join(raiz, "herramientas");
+  const problemas = [];
+  let revisadas = 0;
+  for (const nom of fs.readdirSync(dirH).filter((n) => n.endsWith(".js"))) {
+    const sitios = comparacionesSinNormalizar(fs.readFileSync(path.join(dirH, nom), "utf8"));
+    revisadas++;
+    const anot = NOMBRES_ANOTADOS[nom];
+    if (sitios.length && !anot) problemas.push(`${nom} (línea ${sitios.join(", ")})`);
+    else if (anot && anot[0] !== sitios.length) problemas.push(`${nom}: anotados ${anot[0]}, y hay ${sitios.length} (línea ${sitios.join(", ")})`);
+  }
+  const ciegos = [];
+  const sint = (s) => comparacionesSinNormalizar(s).length;
+  if (sint("const x = lista.find((c) => c.nombre === pedido);") !== 1) ciegos.push("no ve una igualdad");
+  if (sint("if (String(x.nombre || \"\").indexOf(nom) !== -1) ok();") !== 1) ciegos.push("no ve un indexOf");
+  if (sint("const x = lista.find((c) => nfc(c.nombre) === nfc(pedido));") !== 0) ciegos.push("marca una normalizada");
+  if (sint("const sinMotion = m.filter((x) => x.nombre !== \"Scale\");") !== 0) ciegos.push("marca una contra un texto fijo");
+  if (sint("// c.nombre === pedido, en un comentario") !== 0) ciegos.push("marca un comentario");
+  if (problemas.length) mal("hay herramientas que comparan nombres sin normalizar", problemas.join(" · ") + ". Premiere da NFC y el disco puede dar NFD");
+  else if (ciegos.length) mal("el chequeo de los nombres no ve sus controles", ciegos.join(" · "));
+  else ok(`las ${revisadas} herramientas comparan los nombres normalizados, salvo los de la API anotados`, "5 controles");
 }
 
 /* ---------- exportar: leer los in/out SIEMPRE, no solo cuando se pide rango ---------- */
@@ -8512,9 +9160,12 @@ titulo("`subtitular.py`: fps de la secuencia, 2 x 42, cambios, división a mano 
   decir("Hola, soy Ana y todos los días uso el, el Nombre Marca porque me deja el pelo suave y brillante.", 1.31, 0.33);
   decir("Yo lo probé una vez en casa. Después lo recomendé a toda mi familia.", 9.21, 0.4);
   escribir("Prueba - audio.audio.json", { motor: "scribe", palabras });
+  /* El medio de la primera, con tilde y en NFD, como lo da el disco; el ajuste anclado a él, en NFC, como
+     se tipea. Comparados por bytes, el cambio anclado iba a obsoletos sin aviso (auditoría 2026-10-17). */
   escribir("Prueba - timeline.json", { secuencia: "PRUEBA", fin: 20, fps: 30,
-    A: { A1: [["ANA.mp4", 0, 8.5, 100], ["BETO.mp4", 8.5, 16.5, 50]] }, V: { V1: [[0, 8.5], [8.5, 16.5]] } });
-  escribir("Prueba - ajustes.json", { cambios: [[3.6, "el, el", "el", "tartamudeo"]], para_escuchar: [],
+    A: { A1: [["ANÁ.mp4".normalize("NFD"), 0, 8.5, 100], ["BETO.mp4", 8.5, 16.5, 50]] }, V: { V1: [[0, 8.5], [8.5, 16.5]] } });
+  escribir("Prueba - ajustes.json", { cambios: [[3.6, "el, el", "el", "tartamudeo"],
+    [["ANÁ".normalize("NFC"), 107], "suave", "suavecito", "anclado al medio"]], para_escuchar: [],
     manual: [["Yo lo probé una vez en casa.", "Después lo recomendé / a toda mi familia."]] });
   const proyecto = (motor) => escribir("subtitulos.proyecto.json", { pistas: { habla: ["A1"] }, motor, pegadas: [["nombre", "marca"]] });
   proyecto("scribe");
@@ -8554,6 +9205,9 @@ titulo("`subtitular.py`: fps de la secuencia, 2 x 42, cambios, división a mano 
     mal("hay líneas que terminan en un artículo, una preposición o un clítico", colgadas.join(" · "));
   } else if (/\bel, el\b/.test(textoTodo) || !/uso el Nombre Marca/.test(textoTodo.replace(/\n/g, " "))) {
     mal("`subtitular.py` no aplicó el cambio de los ajustes", textoTodo.slice(0, 120));
+  } else if (!/\bsuavecito\b/.test(textoTodo)) {
+    mal("`subtitular.py` no aplicó el cambio anclado a un medio con tilde",
+      "el medio de la línea de tiempo vino en NFD y el del ajuste en NFC: comparados por bytes no se encuentran, y el cambio va a obsoletos sin aviso");
   } else if (!srt.includes("Yo lo probé una vez en casa.\n") || !srt.includes("Después lo recomendé\na toda mi familia.")) {
     mal("`subtitular.py` no aplicó la división a mano de los ajustes", srt.slice(-160).replace(/\n/g, " | "));
   } else if (!(fuerzas[0] === -12 && fuerzas[1] > -12 && fuerzas[2] === -12) ||
@@ -8566,7 +9220,7 @@ titulo("`subtitular.py`: fps de la secuencia, 2 x 42, cambios, división a mano 
   } else if (otro.status === 0 || !/espera «whisper»/.test(String(otro.stderr) + String(otro.stdout))) {
     mal("`subtitular.py` acepta una transcripción de otro motor que el que pide el proyecto", String(otro.stderr || "").trim().slice(0, 120));
   } else {
-    ok(`\`subtitular.py\` arma ${bloques.length} subtítulos a 30 fps, en 2 x 42, con los cambios, la división a mano y las pegadas del proyecto`);
+    ok(`\`subtitular.py\` arma ${bloques.length} subtítulos a 30 fps, en 2 x 42, con los cambios —también el anclado a un medio con tilde en otra forma Unicode—, la división a mano y las pegadas del proyecto`);
   }
 }
 
@@ -8681,6 +9335,43 @@ titulo("`timeline_prproj.py`: los nested abiertos y RECORTADOS, sin capas de aju
   } else {
     ok("`timeline_prproj.py` abre el nested de la voz recortado a lo que se ve, junta los streams y deja afuera la capa de ajuste y el título");
   }
+}
+
+titulo("`timeline_prproj.py` encuentra la secuencia y el autoguardado aunque el nombre venga en otra forma Unicode");
+
+/*
+ * Premiere guarda los nombres en NFC; el disco puede darlos en NFD, y en una carpeta de trabajo real el único .prproj con
+ * tilde está en NFC y dos de sus tres autoguardados en NFD. Por bytes, `glob` no veía el autoguardado más
+ * nuevo —el que tiene lo no guardado— y los subtítulos salían de un timeline viejo, con sólo el campo
+ * `leido` para notarlo. Y una secuencia pedida en la otra forma rebotaba como inexistente. Se crean los
+ * archivos con el nombre en la forma OPUESTA a la que se pide: con el código de antes, los dos fallan.
+ */
+{
+  const py = fs.existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3";
+  const { spawnSync } = require("child_process");
+  const zlib = require("zlib");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "nfc-"));
+  const nom = "Edición";
+  const principal = path.join(tmp, nom.normalize("NFC") + ".prproj");
+  const auto = path.join(tmp, "Adobe Premiere Pro Auto-Save");
+  fs.mkdirSync(auto);
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<PremiereData Version="3"><Sequence ObjectUID="s1"><Name>${"CANCIÓN".normalize("NFD")}</Name></Sequence></PremiereData>`;
+  fs.writeFileSync(principal, zlib.gzipSync(xml));
+  const nuevo = path.join(auto, nom.normalize("NFD") + "--2.prproj");
+  fs.writeFileSync(nuevo, zlib.gzipSync(xml));
+  fs.utimesSync(principal, new Date(Date.parse("2026-10-01")), new Date(Date.parse("2026-10-01")));
+  const r = spawnSync(py, ["-I", "-c",
+    "import importlib.util, os, sys\n" +
+    "e = importlib.util.spec_from_file_location('t', sys.argv[1]); m = importlib.util.module_from_spec(e); e.loader.exec_module(m)\n" +
+    "print(os.path.basename(m.elegir(sys.argv[2])) == os.path.basename(sys.argv[3]))\n" +
+    "print(m.Prproj(sys.argv[2]).secuencia(sys.argv[4]).findtext('Name') is not None)",
+    path.join(raiz, "herramientas", "timeline_prproj.py"), principal, nuevo, "CANCIÓN".normalize("NFC")], { encoding: "utf8" });
+  fs.rmSync(tmp, { recursive: true, force: true });
+  const [eligio, encontro] = String(r.stdout || "").trim().split("\n");
+  if (r.error) console.log("  NO CORRIÓ  no hay python3 para correr timeline_prproj.py: " + String(r.error).split("\n")[0]);
+  else if (eligio !== "True") mal("`timeline_prproj.py` no ve el autoguardado más nuevo si su nombre viene en la otra forma Unicode", String(r.stderr || r.stdout).trim().split("\n").slice(-1)[0]);
+  else if (encontro !== "True") mal("`timeline_prproj.py` no encuentra una secuencia pedida en la otra forma Unicode", String(r.stderr || r.stdout).trim().split("\n").slice(-1)[0]);
+  else ok("`timeline_prproj.py` elige el autoguardado en NFD de un .prproj en NFC, y encuentra en NFD una secuencia pedida en NFC");
 }
 
 /*

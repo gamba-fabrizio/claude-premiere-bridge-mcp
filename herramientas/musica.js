@@ -431,9 +431,11 @@ async function cupoMusic() {
    * audio que no existe la CREA, asi que "fuera de rango" no significa que no haya entrado. */
   const c = await enviar("clips", g({}), 180000);
   const lista = (c.datos && c.datos.clips) || c.clips || c.datos || [];
-  const nom = path.basename(archivo);
+  /* Normalizado: el nombre del clip viene de Premiere en NFC, y el del archivo, en la forma del disco
+     o de lo tipeado. Por bytes, un wav con tilde daba «NO quedó» estando puesto (auditoría 2026-10-17). */
+  const nom = path.basename(archivo).normalize("NFC");
   const puesto = (Array.isArray(lista) ? lista : []).filter(
-    (x) => x.pista === "A" + PISTA && String(x.nombre || "").indexOf(nom) !== -1);
+    (x) => x.pista === "A" + PISTA && String(x.nombre || "").normalize("NFC").indexOf(nom) !== -1);
   if (!puesto.length) {
     console.log(`  ✗ NO quedo en A${PISTA}. El wav esta en ${archivo}; se coloca a mano.`);
     process.exit(1);

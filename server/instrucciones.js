@@ -11,18 +11,19 @@
  * Por eso salen de USO.md al arrancar y no de una copia: su sección «Antes de la primera llamada»,
  * entera, y la ruta del USO.md de ESTA copia del repo, que en otra instalación es otra.
  *
- * TOPE: Claude Code corta las instructions a 2.048 caracteres hasta la 2.1.295 —la que usa la app
- * de escritorio en esta máquina, al 2026-10-15, leído en su binario— y a 4.096 desde la 2.1.296.
- * Corta por el FINAL y le pega «… [truncated]», y lo último de la sección es lo ACUMULADO. `test.js`
- * exige el tope viejo. Y no hay que repetirlas en otro lado para que duren: Claude Code las vuelve a
- * anunciar después de cada compactación (medido en los transcripts, 2.1.280 a 2.1.295).
+ * TOPE: Claude Code corta las instructions a 4.096 caracteres desde la 2.1.296, y a 2.048 hasta la
+ * 2.1.295 —los dos leídos en sus binarios; la app de escritorio pasó a la 2.1.299 el 2026-10-15, y ese
+ * día la regla de leer lo que devuelve cada verbo entró en la sección—. Corta por el FINAL y le pega
+ * «… [truncated]»: un cliente anterior a la 2.1.296 pierde la última línea, que es la de lo ACUMULADO.
+ * `test.js` exige el tope nuevo. Y no hay que repetirlas en otro lado para que duren: Claude Code las
+ * vuelve a anunciar después de cada compactación (medido en los transcripts, 2.1.280 a 2.1.295).
  */
 const fs = require("fs");
 const path = require("path");
 
 const RUTA_USO = path.join(__dirname, "..", "USO.md");
 const SECCION = "## Antes de la primera llamada";
-const TOPE_INSTRUCCIONES = 2048;
+const TOPE_INSTRUCCIONES = 4096;
 
 /** El cuerpo de una sección `## ` de un markdown, hasta la `## ` siguiente; null si falta o está vacía. */
 function seccionDe(texto, titulo) {

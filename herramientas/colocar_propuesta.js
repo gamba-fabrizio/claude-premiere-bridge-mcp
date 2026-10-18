@@ -95,6 +95,8 @@
  *                     y los subtítulos si están en pistas de arriba.
  *   --limpiar-pista N barre sólo esa. Es lo que hay que usar para rehacer el corte de una
  *                     secuencia ya terminada.
+ *                     Los dos barren hasta TOPE_BARRIDO clips —el tope de `borrar`, 5 en 60 s—:
+ *                     con más, rebotan ANTES de borrar el primero y dicen qué hacer a mano.
  */
 const path = require("path");
 const fs = require("fs");
@@ -155,6 +157,35 @@ const F = 1 / FPS_SEC;
 const cuadro = (s) => Math.round(s / F) * F;
 const g = (o) => (SEC ? Object.assign({}, o, { secuencia: SEC }) : o);
 const tc = (s) => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+/* Los nombres de Premiere vienen en NFC, y los de la propuesta o la línea de comandos, en la forma en
+ * que se escribieron: por bytes, un plano con tilde no era el mismo (auditoría 2026-10-17). `contieneN`
+ * es la del panel, que es como `insertar` encuentra el medio. */
+const nfc = (s) => String(s == null ? "" : s).normalize("NFC");
+const contieneN = (heno, aguja) => nfc(heno).toLowerCase().indexOf(nfc(aguja).toLowerCase()) !== -1;
+
+/*
+ * EL TOPE DEL BARRIDO ES EL DE LA GUARDA DE `borrar`, QUE VIVE EN EL PANEL: rebota desde el 6º borrado
+ * en 60 s, y este bucle llega ahí en ~3 s. Un barrido más largo no puede terminar, y la pista quedaba A
+ * MEDIO BARRER antes de que la relectura frenara: el peor resultado posible. Se cuenta ANTES de borrar
+ * el primero, como en `colocar_fragmentos.js`, que tiene el caso medido (auditoría 2026-10-17).
+ * `test.js` exige que sea el mismo número que `BORRAR_TOPE`.
+ */
+const TOPE_BARRIDO = 5;
+/* Cuántas llamadas a `borrar` va a hacer un barrido, contadas antes de la primera. Un audio con un
+ * video del mismo rango se va con él —`borrar` arrastra los vinculados—, así que no suma; uno solo,
+ * sí. Es una estimación: el panel empareja por ticks y por medio, y `clips` da el milisegundo. Si se
+ * queda corta, el barrido corta en el primer rechazo y no se coloca encima. */
+function borradosDe(porPista) {
+  const videos = Object.keys(porPista).filter((p) => p[0] === "V").flatMap((p) => porPista[p]);
+  let n = videos.length;
+  for (const p of Object.keys(porPista)) {
+    if (p[0] !== "A") continue;
+    for (const c of porPista[p]) {
+      if (!videos.some((v) => Math.abs(v.desde - c.desde) < 0.002 && Math.abs(v.hasta - c.hasta) < 0.002)) n++;
+    }
+  }
+  return n;
+}
 
 /*
  * LEER UNA PISTA PARA LIMPIARLA NO PUEDE FALLAR EN SILENCIO (2026-09-11).
@@ -268,7 +299,7 @@ async function clipsDe(pista) {
 
   const est = await enviar("estado");
   console.log("activa: " + est.resumen);
-  if (SEC && est.resumen.indexOf(SEC) === -1) {
+  if (SEC && nfc(est.resumen).indexOf(nfc(SEC)) === -1) {
     console.error("\nLa activa no es \"" + SEC + "\". Activala en Premiere.");
     process.exit(1);
   }
@@ -309,21 +340,42 @@ async function clipsDe(pista) {
   }
 
   console.log("\nguardado antes: " + String((await enviar("guardar")).resumen).split("·")[0] + "\n");
+  /* `borrar` vacía la selección y lo informa en `seleccionVaciada`: si no pudo, el clip borrado sigue
+   * adentro, y la edición siguiente en ese lugar tiró Premiere (2026-09-24). Los barridos cortan ahí y
+   * no se coloca. */
+  let seleccionSucia = false;
 
   /* Limpiar UNA pista: sólo esa, y sin tocar audio — el audio de los clips vive en la
    * pista espejo y se va con el overwrite de los nuevos. */
   if (LIMPIAR_PISTA) {
     const v = Number(LIMPIAR_PISTA);
     const cs = await clipsDe("V" + v);
+    if (cs.length > TOPE_BARRIDO) {
+      console.error(`\nV${v} tiene ${cs.length} clip(s) y --limpiar-pista NO puede barrerla: \`borrar\` rebota ` +
+                    `a partir del ${TOPE_BARRIDO + 1}º borrado en 60 s, y la pista quedaría A MEDIO BARRER.`);
+      console.error("  lo que SÍ funciona, y es UNA operación en vez de " + cs.length + ":");
+      console.error("    1. a mano en Premiere: seleccionar la pista y apretar Delete (nativo e instantáneo)");
+      console.error("    2. o colocar en una pista vacía\n");
+      process.exit(1);
+    }
     console.log("limpiando SÓLO V" + v + ": " + cs.length + " clip(s)");
     let saco = 0;
     for (let i = cs.length - 1; i >= 0; i--) {
       await dormir(PAUSA);
-      try { await enviar("borrar", g({ pista: "V" + v, indice: i, dejarHueco: true }), 300000); saco++; }
-      catch (e) { console.log("  ✗ V" + v + "[" + i + "]: " + String(e.message).slice(0, 80)); }
+      /* Se corta en el primer rechazo: seguir son intentos que rebotan igual. */
+      let rb = null;
+      try { rb = await enviar("borrar", g({ pista: "V" + v, indice: i, dejarHueco: true }), 300000); saco++; }
+      catch (e) { console.log("  ✗ V" + v + "[" + i + "]: " + String(e.message).slice(0, 80)); break; }
+      if (rb && rb.seleccionVaciada === false) { seleccionSucia = true; break; }
     }
     const quedan = (await clipsDe("V" + v)).length;
     console.log("  " + saco + " borrado(s), quedan " + quedan + "\n");
+    if (seleccionSucia) {
+      console.error("\nLa selección quedó con un clip borrado adentro: deseleccioná en Premiere —clic en un " +
+                    "lugar vacío del timeline— y volvé a correr. Editar con el clip borrado seleccionado " +
+                    "tiró Premiere (2026-09-24).");
+      process.exit(1);
+    }
     if (quedan) { console.error("V" + v + " no quedó vacía, no sigo."); process.exit(1); }
   }
 
@@ -347,12 +399,33 @@ async function clipsDe(pista) {
     /* Audio de A2 en adelante: A1 NO se toca, ahí va el tema. */
     for (let aa = 2; aa <= hayA; aa++) pistas.push("A" + aa);
 
+    /* Se cuenta ANTES de borrar el primero: ver `TOPE_BARRIDO`. */
+    const antes = {};
+    for (const pista of pistas) antes[pista] = await clipsDe(pista);
+    const aBorrar = borradosDe(antes);
+    if (aBorrar > TOPE_BARRIDO) {
+      console.error(`\n--limpiar tendría que borrar ~${aBorrar} clip(s) en ` +
+                    pistas.filter((p) => antes[p].length).join(", ") + `, y \`borrar\` rebota a partir del ` +
+                    `${TOPE_BARRIDO + 1}º en 60 s: la secuencia quedaría A MEDIO BARRER.`);
+      console.error("  lo que SÍ funciona, y es UNA operación en vez de " + aBorrar + ":");
+      console.error("    1. a mano en Premiere: seleccionar esas pistas y apretar Delete (A1, con el tema, no se toca)");
+      console.error("    2. o colocar en una secuencia nueva\n");
+      process.exit(1);
+    }
+
+    /* Cada pista se relee justo antes de barrerla: borrar un video se lleva su audio, y los índices
+     * de las pistas de audio cambian. Y se corta en el primer rechazo: lo que queda lo dice la
+     * relectura de abajo, y no se coloca encima. */
+    let cortado = false;
     for (const pista of pistas) {
+      if (cortado) break;
       const cs = await clipsDe(pista);
       for (let i = cs.length - 1; i >= 0; i--) {
         await dormir(PAUSA);
-        try { await enviar("borrar", g({ pista, indice: i, dejarHueco: true }), 300000); saco++; }
-        catch (e) { fallados.push(pista + "[" + i + "]: " + String((e && e.message) || e).slice(0, 70)); }
+        let rb = null;
+        try { rb = await enviar("borrar", g({ pista, indice: i, dejarHueco: true }), 300000); saco++; }
+        catch (e) { fallados.push(pista + "[" + i + "]: " + String((e && e.message) || e).slice(0, 70)); cortado = true; break; }
+        if (rb && rb.seleccionVaciada === false) { seleccionSucia = true; cortado = true; break; }
       }
       if (cs.length) console.log("  " + pista + ": " + cs.length + " fuera");
       await dormir(PAUSA);
@@ -366,6 +439,12 @@ async function clipsDe(pista) {
     console.log("  " + saco + " borrado(s)" +
                 (fallados.length ? " · " + fallados.length + " fallaron" : "") + "\n");
     if (fallados.length) for (const x of fallados.slice(0, 5)) console.log("    ✗ " + x);
+    if (seleccionSucia) {
+      console.error("\nLa selección quedó con un clip borrado adentro: deseleccioná en Premiere —clic en un " +
+                    "lugar vacío del timeline— y volvé a correr. Editar con el clip borrado seleccionado " +
+                    "tiró Premiere (2026-09-24).");
+      process.exit(1);
+    }
     if (sucias.length) {
       console.error("NO quedaron vacias: " + sucias.join(", ") + ". No sigo: colocar encima");
       console.error("dejaria el corte nuevo mezclado con lo viejo.");
@@ -440,10 +519,12 @@ async function clipsDe(pista) {
        * —un clip del mismo medio que ya estaba en ese segundo, con la insercion sin entrar— y los
        * `editar` de abajo recortarian el clip viejo. Ver colocar_sincro.js, mismo arreglo. */
       if (r1.entro !== true) throw new Error(String(r1.resumen).slice(0, 120));
-      /* Índice del clip recién puesto: es el que arranca en `desde`. */
+      /* Índice del clip recién puesto: el que arranca en `desde` Y es de ese medio. Si no está, NO se
+       * adivina: hasta el 2026-10-17 se tomaba el último de la pista, que podía ser un suplente u otro
+       * plano del editor, y los tres `editar` de abajo lo recortaban y lo movían. */
       const cs = (await enviar("clips", { pista: "V" + t.v })).clips || [];
-      let ix = cs.findIndex((c) => Math.abs(c.desde - t.desde) < 0.03);
-      if (ix === -1) ix = cs.length - 1;
+      const ix = cs.findIndex((c) => Math.abs(c.desde - t.desde) < 0.03 && contieneN(c.nombre, t.clip));
+      if (ix === -1) throw new Error(`no apareció en V${t.v} en ${t.desde}s: no se edita ningún otro clip`);
       if (t.ent > 0) {
         await dormir(PAUSA);
         await enviar("editar", g({ pista: "V" + t.v, indice: ix, entrada: t.ent }), 300000);
@@ -494,7 +575,7 @@ async function clipsDe(pista) {
     let ok = 0;
     for (const t of esp) {
       const c = cs.find((x) => Math.abs(x.desde - t.desde) < 0.05 &&
-        x.nombre.replace(/\.[^.]+$/, "") === t.clip.replace(/\.[^.]+$/, ""));
+        nfc(x.nombre).replace(/\.[^.]+$/, "") === nfc(t.clip).replace(/\.[^.]+$/, ""));
       if (c && Math.abs(c.dura - t.dura) < 0.09) ok++;
       else mal++;
     }

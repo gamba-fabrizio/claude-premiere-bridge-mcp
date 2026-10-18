@@ -36,7 +36,7 @@ Hasta el 2026-09-23 era también la bitácora —1.222 líneas, con las reglas r
 USO.md            cómo USAR el bridge desde una sesión de trabajo. Vale también acá, y es corto
                   a propósito: se lee entero. Es la skill `premiere` (skills/premiere/, por
                   symlink), y su sección «Antes de la primera llamada» son las instructions del
-                  servidor: tope 2.048 caracteres
+                  servidor: tope 4.096 caracteres
 docs/bitacora/    las mediciones, movidas TAL CUAL y partidas por tema: ver el índice de abajo
 docs/api.md       las firmas y los comportamientos medidos de la API: se lee ANTES de tocar un verbo
 README.md         el manual: instalar, qué hace cada herramienta, los flujos
@@ -71,8 +71,8 @@ El bridge se verifica **con el bridge**, que es cómodo y peligroso a la vez.
   mismo global (es SyntaxError y mata el archivo entero), verbos del servidor que el panel
   no conoce, las dos rutas de `intercambio/` apuntando a lados distintos, el `id` del
   manifest colisionando con otro plugin UXP instalado.
-- **El panel tiene que estar abierto en Premiere**, si no las herramientas fallan al
-  instante con "el panel nunca latió".
+- **El panel tiene que estar abierto en Premiere**, si no las herramientas fallan: al
+  instante sin Premiere, y a los 25 s con Premiere y el panel cerrado.
 - **Cada cambio en `plugin/` necesita recargar.** Y si el plugin está INSTALADO —no cargado
   por UDT— la copia instalada es una COPIA, no un symlink: hay que reinstalar y reiniciar
   Premiere. `test.js` compara las dos copias y falla nombrando el archivo.
@@ -191,6 +191,9 @@ Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que
   10–20 s, y el latido "cada cinco vueltas" hacía ver muerto a un panel que ejecutaba. → `crashes.md`
 - **Un pendiente se cierra en la misma tanda que su trabajo**: uno vencido se lee con la misma
   confianza que uno cierto. → `verificacion.md`
+- **Una regla pagada se chequea en TODO su mecanismo, no en el verbo donde se pagó**: chequeada verbo por
+  verbo, los de al lado la incumplían con `test.js` en verde. Los barridos de `test.js` anotan cada
+  excepción con su razón, y fallan en las dos direcciones. → `verificacion.md`
 
 ## Al escribir un verbo nuevo
 
@@ -225,15 +228,23 @@ no la tienen estén **declarados a propósito** en una lista. El default —no h
   adentro de Premiere. **Mover el repo obliga a editar la del panel**, y `test.js` compara
   las dos.
 
-## Pendientes abiertos (2026-10-07)
+## Pendientes abiertos (2026-10-17)
 
 - **El borde de ~200 ms del espaciado no se reproduce hoy.** Mató a un proyecto pesado en 26.3.2 y a un
   banco pesado en 26.5; el 2026-10-01 una copia pesada, con la secuencia y el material de aquel banco,
   aguantó al ritmo mínimo del transporte seis de seis. Si lo movió el proyecto o el bridge no está
   separado. Los 500 ms quedan. → `crashes.md`
 - **Las listas de la API a veces traen un null**: los items de un bin en `importar`, y los de
-  `getTrackItems` en el `armarSecuencia` de un proyecto pesado. Está blindado y sigue sin causa: en un
-  proyecto de prueba no se reprodujo.
+  `getTrackItems` en el `armarSecuencia` de un proyecto pesado. Sigue sin causa: en un proyecto de prueba
+  no se reprodujo. Está blindado `armarSecuencia`, `sociosDe`, `buscarVinculados` y `desactivar`;
+  `importar` NO: su `nombresDe`, `bins`, `asegurarBin` y `moverABin` leen `h.name` sin `nombreDeItem`, y
+  el chequeo de `test.js` busca otra forma (auditoría del 2026-10-17). → `verificacion.md`
+- **Lo que dejó la auditoría de reglas del 2026-10-17**, leído en el código y sin medir. Primero el audio
+  vinculado: `borrar` y `editar` sobre un plano con un gemelo del mismo archivo en el mismo instante se
+  llevan el audio del otro, y desde un stream de un multicanal arrastran sólo el video. Después `param`,
+  con un `getKeyframePtr` por keyframe —el patrón del SIGBUS—, y `cortar`, que rebota un corte válido a
+  un cuadro del borde a 50 o 60 fps. Se mide en el proyecto de prueba, y lo que se cierra sale también de
+  «Defectos conocidos» de USO.md. → `verificacion.md`
 - **Los crashes de la interfaz no tienen arreglo medido**: no se reproducen a pedido. Los del panel
   —marcados como PROPUESTA en `plugin/index.js`— no mueven lo acumulado: medido por tasa el 2026-10-01,
   Premiere cayó igual que antes. → `crashes.md`

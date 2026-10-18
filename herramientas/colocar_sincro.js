@@ -60,6 +60,9 @@
  *
  *   --reparar   no coloca nada: busca los clips que YA están y les corrige la fase,
  *               respetando la pista donde estén y los recortes que se les hayan hecho.
+ *   --limpiar   barre las pistas de video y de A2 en adelante, hasta TOPE_BARRIDO clips —el tope
+ *               de `borrar`, 5 en 60 s—: con más, rebota ANTES de borrar el primero. Si algo
+ *               queda, no coloca encima.
  */
 const path = require("path");
 const fs = require("fs");
@@ -109,6 +112,35 @@ const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
  */
 const PAUSA = 300;
 const redondear = (s, fps) => Math.round(s * fps) / fps;
+/* Los nombres de Premiere vienen en NFC, y los del disco —los de `sincro.py`— o de la línea de
+ * comandos, en la forma en que estén: por bytes, un clip con tilde no tenía dato de sincro
+ * (auditoría 2026-10-17). */
+const nfc = (s) => String(s == null ? "" : s).normalize("NFC");
+
+/*
+ * EL TOPE DEL BARRIDO ES EL DE LA GUARDA DE `borrar`, QUE VIVE EN EL PANEL: rebota desde el 6º borrado
+ * en 60 s, y este bucle llega ahí en ~3 s. Un barrido más largo no puede terminar: dejaba las pistas a
+ * medio barrer y después colocaba ENCIMA, mezclando dos sincros. Se cuenta ANTES de borrar el primero,
+ * como en `colocar_fragmentos.js`, que tiene el caso medido (auditoría 2026-10-17). `test.js` exige
+ * que sea el mismo número que `BORRAR_TOPE`.
+ */
+const TOPE_BARRIDO = 5;
+/* Cuántas llamadas a `borrar` va a hacer el barrido, contadas antes de la primera. Un audio con un
+ * video del mismo rango se va con él —`borrar` arrastra los vinculados—, así que no suma; uno solo,
+ * como los huérfanos que quedan cuando Premiere recuantiza el in-point del video, sí. Es una
+ * estimación: el panel empareja por ticks y por medio, y `clips` da el milisegundo. Si se queda
+ * corta, el barrido corta en el primer rechazo y la herramienta no coloca. */
+function borradosDe(porPista) {
+  const videos = Object.keys(porPista).filter((p) => p[0] === "V").flatMap((p) => porPista[p]);
+  let n = videos.length;
+  for (const p of Object.keys(porPista)) {
+    if (p[0] !== "A") continue;
+    for (const c of porPista[p]) {
+      if (!videos.some((v) => Math.abs(v.desde - c.desde) < 0.002 && Math.abs(v.hasta - c.hasta) < 0.002)) n++;
+    }
+  }
+  return n;
+}
 /* La guarda de secuencia va en TODAS las llamadas que escriben: el despachador rechaza
  * si la activa no es la pedida. Sin esto, una secuencia equivocada abierta en Premiere
  * se lleva el trabajo, y eso ya pasó una vez en otro proyecto. */
@@ -160,7 +192,7 @@ function cuadricular(offset, desde, hasta, durClip) {
 
   const est = await enviar("estado");
   console.log("activa: " + est.resumen);
-  if (SEC && est.resumen.indexOf(SEC) === -1) {
+  if (SEC && nfc(est.resumen).indexOf(nfc(SEC)) === -1) {
     console.error("\nLa secuencia activa no es \"" + SEC + "\". Activala en Premiere y volvé a correr.");
     process.exit(1);
   }
@@ -193,7 +225,7 @@ function cuadricular(offset, desde, hasta, durClip) {
          * el usuario lo movió de pista, el índice de pista ya no identifica nada. */
         const impl = c.desde - c.entrada;
         let m = null;
-        for (const e of esp) if (e.base === base) {
+        for (const e of esp) if (nfc(e.base) === nfc(base)) {
           const err = Math.abs(impl - e.offset);
           if (!m || err < m.err) m = { e: e, err: err };
         }
@@ -347,25 +379,59 @@ function cuadricular(offset, desde, hasta, durClip) {
 
   if (LIMPIAR) {
     console.log("limpiando:");
-    let saco = 0;
+    /* Una pista que no se pudo LEER no es una pista vacía: se aborta, como en `colocar_propuesta.js`.
+     * Acá era `catch (e) { cs = []; }`, y se colocaba encima de lo que no se había podido mirar. */
+    const leerPista = async (p) => {
+      try { return (await enviar("clips", { pista: p })).clips || []; }
+      catch (e) {
+        console.error("\nNo se pudo LEER " + p + " para limpiarla: " + String((e && e.message) || e).slice(0, 120) + ". No sigo.");
+        process.exit(1);
+      }
+    };
+    const pistasV = [], pistasA = [];
+    for (let v = 1; v <= hayV; v++) pistasV.push("V" + v);
+    for (let a = 2; a <= hayA; a++) pistasA.push("A" + a);
+
+    /* Se cuenta ANTES de borrar el primero: ver `TOPE_BARRIDO`. */
+    const antes = {};
+    for (const p of pistasV.concat(pistasA)) antes[p] = await leerPista(p);
+    const aBorrar = borradosDe(antes);
+    if (aBorrar > TOPE_BARRIDO) {
+      console.error(`\n--limpiar tendría que borrar ~${aBorrar} clip(s) en ` +
+                    pistasV.concat(pistasA).filter((p) => antes[p].length).join(", ") + `, y \`borrar\` rebota a ` +
+                    `partir del ${TOPE_BARRIDO + 1}º en 60 s: la secuencia quedaría A MEDIO BARRER.`);
+      console.error("  lo que SÍ funciona, y es UNA operación en vez de " + aBorrar + ":");
+      console.error("    1. a mano en Premiere: seleccionar esas pistas y apretar Delete (A1, con el tema, no se toca)");
+      console.error("    2. o colocar en una secuencia nueva, con el tema en A1\n");
+      process.exit(1);
+    }
+
+    /* `borrar` vacía la selección y lo informa en `seleccionVaciada`: si no pudo, el clip borrado sigue
+     * adentro, y la edición siguiente en ese lugar tiró Premiere (2026-09-24). Se corta y no se coloca. */
+    let saco = 0, cortado = false, seleccionSucia = false;
     /* Se barren TODAS las pistas de video, no sólo las que se van a usar: una
      * corrida anterior pudo dejar clips más arriba, y rehacer a medias deja la
      * secuencia mezclando dos versiones de la lógica.
      *
      * Sólo pistas de VIDEO: `borrar` arrastra el audio vinculado de cada clip, y el
      * tema —que vive en A1 sin video— no está vinculado a nada, así que sobrevive.
-     * Barrer pistas de audio se lo llevaría. */
-    for (let v = 1; v <= hayV; v++) {
-      let cs = [];
-      try { cs = (await enviar("clips", { pista: "V" + v })).clips || []; } catch (e) { cs = []; }
+     * Barrer pistas de audio se lo llevaría.
+     *
+     * Y se CORTA en el primer rechazo: lo que queda lo dice la relectura de abajo, y no se coloca
+     * encima. Hasta el 2026-10-17 seguía intentando, y después colocaba igual. */
+    for (const p of pistasV) {
+      if (cortado) break;
+      const cs = await leerPista(p);
       /* De atrás para adelante: sacando el índice 0 primero, los que siguen se
        * renumeran y el bucle apuntaría al clip equivocado. */
       for (let i = cs.length - 1; i >= 0; i--) {
         await dormir(PAUSA);
-        try { await enviar("borrar", g({ pista: "V" + v, indice: i, dejarHueco: true }), 300000); saco++; }
-        catch (e) { console.log("  ✗ V" + v + "[" + i + "]: " + String(e.message).slice(0, 90)); }
+        let rb = null;
+        try { rb = await enviar("borrar", g({ pista: p, indice: i, dejarHueco: true }), 300000); saco++; }
+        catch (e) { console.log("  ✗ " + p + "[" + i + "]: " + String(e.message).slice(0, 90)); cortado = true; break; }
+        if (rb && rb.seleccionVaciada === false) { seleccionSucia = true; cortado = true; break; }
       }
-      if (cs.length) console.log("  V" + v + ": " + cs.length + " fuera");
+      if (cs.length) console.log("  " + p + ": " + cs.length + " fuera");
       await dormir(PAUSA);
     }
     /* Y DESPUÉS las pistas de audio, que el barrido de video NO alcanza.
@@ -381,18 +447,39 @@ function cuadricular(offset, desde, hasta, durClip) {
      * --desde-pista 1 el audio de los clips arranca en A2— así que barrer de 2 en
      * adelante no puede llevárselo. */
     let orf = 0;
-    for (let a = 2; a <= hayA; a++) {
-      let cs = [];
-      try { cs = (await enviar("clips", { pista: "A" + a })).clips || []; } catch (e) { cs = []; }
+    for (const p of pistasA) {
+      if (cortado) break;
+      /* Se relee: borrar un video se llevó su audio, y los índices de esta pista cambiaron. */
+      const cs = await leerPista(p);
       for (let i = cs.length - 1; i >= 0; i--) {
         await dormir(PAUSA);
-        try { await enviar("borrar", g({ pista: "A" + a, indice: i, dejarHueco: true }), 300000); orf++; }
-        catch (e) { console.log("  ✗ A" + a + "[" + i + "]: " + String(e.message).slice(0, 90)); }
+        let rb = null;
+        try { rb = await enviar("borrar", g({ pista: p, indice: i, dejarHueco: true }), 300000); orf++; }
+        catch (e) { console.log("  ✗ " + p + "[" + i + "]: " + String(e.message).slice(0, 90)); cortado = true; break; }
+        if (rb && rb.seleccionVaciada === false) { seleccionSucia = true; cortado = true; break; }
       }
-      if (cs.length) console.log("  A" + a + ": " + cs.length + " fuera (huérfano/s)");
+      if (cs.length) console.log("  " + p + ": " + cs.length + " fuera (huérfano/s)");
       await dormir(PAUSA);
     }
     console.log("  " + saco + " de video + " + orf + " de audio borrado(s)");
+    /* EL VEREDICTO ES RELEER: colocar encima de una pista que no quedó vacía mezcla dos sincros. */
+    const sucias = [];
+    for (const p of pistasV.concat(pistasA)) {
+      const n = (await leerPista(p)).length;
+      if (n) sucias.push(p + " (" + n + ")");
+    }
+    if (seleccionSucia) {
+      console.error("\nLa selección quedó con un clip borrado adentro: deseleccioná en Premiere —clic en un " +
+                    "lugar vacío del timeline— y volvé a correr. Editar con el clip borrado seleccionado " +
+                    "tiró Premiere (2026-09-24).");
+      process.exit(1);
+    }
+    if (cortado || sucias.length) {
+      console.error("\nNO quedaron vacías" + (sucias.length ? ": " + sucias.join(", ") : "") + ". No coloco encima: " +
+                    "mezclaría dos sincros. Lo que queda se borra a mano en Premiere —seleccionar y Delete— y se " +
+                    "vuelve a correr sin --limpiar.");
+      process.exit(1);
+    }
     /* Se comprueba que el tema siga ahí: es lo único irremplazable de la secuencia. */
     try {
       const t = (await enviar("clips", { pista: "A1" })).clips || [];

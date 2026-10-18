@@ -458,9 +458,17 @@ async function reponer() {
   console.log("");
 
   /* Emparejar por nombre + número de aparición. Por multiplicidad y no con un Set: los
-   * nombres no son únicos y contar "3 y 2" como "1 y 1" taparía justo el problema. */
+   * nombres no son únicos y contar "3 y 2" como "1 y 1" taparía justo el problema.
+   *
+   * Y las apariciones se cuentan en el orden del TIEMPO, no en el de la lista (auditoría 2026-10-17).
+   * La lista de una pista puede tener un clip FUERA DE ORDEN —las colas viejas de `cortar`, un
+   * `editar desde` anterior a fa6e9b5— y la pista rearmada sale ordenada: contadas en el orden de la
+   * lista, la n-ésima de un lado era otro plano del otro, y el trabajo manual caía en el tramo
+   * equivocado sin aviso. `desde_secuencia.js` ya ordena antes de numerar. El sort es estable: dos
+   * que arrancan en el mismo punto quedan en el orden de la lista. */
+  const porTiempo = (a, b) => (a.desde || 0) - (b.desde || 0);
   const idxAhora = new Map();
-  ahora.forEach((c) => {
+  ahora.slice().sort(porTiempo).forEach((c) => {
     const k = norm(c.nombre);
     if (!idxAhora.has(k)) idxAhora.set(k, []);
     idxAhora.get(k).push(c);
@@ -477,7 +485,7 @@ async function reponer() {
    * cuántas veces apareció ese nombre antes. */
   const rango = new Map();
   const cuentaGuardada = new Map();
-  for (const c of (S.clips || [])) {
+  for (const c of (S.clips || []).slice().sort(porTiempo)) {
     const k = norm(c.nombre);
     const n = cuentaGuardada.get(k) || 0;
     cuentaGuardada.set(k, n + 1);

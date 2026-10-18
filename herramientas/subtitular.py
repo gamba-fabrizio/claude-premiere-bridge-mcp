@@ -92,6 +92,12 @@ import json, math, os, re, subprocess, sys, unicodedata
 from fractions import Fraction
 
 
+def nfc(s):
+    """Un nombre de medio tipeado en el proyecto y el que trae la línea de tiempo pueden venir en dos formas
+    Unicode, y por bytes «Canción» no empieza con «Canción»: la corrección anclada iba a obsoletos."""
+    return unicodedata.normalize("NFC", str(s))
+
+
 def cargar_proyecto(ruta, video):
     P0 = json.load(open(ruta, encoding="utf-8"))
     if "videos" in P0 and video not in P0["videos"]:
@@ -407,7 +413,7 @@ def main():
         """Dónde busca un cambio: un segundo de la secuencia, o ["medio", segundo] del clip."""
         if isinstance(t0, (list, tuple)):
             medio, s = str(t0[0]), float(t0[1])
-            return lambda x: x["medio"].startswith(medio) and abs(x["fuente"] - s) <= 3.0
+            return lambda x: nfc(x["medio"]).startswith(nfc(medio)) and abs(x["fuente"] - s) <= 3.0
         return lambda x: abs(x["a"] - t0) <= 3.0
 
     def donde(t0):
@@ -446,7 +452,7 @@ def main():
         aplicados.append((t0, de, a, por))
 
     for medio, fa, fb, texto, por in AGREGADOS:
-        dentro = [tr for tr in tramos if tr["quien"] != "LOCUCION" and tr["quien"].startswith(str(medio))
+        dentro = [tr for tr in tramos if tr["quien"] != "LOCUCION" and nfc(tr["quien"]).startswith(nfc(medio))
                   and tr["entrada"] <= fa < tr["salida"]]
         if not dentro:
             obsoletos.append(([medio, fa], "", texto, por)); continue
