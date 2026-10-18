@@ -75,7 +75,8 @@ en `CLAUDE.md`.
   `motion` avisa si el playhead no está sobre el clip, porque lo animado se lee en el borde.
 - **`editar salida` es un punto de FUENTE, no una duración.** Un PNG o un Transparent Video entran
   con in-point ~3600: leé la `entrada` real y sumale la duración. Y **`editar entrada` además
-  MUEVE el clip**: la entrada en una llamada y `desde` en otra. En un clip con video, a 1x, `desde`,
+  MUEVE el clip**: la entrada en una llamada y `desde` en otra; si con eso pasa a un vecino, rebota como
+  `desde`, porque quedaría fuera de orden. En un clip con video, a 1x, `desde`,
   `entrada` y `salida` van al cuadro MÁS CERCANO —de `salida`, el fin en la secuencia— y el resumen
   dice qué movió. Un audio solo queda exacto, para la sincro fina, y a otra velocidad también.
 - **`borrar`, `editar` y `desactivar` arrastran el audio vinculado**, que se deduce por medio, rango e
@@ -112,7 +113,9 @@ en `CLAUDE.md`.
   vínculos—: el bridge la sigue emparejando, y a mano es Cmd+L. A otra velocidad que 1x rebota. Cada
   corte borra por dentro un clon estacionado, con su propio tope: 15 por minuto, medido sin problemas a 23.
   `sacar_rangos` va de a ~7 rangos por minuto y, si el tope no alcanza para el rango siguiente, frena limpio:
-  los que faltan quedan sin tocar y se piden de nuevo tal cual. `borrar` suelto sigue en 5.
+  los que faltan quedan sin tocar y se piden de nuevo tal cual. `borrar` suelto sigue en 5. Y el audio de
+  OTRO medio debajo —música, el grabador del rodaje— no se corta ni se corre: lo nombra
+  (`audioAjenoSinCortar`), y si es sonido sincronizado hay que sacarle el mismo rango.
 - **`borrar_secuencia` prefiere el nombre EXACTO, y si no hay ninguno toma una PARCIAL**: con una sola
   secuencia que contenga el texto, borra ésa. Si coinciden varias rebota, y dos con el mismo nombre se
   eligen con `duracion`. Dos gemelas —mismo nombre y mismo largo— se borran a mano.
@@ -136,7 +139,8 @@ en `CLAUDE.md`.
   entera, así que esa combinación rebota. `lote` no exporta. Si el export se cancela o falla, lo
   dice, no reintenta y repone el in/out. El preset H.264 va de la carpeta `4E49434B_48323634`: el
   mismo nombre en la de QuickTime escribe `.mov`. Respeta los in/out de la secuencia, que
-  `limpiarRangos` saca. Y el archivo se mide de afuera: duración por stream y paquetes de video.
+  `limpiarRangos` saca. El rango pedido va al cuadro más cercano: Premiere corre los dos bordes para el
+  mismo lado y metía un cuadro de más. Y el archivo se mide de afuera: duración por stream y paquetes de video.
 - **La escala de un clip que ya está en la secuencia se LEE** —con `motion` uno, con `leer_param` un
   rango—, no se calcula de las dimensiones del archivo. `escala` va de a 30 clips: la respuesta trae
   `siguiente`, que se pasa como `desdeIndice`. Sin tope, sobre material 4K pesado, tiró Premiere.

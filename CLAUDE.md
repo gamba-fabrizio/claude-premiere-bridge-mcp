@@ -246,9 +246,9 @@ no la tienen estén **declarados a propósito** en una lista. El default —no h
   `importar`: su `nombresDe`, `bins`, `asegurarBin` y `moverABin` pasan por `nombreDeItem` desde el
   2026-10-18. → `verificacion.md`
 - **Lo que sigue abierto de la auditoría de reglas del 2026-10-17** —lo arreglable se cerró y se midió
-  en el proyecto de prueba el 2026-10-18—: medir antes de tocar el espaciado de `armarSecuencia` y
-  `escalaFija` y las lecturas en volumen de `revisar`, los bordes `PENDIENTE` de `ATICK_ANOTADOS`
-  (`exportar`, `subclip`, `marcar`) y lo que quedó sin medir. → `verificacion.md`
+  en el proyecto de prueba el 2026-10-18, también los casos borde, los bordes PENDIENTE y lo sin medir—:
+  medir antes de tocar el espaciado de `armarSecuencia` y `escalaFija` y las lecturas en volumen de
+  `revisar`, y `borrar` con la pista del clip bloqueada, que la API no deja armar. → `verificacion.md`
 - **Los crashes de la interfaz no tienen arreglo medido**: no se reproducen a pedido. Los del panel
   —marcados como PROPUESTA en `plugin/index.js`— no mueven lo acumulado: medido por tasa el 2026-10-01,
   Premiere cayó igual que antes. → `crashes.md`

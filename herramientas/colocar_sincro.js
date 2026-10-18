@@ -504,17 +504,24 @@ function cuadricular(offset, desde, hasta, durClip) {
        * recortaban y movian el clip VIEJO. Medido el 2026-09-22: con el fantasma, el resumen trae
        * "quedó" y `entro` es false. */
       if (r1.entro !== true) throw new Error(String(r1.resumen).slice(0, 150));
+      /* LAS RESPUESTAS SE MIRAN, como en --reparar: cuántos vinculados arrastró cada `editar` (auditoría
+       * 2026-10-17, `audio#8`). Insertando de cero el audio sigue siempre —medido el 2026-10-18 con el audio
+       * más largo y más corto que el video: Premiere entra los dos streams con el largo del video—, pero si
+       * alguna vez no lo encuentra como socio, el video se va a su lugar y el audio queda en 0 s entero, y la
+       * verificación miraba sólo V. `sincro.py` sincroniza POR AUDIO: todo tramo tiene audio. */
+      const respuestas = [];
       if (t.ent > 0) {
         await dormir(PAUSA);
-        await enviar("editar", g({ pista: "V" + V, indice: 0, entrada: t.ent }), 300000);
+        respuestas.push(await enviar("editar", g({ pista: "V" + V, indice: 0, entrada: t.ent }), 300000));
       }
       await dormir(PAUSA);
-      await enviar("editar", g({ pista: "V" + V, indice: 0, salida: t.sal }), 300000);
+      respuestas.push(await enviar("editar", g({ pista: "V" + V, indice: 0, salida: t.sal }), 300000));
       await dormir(PAUSA);
-      await enviar("editar", g({ pista: "V" + V, indice: 0, desde: t.pos }), 300000);
+      respuestas.push(await enviar("editar", g({ pista: "V" + V, indice: 0, desde: t.pos }), 300000));
+      const nVinc = Math.min.apply(null, respuestas.map((x) => Number(x && x.vinculados) || 0));
       console.log("  ✓ " + etq + "  pos " + t.pos.toFixed(3) + " · in " + t.ent.toFixed(3) +
         " · out " + t.sal.toFixed(3) + " · error " + (t.errMs >= 0 ? "+" : "") + t.errMs.toFixed(1) + "ms");
-      puestos.push({ V: V, t: t });
+      puestos.push({ V: V, A: A, t: t, nVinc: nVinc });
     } catch (e) {
       console.log("  ✗ " + etq + "  " + String(e.message || e).slice(0, 130));
     }
@@ -535,11 +542,20 @@ function cuadricular(offset, desde, hasta, durClip) {
       const okP = Math.abs(c.desde - x.t.pos) < 0.03;
       const okE = Math.abs(c.entrada - x.t.ent) < 0.03;
       const okD = Math.abs(c.dura - x.t.dura) < 0.1;
-      if (!(okP && okE && okD)) mal++;
-      console.log("  " + (okP && okE && okD ? "✓" : "✗") + " V" + x.V + " " + c.nombre.slice(0, 13) +
+      /* Y EL AUDIO, en su pista y donde el video: del mismo medio, arrancando en la misma posición. */
+      let okA = false;
+      try {
+        const ra = (await enviar("clips", { pista: "A" + x.A })).clips || [];
+        okA = x.nVinc > 0 && ra.some((a) => nfc(a.nombre) === nfc(c.nombre) && Math.abs(a.desde - c.desde) < 0.03 &&
+                                         Math.abs(a.dura - c.dura) < 0.1);
+      } catch (e) { okA = false; }
+      if (!(okP && okE && okD && okA)) mal++;
+      console.log("  " + (okP && okE && okD && okA ? "✓" : "✗") + " V" + x.V + " " + c.nombre.slice(0, 13) +
         " pos " + c.desde.toFixed(3) + (okP ? "" : " (esp " + x.t.pos.toFixed(3) + ")") +
         " · in " + c.entrada.toFixed(3) + (okE ? "" : " (esp " + x.t.ent.toFixed(3) + ")") +
-        " · dura " + c.dura.toFixed(2) + (okD ? "" : " (esp " + x.t.dura.toFixed(2) + ")"));
+        " · dura " + c.dura.toFixed(2) + (okD ? "" : " (esp " + x.t.dura.toFixed(2) + ")") +
+        (okA ? "" : "\n      OJO: el AUDIO no siguió al video (" + x.nVinc + " vinculado(s) arrastrados): no está en A" + x.A +
+                    " donde el video. Quedó donde lo dejó `insertar`, en 0 s y entero: sincronizalo a mano o con --reparar."));
     } catch (e) { console.log("  ? V" + x.V + ": " + String(e.message).slice(0, 70)); mal++; }
   }
 

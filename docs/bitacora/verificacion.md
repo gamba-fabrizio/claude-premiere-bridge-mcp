@@ -446,9 +446,27 @@ releyendo cada cambio con `clips`:
   en 7,00, a 25 fps); un multicanal con `pistaAudio` en una pista nueva crea las de todos sus streams;
   el subclip de un medio sin video no entra; y Premiere no normaliza los nombres que le pone la API.
 
+**A la tarde, los bordes y lo sin medir**, con medios fabricados con ffmpeg —un clip de tres escenas, y dos con
+el audio más largo y más corto que el video— que se borraron al terminar:
+
+- **Los tres bordes PENDIENTE eran reales**: Premiere no lleva al cuadro la duración de un marcador —guardó
+  0,625 s tal cual—, baja el LARGO de un subclip —74,5 cuadros pedidos entraron con 74— y corre los dos bordes
+  del rango de un export para el mismo lado —0,98 y 1,02 s salieron de 25 cuadros—. Los tres van ahora al
+  cuadro más cercano antes de pasarlos, verificado en vivo.
+- **`sacarRangos` con audio de OTRO medio debajo**: el video y su audio vinculado se van, y ese audio queda
+  entero y sin correr. No se corta solo —una música tiene que quedar—: el resumen lo nombra.
+- **`editar entrada` corre el arranque**, y pasaba al clip por encima del vecino sin chequear el orden: ahora
+  el chequeo usa el corrimiento total de `desde` y `entrada`.
+- **`seleccionar` confirmaba por el NOMBRE**, el mismo en todas las tomas de un medio, y `cortesDeEscena` no
+  miraba si la selección había quedado: ahora se busca el clip en la selección, y sin él no se analiza.
+- **Lo que no pasó**: el overwrite sobre un clip seleccionado lo saca de la selección; editar después de un
+  corte por escenas anduvo, y ese corte parte también el audio; y un archivo con el audio más largo o más
+  corto que el video entra con los dos streams del largo del video, así que el audio sigue. Igual el camino
+  normal de `colocar_sincro` verifica ahora el audio de cada tramo.
+
 **Y lo que sigue abierto**: el espaciado de `armarSecuencia` y `escalaFija` y las lecturas en volumen de
-`revisar` —medir antes de tocar un verbo estable—, los bordes que siguen anotados como PENDIENTE, y lo
-que la auditoría marcó como sin medir.
+`revisar` —medir antes de tocar un verbo estable—, y `borrar` con la pista del clip bloqueada: la API expone
+sólo el evento de cambio del bloqueo, así que no se puede armar por API.
 
 **Y la regla nueva, mecanizada.** `test.js` suma barridos POR MECANISMO, cada uno con su mutación o su
 control y probado contra el código viejo:

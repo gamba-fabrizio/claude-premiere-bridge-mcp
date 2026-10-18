@@ -794,6 +794,8 @@ if (!cuerpoEditar) {
           /* AL TICK, sin pegarse al cuadro: es lo medido para recortar y mover. */
           it.createSetOutPointAction = (k) => () => { it.e = it.s + Math.round((Number(k.ticks) - it.i) / it.vel); };
           it.createMoveAction = (k) => () => { const d = Number(k.ticks); it.s += d; it.e += d; };
+          /* Como arrastrar el borde izquierdo: el arranque se corre con la entrada (medido el 2026-10-18). */
+          it.createSetInPointAction = (k) => () => { const d = Number(k.ticks) - it.i; it.s += Math.round(d / it.vel); it.i = Number(k.ticks); };
           return it;
         };
         const V = video.map((l) => l.map(hacer)), A = audio.map((l) => l.map(hacer));
@@ -830,13 +832,18 @@ if (!cuerpoEditar) {
         /* Sólo \`apagado\`, sobre un plano con audio: es un cambio, y el audio sigue sonando a propósito (auditoría, \`audio#7\`). */
         const apagar = await correr(mundo([[{ nombre: "cam.mp4", s: f(30), e: f(300), i: 0 }]], [[{ nombre: "cam.mp4", s: f(30), e: f(300), i: 0 }]]),
                                     { pista: "V1", indice: 0, apagado: true });
-        console.log(JSON.stringify({ reporte, audio1, audio2, vinc, desde, lento, apagar }));
+        /* Bajar la ENTRADA también corre el arranque, a 30 fps acá: de 5 a 3,5 s el clip pasa al que arranca en
+           1,667 s y tiene que rebotar; a 4,5 queda en 2,0 s, no lo pasa, y tiene que entrar (\`orden#3\`, 2026-10-18). */
+        const dos = () => mundo([[{ nombre: "a.mp4", s: f(50), e: f(75), i: 0 }, { nombre: "b.mp4", s: f(75), e: f(175), i: f(150) }]], []);
+        const entradaCruza = await correr(dos(), { pista: "V1", indice: 1, entrada: 3.5 });
+        const entradaNoCruza = await correr(dos(), { pista: "V1", indice: 1, entrada: 4.5 });
+        console.log(JSON.stringify({ reporte, audio1, audio2, vinc, desde, lento, apagar, entradaCruza, entradaNoCruza }));
       })();`;
     try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
     catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
   })();
-  const err = casos.error || ["reporte", "audio1", "audio2", "vinc", "desde", "lento", "apagar"].map((k) => casos[k] && casos[k].error).find(Boolean);
-  const { reporte: r, audio1: a1, audio2: a2, vinc: v, desde: d, lento: l, apagar: ap } = casos;
+  const err = casos.error || ["reporte", "audio1", "audio2", "vinc", "desde", "lento", "apagar", "entradaNoCruza"].map((k) => casos[k] && casos[k].error).find(Boolean);
+  const { reporte: r, audio1: a1, audio2: a2, vinc: v, desde: d, lento: l, apagar: ap, entradaCruza: ec, entradaNoCruza: en } = casos;
   if (err) mal("el `editar` de mentira no se pudo ejecutar", err);
   else if (r.finV[0] !== 1364 || !r.cambio || r.alCuadro !== 1 || !r.cuadros || r.cuadros.dura !== 442) {
     mal("`editar salida` no lleva el FIN al cuadro más cercano",
@@ -856,6 +863,9 @@ if (!cuerpoEditar) {
              ap.audioApagado.some(Boolean) || !/SÓLO este clip/.test(ap.resumen)) {
     mal("`editar` con sólo `apagado` no lo cuenta como cambio, o no dice que el audio sigue sonando",
         "contestaba «N vinculado(s) movidos con él · NO CAMBIÓ NADA» habiendo apagado el video · " + JSON.stringify(ap));
+  } else if (!ec || !/FUERA DE ORDEN/.test(ec.error || "") || !en || en.iniV[1] !== 60) {
+    mal("`editar entrada` no mira el orden de la lista, o rebota una entrada que no cruza a nadie",
+        "bajar la entrada corre el arranque: en vivo, de 6 a 4,5 s el clip pasó al de 2 s y quedó fuera de orden · " + JSON.stringify({ ec, en }));
   } else {
     ok("`editar` lleva los bordes de video al cuadro más cercano, deja exacto el audio solo, juzga el cambio en ticks y cuenta el apagado");
   }
@@ -1011,6 +1021,7 @@ if (!cuerpoEditar) {
       const correr = async (w, params, verbo, pre) => {
         const ctx = { ppro: w.ppro, getProyectoYSecuencia: async () => ({ project: w.project, sequence: w.sequence }),
           TICKS_POR_SEGUNDO: TPS, TOPE_LOTE: 10, esperarEntreTx: async () => {}, contieneN: (a, b) => a.indexOf(b) !== -1,
+          norm: (x) => String(x == null ? "" : x).normalize("NFC"),
           BORRADOS_RECIENTES: [], BORRAR_TOPE: 5, BORRAR_VENTANA_MS: 60000, transaccion: (p, f, n) => p.executeTransaction(f, n),
           ESTACIONADOS_RECIENTES: Array.from({ length: (pre && pre.estacionados) || 0 }, () => Date.now()), ESTACIONADO_TOPE: 15,
           PIEZAS_RECIENTES: Array.from({ length: (pre && pre.piezas) || 0 }, () => Date.now()), PIEZA_TOPE: 8,
@@ -1027,7 +1038,7 @@ if (!cuerpoEditar) {
           const r = await ctx[verbo || "cortar"](params);
           return { r: { socios: r.socios, sinVinculo: r.sinVinculo, esperados: r.itemsEsperados, despues: r.itemsDespues, pegados: r.pegados,
                         entradaBien: r.entradaBien, sacado: r.estacionadoSacado, hechos: r.hechos, fallidos: r.fallidos,
-                        frenadoPorTope: r.frenadoPorTope, resumen: r.resumen },
+                        frenadoPorTope: r.frenadoPorTope, ajenos: r.audioAjenoSinCortar, resumen: r.resumen },
                    ...w.foto(), ordenado: w.ordenado(), seleccion: w.seleccion.items.length, pisados: w.pisados, solapes: w.solapes, tx: w.tx() };
         } catch (e) { return { error: String(e.message || e).slice(0, 200), tx: w.tx(), ...w.foto() }; }
       };
@@ -1054,15 +1065,19 @@ if (!cuerpoEditar) {
         /* Un rango que termina justo en un corte —el final del clip— no cruza a otro clip. */
         rangosHastaElCorte: await correr(mundo([tres()], [[]]), { pista: "V1", rangos: [{ desde: 4, hasta: 6 }] }, "sacarRangos"),
         /* Y con la ventana de los pedazos llena no se toca ningún rango. */
-        rangosPieza: await correr(mundo([tres()], [[]]), { pista: "V1", rangos: [{ desde: 2, hasta: 3 }, { desde: 8, hasta: 9 }] }, "sacarRangos", { piezas: 8 })
+        rangosPieza: await correr(mundo([tres()], [[]]), { pista: "V1", rangos: [{ desde: 2, hasta: 3 }, { desde: 8, hasta: 9 }] }, "sacarRangos", { piezas: 8 }),
+        /* El audio de OTRO medio debajo no se corta ni se corre, y se DICE; el del mismo medio es socio y se parte
+           (2026-10-18, medido con un WAV debajo de un multicanal). */
+        rangosAjeno: await correr(mundo([tres()], [[{ nombre: "a.mp4", desde: 0, hasta: 6, entrada: 0 }], [{ nombre: "musica.wav", desde: 1, hasta: 10, entrada: 0 }]]),
+                                  { pista: "V1", rangos: [{ desde: 2, hasta: 3 }] }, "sacarRangos")
       })))();`;
     try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
     catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
   })();
   const partido = (pista, d, t, h) => pista && pista.length === 2 && pista[0][1] === d && pista[0][2] === t && pista[1][1] === t && pista[1][2] === h;
   const entero = (pista, d, h) => pista && pista.length === 1 && pista[0][1] === d && pista[0][2] === h;
-  const { reporte, vinculado, musica, soloVideo, desdeAudio, lento, tresClips, rangos, rangosTope, rangosPieza, rangosMedioCuadro, rangosHastaElCorte } = casos;
-  const fallo = casos.error || [reporte, vinculado, musica, soloVideo, desdeAudio, tresClips, rangos, rangosTope, rangosPieza, rangosMedioCuadro, rangosHastaElCorte].map((c) => c && c.error).find(Boolean);
+  const { reporte, vinculado, musica, soloVideo, desdeAudio, lento, tresClips, rangos, rangosTope, rangosPieza, rangosMedioCuadro, rangosHastaElCorte, rangosAjeno } = casos;
+  const fallo = casos.error || [reporte, vinculado, musica, soloVideo, desdeAudio, tresClips, rangos, rangosTope, rangosPieza, rangosMedioCuadro, rangosHastaElCorte, rangosAjeno].map((c) => c && c.error).find(Boolean);
   if (fallo) {
     mal("`cortar` no se pudo ejecutar contra la API de mentira", fallo);
   } else if (!partido(reporte.V[1], 4, 7, 10) || reporte.A.slice(1).some((p) => p.length) || reporte.V[1][1][0] !== "ISO arriba" ||
@@ -1112,6 +1127,13 @@ if (!cuerpoEditar) {
              JSON.stringify(rangosHastaElCorte.V[0].map((x) => [x[0], x[1], x[2]])) !== JSON.stringify([["a.mp4", 0, 4], ["b.mp4", 4, 10], ["c.mp4", 10, 16]])) {
     mal("`sacarRangos` rebota un rango que termina justo en un corte", "«hasta el final de este clip» no cruza a otro clip · " +
         JSON.stringify(rangosHastaElCorte).slice(0, 300));
+  } else if (!rangosAjeno.r.hechos || rangosAjeno.r.hechos.length !== 1 || !Array.isArray(rangosAjeno.r.ajenos) ||
+             rangosAjeno.r.ajenos.length !== 1 || rangosAjeno.r.ajenos[0].nombre !== "musica.wav" ||
+             !/de OTRO medio no se cortaron/.test(rangosAjeno.r.resumen) ||
+             JSON.stringify(rangosAjeno.A[1].map((x) => [x[0], x[1], x[2]])) !== JSON.stringify([["musica.wav", 1, 10]])) {
+    mal("`sacarRangos` no avisa del audio de OTRO medio que queda corrido, o avisa del socio",
+        "con un WAV debajo, el video y sus streams se corren y el WAV no: desde el rango quedan desincronizados · " +
+        JSON.stringify(rangosAjeno).slice(0, 300));
   } else if (!/\btickCorte = r\b/.test(cCortar)) {
     mal("`cortar` no APLICA el punto de corte cuantizado",
         "falta `tickCorte = r`. Un chequeo por MENCION de la etiqueta pasaba con el bucle entero y sin la asignacion.\n         " +
@@ -4486,11 +4508,10 @@ const ATICK_ANOTADOS = {
   cortar: [1, "`tickCorte` sale de aTick y se REASIGNA al cuadro con alignToNearestFrame antes de usarse"],
   armarSecuencia: [1, "el cursor es el fin EXACTO del fragmento anterior, releído en ticks: aTick(aSegundos(k)) vuelve al mismo tick, y ese fin ya está en el cuadro"],
   insertar: [1, "la posición del overwrite: Premiere la pega al cuadro MÁS CERCANO, medido el 2026-10-18 a 25 fps (1,03 → 1,04 y 7,01 → 7,00)"],
-  /* PENDIENTES de la auditoría del 2026-10-17: se cierran midiendo en Premiere. `unirAudio` se cerró el
-     2026-10-18: estira hasta el fin releído en ticks. */
-  exportar: [2, "PENDIENTE: el in/out de la secuencia, que es el rango del export"],
-  subclip: [3, "PENDIENTE: el rango del subclip"],
-  marcar: [4, "PENDIENTE: la duración del marcador; el tiempo sí va al cuadro"],
+  /* Los PENDIENTES de la auditoría del 2026-10-17 se cerraron el 2026-10-18, midiendo: `unirAudio` estira hasta
+     el fin releído en ticks, y `exportar`, `subclip` y `marcar` llevan al cuadro el rango y la duración, porque
+     Premiere no los llevaba (exportar y subclip corrían los dos bordes para el mismo lado, y marcar guardaba
+     0,625 s tal cual). */
 };
 function bordesConATick(src) {
   const B = blanquear(src);
@@ -4908,10 +4929,10 @@ titulo("exportar lee los in/out de la secuencia aunque no se le pida rango");
 titulo("exportar: modo sin default, .mov en cola, cancelación y reposición en dos transacciones");
 {
   const fuentes = ["async function exportar(", "async function tipoDePreset(", "async function rutaLogAME(", "async function leerLogAME(",
-    "function textoDeCola(", "function textoDeColaSegunLog("].map((f) => cuerpoDeFuncion(srcComandos, f));
+    "function textoDeCola(", "function textoDeColaSegunLog(", "function ticksAlCuadro("].map((f) => cuerpoDeFuncion(srcComandos, f));
   const constEstado = (/^const ESTADO_COLA_AME = [^\n]*$/m.exec(srcComandos) || [""])[0];
   const casos = (() => {
-    if (fuentes.some((f) => !f) || !constEstado) return { error: "falta `exportar`, `tipoDePreset`, `rutaLogAME`, `leerLogAME`, `textoDeCola`, `textoDeColaSegunLog` o `ESTADO_COLA_AME`" };
+    if (fuentes.some((f) => !f) || !constEstado) return { error: "falta `exportar`, `tipoDePreset`, `rutaLogAME`, `leerLogAME`, `textoDeCola`, `textoDeColaSegunLog`, `ticksAlCuadro` o `ESTADO_COLA_AME`" };
     const guion = `
       const vm = require("vm"), fuentes = ${JSON.stringify(fuentes)};
       const T = 254016000000, SENT = -400000, PRESET = "/p.epr", SALIDA = "/s.mov";
@@ -4993,7 +5014,8 @@ titulo("exportar: modo sin default, .mov en cola, cancelación y reposición en 
           uxp: { storage: { localFileSystem: { getEntryWithUrl, getPluginFolder: async () => ({ nativePath: "/Users/x/Library/P" }) }, formats: { binary: "bin" } } },
           require: (m) => (m === "os" ? { homedir: () => "/Users/x" } : null),
           getProyectoYSecuencia: async () => ({ project, sequence }),
-          aSegundos: sg, aTick: tk, A_MEDIAS: {}, setTimeout: (f) => { pasar(); f(); }, transaccion: (p, f, n) => p.executeTransaction(f, n)
+          aSegundos: sg, aTick: tk, A_MEDIAS: {}, setTimeout: (f) => { pasar(); f(); }, transaccion: (p, f, n) => p.executeTransaction(f, n),
+          TICKS_POR_SEGUNDO: T
         };
         vm.runInNewContext(${JSON.stringify(constEstado)} + "\\n" + fuentes.join("\\n") + "\\nthis.f = exportar;", ctx);
         const out = { txs, llamadas: 0 };
@@ -6847,6 +6869,19 @@ titulo("`colocar_sincro.js`: piso del flag, clamp al material, y mirar los vincu
       + "huerfano, y el script imprime ✓.");
   } else {
     ok("`--reparar` mira los vinculados y no da por bueno un video sin su audio");
+  }
+
+  /* 4. Y el camino NORMAL, que verificaba sólo V: si el audio no seguía al video quedaba en 0 s entero y el
+        resumen decía «verificados» (auditoría 2026-10-17, `audio#8`). Se exige, por posición en el bucle de
+        verificación, que lea la pista de AUDIO del tramo y que el veredicto dependa de ella y del conteo. */
+  const iVerif = cs.indexOf("verificando:");
+  const verif = iVerif === -1 ? "" : cs.slice(iVerif);
+  if (!/enviar\("clips",\s*\{\s*pista:\s*"A"\s*\+\s*x\.A\s*\}\)/.test(verif) || !/if \(!\(okP && okE && okD && okA\)\) mal\+\+/.test(verif) ||
+      !/x\.nVinc\s*>\s*0/.test(verif)) {
+    mal("el camino normal de `colocar_sincro` no verifica que el audio siguió al video",
+      "si `editar` no lo arrastra, el audio queda en 0 s entero y el script imprime ✓ por el video.");
+  } else {
+    ok("el camino normal de `colocar_sincro` verifica el audio del tramo, en su pista y donde el video");
   }
 }
 

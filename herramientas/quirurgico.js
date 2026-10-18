@@ -424,7 +424,10 @@ async function reponer() {
       /* Escala y posición para TODOS de una, con `leerEscalas`: sin esto la idempotencia
        * proponía reponer una escala que ya estaba puesta. */
       const esc = new Map();
-      try {
+      /* Una pista de audio no tiene Motion, y `leerEscalas` la rebota de entrada: preguntarle igual
+         imprimía «OJO: leerEscalas falló» en cada reposición de audio, como `--guardar` ya no hace
+         (medido el 2026-10-18 reponiendo el ojito de A3). */
+      if (!/^A/i.test(String(pista))) try {
         let d = 0;
         for (;;) {
           await dormir(PAUSA);
@@ -437,7 +440,7 @@ async function reponer() {
       for (const c of aDetallar) {
         await dormir(PAUSA);
         c.motion = [];
-        try {
+        if (!/^A/i.test(String(pista))) try {   // un audio no tiene Motion: ver la escala, arriba
           const r = await enviar("param", g({ pista: pista, indice: c.indice, efecto: "Motion", param: "Rotation" }), 300000);
           c.motion.push({ nombre: "Rotation", i: 4, valor: r.valor, keyframes: r.keyframes || 0 });
         } catch (e) { /* sin Rotation legible: el plan lo va a proponer, que es el lado seguro */ }

@@ -1020,7 +1020,11 @@ server.registerTool(
       "verdad contra cuánto se pidió: si no coinciden, algo salió distinto de lo esperado.\n\n" +
       "Va de a ~7 rangos por minuto —dos cortes y un pedazo cada uno, con topes medidos—, y si el tope " +
       "no alcanza para el rango siguiente FRENA LIMPIO: los rangos que faltan quedan sin tocar y el " +
-      "resumen los lista, para pedirlos de nuevo tal cual cuando se libere la ventana.",
+      "resumen los lista, para pedirlos de nuevo tal cual cuando se libere la ventana.\n\n" +
+      "El audio de OTRO medio debajo —una música, el grabador de un rodaje— NO se corta ni se corre: el " +
+      "video y su audio vinculado se van y él queda donde estaba. El resumen lo nombra " +
+      "(`audioAjenoSinCortar`): si es sonido sincronizado, hay que sacarle el mismo rango; si es música, " +
+      "está bien.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       proyecto: z
@@ -1044,7 +1048,8 @@ server.registerTool(
   async (args) => {
     try {
       const r = await enviar("sacarRangos", args, 600000);
-      return texto(r.resumen, { hechos: r.hechos, fallidos: r.fallidos, sacado: r.sacadoReal });
+      return texto(r.resumen, { hechos: r.hechos, fallidos: r.fallidos, sacado: r.sacadoReal,
+                                audioAjenoSinCortar: r.audioAjenoSinCortar, transacciones: r.transacciones });
     } catch (e) {
       return fallo(e);
     }
@@ -1351,7 +1356,9 @@ server.registerTool(
       "reversible con sólo borrarlos. `cortar` parte el clip de verdad. `subclips` crea subclips " +
       "en el panel de proyecto.\n\n" +
       "**El objetivo va explícito.** La API opera sobre la selección, así que el verbo pide el " +
-      "clip por nombre o pista+índice y lo selecciona él; no corta lo que haya seleccionado.\n\n" +
+      "clip por nombre o pista+índice y lo selecciona él; no corta lo que haya seleccionado. Si no puede " +
+      "confirmar que ESE clip quedó en la selección —no otra toma del mismo medio—, no analiza nada.\n\n" +
+      "En modo `cortar` el audio vinculado se parte con el video, en los mismos puntos (medido).\n\n" +
       "**La prueba de que funcionó son los contadores**, no que la llamada no tire: informa " +
       "cuántos clips o marcadores había antes y después. Si no cambió nada, lo dice.\n\n" +
       "TARDA, porque analiza el medio.",

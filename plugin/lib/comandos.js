@@ -281,7 +281,7 @@ async function exportar(params) {
       ".mov sí lo respeta; un preset MXF o H.264 (.mp4), que en cola lo respetan; o exportá sin rango. NO se tocó nada.");
   }
 
-  let inViejo = null, outViejo = null, rangoPuesto = null, rangoError = null, aplico = null;
+  let inViejo = null, outViejo = null, rangoPuesto = null, rangoError = null, aplico = null, rangoAlCuadro = null;
   const esperarUn = (ms) => new Promise((r) => setTimeout(r, ms));
 
   /*
@@ -374,10 +374,26 @@ async function exportar(params) {
   if (hayRango) {
     try { inViejo = await sequence.getInPoint(); } catch (e) { inViejo = null; }
     try { outViejo = await sequence.getOutPoint(); } catch (e) { outViejo = null; }
-    const desde = params.desde !== undefined ? Number(params.desde) : 0;
+    const desdePedido = params.desde !== undefined ? Number(params.desde) : 0;
     const fin = await sequence.getEndTime();
-    const hasta = params.hasta !== undefined ? Number(params.hasta) : aSegundos(fin);
-    if (!(hasta > desde)) throw new Error(`El rango pedido no avanza: desde ${desde} hasta ${hasta}.`);
+    const hastaPedido = params.hasta !== undefined ? Number(params.hasta) : aSegundos(fin);
+    if (!(hastaPedido > desdePedido)) throw new Error(`El rango pedido no avanza: desde ${desdePedido} hasta ${hastaPedido}.`);
+    /*
+     * EL RANGO VA AL CUADRO MÁS CERCANO (2026-10-18, medido). Premiere no lo lleva: 1,03–2,01 y 1,01–2,03 a
+     * 25 fps —0,98 y 1,02 s— salieron los dos de 25 cuadros, así que corre los dos bordes para el mismo lado.
+     * Con un corte en 1,04, pedir desde 1,03 metía al principio del archivo un cuadro del plano anterior
+     * (auditoría 2026-10-17, `cuadro#10`). Sin `hasta`, el fin exacto de la secuencia.
+     */
+    let tpfRango = null;
+    try { tpfRango = Number(await sequence.getTimebase()); } catch (e) { tpfRango = null; }
+    const kDesde = ticksAlCuadro(Math.round(desdePedido * TICKS_POR_SEGUNDO), tpfRango);
+    const kHasta = params.hasta !== undefined
+      ? ticksAlCuadro(Math.round(hastaPedido * TICKS_POR_SEGUNDO), tpfRango) : Number(fin.ticks);
+    const desde = kDesde / TICKS_POR_SEGUNDO, hasta = kHasta / TICKS_POR_SEGUNDO;
+    if (!(hasta > desde)) throw new Error(`El rango ${desdePedido}–${hastaPedido}s no llega a un cuadro. NO se tocó nada.`);
+    if (Math.abs(desde - desdePedido) > 0.0005 || (params.hasta !== undefined && Math.abs(hasta - hastaPedido) > 0.0005)) {
+      rangoAlCuadro = `llevado al cuadro: ${desdePedido}–${hastaPedido} → ${Number(desde.toFixed(3))}–${Number(hasta.toFixed(3))}s`;
+    }
     /*
      * DOS TRANSACCIONES, y el IN primero. En una sola, medido el 2026-08-19, el
      * in NO se aplicaba: pidiendo 1–6 sobre una secuencia con in/out en
@@ -406,14 +422,14 @@ async function exportar(params) {
     try {
       project.lockedAccess(() => {
         ok = transaccion(project, (a) => {
-          a.addAction(sequence.createSetInPointAction(aTick(desde)));
+          a.addAction(sequence.createSetInPointAction(ppro.TickTime.createWithTicks(String(kDesde))));
         }, "in de exportación");
       });
       try { okIn = Math.abs(aSegundos(await sequence.getInPoint()) - desde) < 0.05; } catch (e) { okIn = null; }
       await esperarUn(1200);
       project.lockedAccess(() => {
         ok = transaccion(project, (a) => {
-          a.addAction(sequence.createSetOutPointAction(aTick(hasta)));
+          a.addAction(sequence.createSetOutPointAction(ppro.TickTime.createWithTicks(String(kHasta))));
         }, "out de exportación") && ok;
       });
       try { okOut = Math.abs(aSegundos(await sequence.getOutPoint()) - hasta) < 0.05; } catch (e) { okOut = null; }
@@ -650,6 +666,7 @@ async function exportar(params) {
       `"${sequence.name}" → ${salida}` +
       (hayRango
         ? ` · rango ${rangoPuesto ? rangoPuesto.desde.toFixed(2) + "–" + rangoPuesto.hasta.toFixed(2) + "s puesto en la secuencia" : "PEDIDO PERO NO CONFIRMADO"}` +
+          (rangoAlCuadro ? ` (${rangoAlCuadro})` : "") +
           (aplico && aplico.in === false ? " · OJO: el IN NO SE APLICÓ, el export arranca en 0" : "") +
           (aplico && aplico.out === false ? " · OJO: el OUT NO SE APLICÓ" : "") +
           (rangoRepuesto === false ? " · OJO: NO se pudieron reponer los in/out viejos" : "") +
@@ -690,7 +707,7 @@ async function exportar(params) {
       (intentos.length ? ` · descartadas: ${intentos.length} forma(s)` : ""),
     secuencia: sequence.name, salida: salida, modo: modo, via: via, arranqueDeCola: arranque,
     extensionDelPreset: ext, errorDeExtension: extError, tipoDePreset: tipo, devoluciones: devoluciones, ameInstalado: ame,
-    rangoPuesto: rangoPuesto, rangoRepuesto: rangoRepuesto, noHabiaInOut: noHabiaInOut, aplico: aplico,
+    rangoPuesto: rangoPuesto, rangoAlCuadro: rangoAlCuadro, rangoRepuesto: rangoRepuesto, noHabiaInOut: noHabiaInOut, aplico: aplico,
     inOutPrevio: inOutPrevio, marcaPrevia: marca,
     inOutOriginal: inOutOriginal, inOutFinal: inOutFinal, volvioBien: volvioBien,
     existiaAntes: habia, existeAhora: ahora, intentos: intentos
@@ -5074,6 +5091,20 @@ async function borrar(params, ventana) {
   const despues = await contarPista();
 
   if (despues >= antes) {
+    /* CON LA PISTA DEL CLIP BLOQUEADA, la misma transacción saca igual lo que está en pistas libres —su audio
+       vinculado— y la pista del clip no baja (auditoría 2026-10-17, `objetivo#7`). La API no expone el bloqueo
+       —sólo el evento de su cambio, reflejado el 2026-10-18—, así que no se puede armar ni medir por API: se
+       cuenta la secuencia entera y, si se fue algo, se dice qué y cuántos Cmd+Z lo reponen. */
+    let seFueOtro = "";
+    try {
+      const tras = await contarItems(sequence);
+      const v = totalAntes.video - tras.video, a = totalAntes.audio - tras.audio;
+      if (v > 0 || a > 0) {
+        seFueOtro = `. OJO: igual SALIERON ${v > 0 ? `${v} clip(s) de video` : ""}${v > 0 && a > 0 ? " y " : ""}` +
+          `${a > 0 ? `${a} de audio` : ""} de OTRAS pistas —su audio vinculado, si esa pista no estaba bloqueada—: ` +
+          `${corrieron || 1} Cmd+Z lo repone${(corrieron || 1) > 1 ? "n" : ""}`;
+      }
+    } catch (e) { /* sin poder contar queda lo de abajo */ }
     throw new Error(
       /*
        * Cuando TODAS las formas committean `true` y la pista no cambia, la causa
@@ -5090,7 +5121,7 @@ async function borrar(params, ventana) {
       (intentos.some((i) => /devolvió true/.test(i))
         ? `. Todas las formas committearon sin efecto: lo más probable es que ${encontrado.pista} esté BLOQUEADA ` +
           "(el candado en el timeline). La API no expone `isLocked()`, así que desde acá no se puede confirmar."
-        : "") +
+        : "") + seFueOtro +
       `. Intentos: ${intentos.join(" | ")}.`
     );
   }
@@ -5441,27 +5472,51 @@ async function editar(params) {
     }
   };
 
+  /*
+   * Primero los dos deltas, después el ORDEN, y recién después las acciones.
+   *
+   * Un clip que pasa a un vecino queda FUERA DE ORDEN en la lista de su pista, y Premiere no lo dibuja ni lo
+   * exporta: ver `rompeElOrden`. Se rebota ANTES de tocar nada, con el corrimiento TOTAL del arranque: el de
+   * `desde` y el de la `entrada`, que lo corre igual que arrastrar el borde izquierdo. Medido el 2026-10-18:
+   * bajarle la entrada a un clip de 6 a 4,5 lo llevó de 3 a 1,52 s, por encima del de 2 s, y quedaron siete
+   * clips fuera de orden con el verbo dando el cambio por bueno; sólo se miraba `desde` (auditoría 2026-10-17,
+   * `orden#3`). A otra velocidad, el delta de material se divide por ella.
+   */
+  let dDesde = 0, dEntrada = 0, sDesde = null, iNueva = null;
   if (typeof params.desde === "number") {
-    const s = llevar("desde", params.desde, Math.round(params.desde * TICKS_POR_SEGUNDO));
-    const dDesde = s - kAntes.s;
-    /* Un movimiento que pasa a un vecino deja el clip FUERA DE ORDEN en la lista de su pista, y
-       Premiere no lo dibuja ni lo exporta: ver `rompeElOrden`. Se rebota ANTES de tocar nada. */
-    const rotos = await rompeElOrden(sequence, [clip].concat(vinculados), dDesde);
+    sDesde = llevar("desde", params.desde, Math.round(params.desde * TICKS_POR_SEGUNDO));
+    dDesde = sDesde - kAntes.s;
+  }
+  if (typeof params.entrada === "number") {
+    iNueva = llevar("entrada", params.entrada, Math.round(params.entrada * TICKS_POR_SEGUNDO));
+    dEntrada = iNueva - kAntes.i;
+  }
+  let velOrden = velocidad;
+  if (dEntrada !== 0 && !(isFinite(velOrden) && velOrden > 0)) {
+    try { velOrden = await velocidadDe(clip); } catch (e) { velOrden = 1; }
+  }
+  if (!(isFinite(velOrden) && velOrden > 0)) velOrden = 1;
+  const dInicio = dDesde + Math.round(dEntrada / velOrden);
+  if (dInicio !== 0) {
+    const rotos = await rompeElOrden(sequence, [clip].concat(vinculados), dInicio);
     if (rotos.length) {
-      throw new Error(`Mover "${encontrado.nombre}" a ${params.desde}s lo pasa por encima de ` +
+      const que = [typeof params.desde === "number" ? `Mover "${encontrado.nombre}" a ${params.desde}s` : null,
+        typeof params.entrada === "number"
+          ? `${typeof params.desde === "number" ? "y llevar su entrada" : `Llevar la entrada de "${encontrado.nombre}"`} a ${params.entrada}s —el arranque se corre con ella—`
+          : null].filter(Boolean).join(" ");
+      throw new Error(`${que} lo pasa por encima de ` +
         rotos.map((r) => `${r.pista}[${r.vecino.indice}] (en ${r.vecino.segundos.toFixed(2)}s)`).join(", ") +
         ": el clip quedaría FUERA DE ORDEN en la lista de su pista, y Premiere no lo dibuja ni lo exporta aunque " +
         "`clips` lo lea en su lugar (medido el 2026-09-30). Para llevarlo entre otros clips, lo seguro es moverlo a " +
         "mano en Premiere: `clonar` a la posición nueva y `borrar` el original sirve sólo para un clip SIN audio " +
         "vinculado —el clon no trae el audio y el borrado se lo lleva, y el plano quedaría mudo—. NO se movió nada.");
     }
-    aTodos((c) => c.createMoveAction(tickDe(dDesde)));
-    pedido.push(`mover a ${seg(s)}s (delta ${seg(dDesde)}s)`);
   }
-  let iNueva = null;
+  if (typeof params.desde === "number") {
+    aTodos((c) => c.createMoveAction(tickDe(dDesde)));
+    pedido.push(`mover a ${seg(sDesde)}s (delta ${seg(dDesde)}s)`);
+  }
   if (typeof params.entrada === "number") {
-    iNueva = llevar("entrada", params.entrada, Math.round(params.entrada * TICKS_POR_SEGUNDO));
-    const dEntrada = iNueva - kAntes.i;
     aTodos((c, suyo) => c.createSetInPointAction(tickDe(suyo.i + dEntrada)));
     pedido.push(`entrada a ${seg(iNueva)}s (delta ${seg(dEntrada)}s sobre el material)`);
   }
@@ -5637,10 +5692,35 @@ async function seleccionar(params) {
     }
   }
 
-  // 3) La única prueba que vale: releer.
+  /*
+   * 3) La única prueba que vale: releer. Y lo que se relee es EL CLIP, no su nombre (2026-10-18, auditoría
+   * `relectura#16`). Todas las tomas de un medio se llaman igual, y con Selection Follows Playhead la que queda
+   * seleccionada cuando `setSelection` no aplica es justo otra toma del mismo medio: comparar el nombre la daba
+   * por buena, y `cortesDeEscena` corría el análisis —también en modo cortar— sobre el clip equivocado. Se
+   * busca el objetivo EN la selección: por identidad, que la API mantiene entre lecturas, o por pista, tipo,
+   * arranque y nombre.
+   */
   const ahora = await getClipSeleccionado(sequence);
   const nombreAhora = ahora ? String(await ahora.clip.getName()) : null;
-  const quedo = nombreAhora === dondeEsta.nombre;
+  const indicePista = (v) => (v && typeof v === "object" && typeof v.value === "number" ? v.value : v);
+  const arranqueObjetivo = String((await objetivo.getStartTime()).ticks);
+  let pistaObjetivo = null;
+  try { pistaObjetivo = indicePista(await objetivo.getTrackIndex()); } catch (e) { pistaObjetivo = null; }
+  const objetivoEsVideo = await esClipDeVideo(objetivo);
+  const esElObjetivo = async (x) => {
+    if (!x) return false;
+    if (x === objetivo) return true;
+    try {
+      if (String((await x.getStartTime()).ticks) !== arranqueObjetivo) return false;
+      if (String(await x.getName()) !== dondeEsta.nombre) return false;
+      if ((await esClipDeVideo(x)) !== objetivoEsVideo) return false;
+      return pistaObjetivo !== null && indicePista(await x.getTrackIndex()) === pistaObjetivo;
+    } catch (e) { return false; }
+  };
+  let enSeleccion = [];
+  try { enSeleccion = (await (await sequence.getSelection()).getTrackItems()) || []; } catch (e) { enSeleccion = []; }
+  let quedo = false;
+  for (const x of enSeleccion) if (await esElObjetivo(x)) { quedo = true; break; }
 
   if (!quedo && !via) {
     let ofrece = [];
@@ -5653,9 +5733,10 @@ async function seleccionar(params) {
 
   return {
     resumen: quedo
-      ? `Seleccionado "${dondeEsta.nombre}" en ${dondeEsta.pista} (vía ${via}).`
-      : `setSelection no tiró (vía ${via}) pero el clip seleccionado sigue siendo ` +
-        `${nombreAhora ? `"${nombreAhora}"` : "ninguno"} y no "${dondeEsta.nombre}". NO SE SELECCIONÓ.`,
+      ? `Seleccionado "${dondeEsta.nombre}" en ${dondeEsta.pista}[${dondeEsta.indice}] (vía ${via}).`
+      : `setSelection no tiró (vía ${via}) pero ${dondeEsta.pista}[${dondeEsta.indice}] NO está en la selección: ` +
+        `el seleccionado es ${nombreAhora ? `"${nombreAhora}"` : "ninguno"}` +
+        (nombreAhora === dondeEsta.nombre ? ", OTRO clip con el mismo nombre" : "") + ". NO SE SELECCIONÓ.",
     pedido: dondeEsta,
     seleccionadoAhora: nombreAhora,
     quedo: quedo,
@@ -7658,6 +7739,39 @@ async function sacarRangos(params) {
   try { tpfRangos = Number(await sequence.getTimebase()); } catch (e) { tpfRangos = null; }
   const medioCuadro = (isFinite(tpfRangos) && tpfRangos > 0 ? tpfRangos / TICKS_POR_SEGUNDO : 0.04) / 2 + 1e-6;
 
+  /*
+   * EL AUDIO DE OTRO MEDIO NO SE CORTA NI SE CORRE (2026-10-18, medido). Con un WAV en A7, de 1 a 8 s, debajo de un
+   * multicanal, sacar 2–3 s partió y corrió el video y sus seis streams, y el WAV quedó entero en 1–8: desde los 3 s,
+   * un segundo corrido respecto del video. El verbo contestaba «1 de 1» y `revisar` no puede saberlo, porque no sabe
+   * qué iba con qué (auditoría 2026-10-17, `audio#6`). No se corta solo —una música debajo tiene que quedar—: se
+   * DICE. Se anota ANTES de tocar nada el audio cuyo medio no está en la pista de video, y sólo lo que termina
+   * después del primer rango: lo de antes no se mueve respecto de nada.
+   */
+  const desdeMinimo = Math.min.apply(null, rangos.map((r) => r.desde));
+  const mediosDeLaPista = new Set();
+  const ajenos = [];
+  let ajenosError = null;
+  try {
+    const trV = await sequence.getVideoTrack(pistaIndex);
+    for (const it of (await trV.getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) || []) {
+      if (!it) continue;
+      try { mediosDeLaPista.add(norm((await it.getProjectItem()).name)); } catch (e) { /* sin medio legible: no cuenta */ }
+    }
+    const nA = await sequence.getAudioTrackCount();
+    for (let t = 0; t < nA; t++) {
+      const trA = await sequence.getAudioTrack(t);
+      if (!trA) continue;
+      for (const it of (await trA.getTrackItems(ppro.Constants.TrackItemType.CLIP, false)) || []) {
+        if (!it) continue;
+        const x = await tiemposDe(it);
+        if (x.hasta <= desdeMinimo + medioCuadro) continue;
+        let nom = null;
+        try { nom = String((await it.getProjectItem()).name); } catch (e) { continue; }
+        if (!mediosDeLaPista.has(norm(nom))) ajenos.push({ pista: "A" + (t + 1), nombre: nom, desde: x.desde, hasta: x.hasta });
+      }
+    }
+  } catch (e) { ajenosError = e && e.message ? e.message : String(e); }   // no poder mirar se DICE, no se calla
+
   // El índice del clip que contiene un tiempo dado, en esta pista.
   const indiceEn = async (t) => {
     const track = await sequence.getVideoTrack(pistaIndex);
@@ -7756,6 +7870,9 @@ async function sacarRangos(params) {
   const despuesTotal = (await contarItems(sequence)).total;
   const pedido = hechos.reduce((s, h) => s + h.quito, 0);
   const real = duracionAntes - duracionDespues;
+  /* Los ajenos cuentan sólo si se sacó algo, y desde el primer rango que de verdad salió. */
+  const primeroSacado = hechos.length ? Math.min.apply(null, hechos.map((h) => h.desde)) : null;
+  const corridos = primeroSacado === null ? [] : ajenos.filter((a) => a.hasta > primeroSacado + medioCuadro);
 
   return {
     resumen:
@@ -7781,9 +7898,18 @@ async function sacarRangos(params) {
           `pedilos de nuevo en ${frenadoPorTope.libreEn} s, tal cual (` +
           frenadoPorTope.quedan.slice().reverse().map((x) => `${x.desde}–${x.hasta}`).join(", ") + ")"
         : "") +
+      (corridos.length
+        ? ` · OJO: ${corridos.length} clip(s) de audio de OTRO medio no se cortaron ni se corrieron, y desde ` +
+          `${primeroSacado}s quedaron corridos respecto del video: ` +
+          corridos.slice(0, 3).map((a) => `${a.pista} "${a.nombre}" ${a.desde}–${a.hasta}s`).join(", ") +
+          (corridos.length > 3 ? ` y ${corridos.length - 3} más` : "") +
+          ". Si es sonido sincronizado, sacale el mismo rango; si es música, está bien"
+        : "") +
+      (ajenosError && hechos.length ? ` · OJO: no se pudo mirar si quedó audio de otro medio corrido (${ajenosError})` : "") +
       (transacciones
         ? ` · ${transacciones} Cmd+Z lo deshace${transacciones > 1 ? "n" : ""}, uno por transacción de cada corte y cada borrado`
         : " · no corrió ninguna transacción"),
+    audioAjenoSinCortar: corridos,
     hechos: hechos,
     fallidos: fallidos,
     frenado: frenado,
@@ -9863,7 +9989,12 @@ async function marcar(params) {
   let tick = q.tick;
   const cuantizado = q.dicho;
   const segundosReales = aSegundos(tick);
-  const duracion = aTick(typeof params.duracion === "number" ? params.duracion : 0);
+  /* La DURACIÓN también va al cuadro (2026-10-18, medido): pedida en 0,625 s a 25 fps, Premiere la guardó
+     tal cual —15,625 cuadros— y el marcador terminaba ENTRE cuadros. `editarMarcador` ya la llevaba y éste
+     no (auditoría 2026-10-17, `cuadro#9`). Sin duración, cero: un marcador sin rango. */
+  const qDur = typeof params.duracion === "number" && params.duracion > 0
+    ? await cuantizarAlFrame(sequence, aTick(params.duracion)) : null;
+  const duracion = qDur ? qDur.tick : ppro.TickTime.createWithTicks("0");
 
   const traer = async () => await (await ppro.Markers.getMarkers(objetivo.sujeto)).getMarkers();
   const listaAntes = await traer();
@@ -10007,7 +10138,8 @@ async function marcar(params) {
     resumen:
       `Marcador "${puesto.nombre}" en ${segundosReales}s de ${objetivo.dondeEsta}: ` +
       `${antes} → ${despues} marcadores · comentario guardado: "${puesto.comentario}" · ` +
-      `${cuantizado} · vía ${via}${colorDicho}` +
+      `${cuantizado}` + (qDur && qDur.dicho !== "ya caía en un frame" ? ` · rango: ${qDur.dicho}` : "") +
+      ` · vía ${via}${colorDicho}` +
       /*
        * Los dos avisos del marcador de clip son consecuencias que NO se ven y que cambian lo
        * que uno tiene que pasar: el tiempo es de FUENTE —pasar uno de timeline lo pone en otro
@@ -11565,6 +11697,12 @@ async function cortesDeEscena(params) {
   } catch (e) {
     throw new Error(`No se pudo seleccionar "${donde.nombre}" para analizarlo: ${e && e.message ? e.message : e}`);
   }
+  /* El análisis corre sobre la SELECCIÓN, así que sin el clip confirmado en ella no se lanza: con otro clip
+     seleccionado, el modo cortar partía ése (auditoría 2026-10-17, `relectura#16`). Antes no se miraba. */
+  if (!seleccion || seleccion.quedo !== true) {
+    throw new Error(`"${donde.nombre}" (${donde.pista}) no quedó seleccionado, y el análisis corre sobre la selección: ` +
+      `NO se analizó nada. ${seleccion && seleccion.resumen ? seleccion.resumen : ""}`);
+  }
 
   /*
    * La aridad dice 0 y miente, como en el resto de esta API. Se enumeran las
@@ -11727,7 +11865,10 @@ async function cortesDeEscena(params) {
       (modo === "marcar"
         ? " · van sobre el CLIP, no sobre la secuencia; se sacan con premiere_desmarcar pidiendo ese clip"
         : " · OJO: el undo NO está confirmado para esta llamada, no pasa por una transacción") +
-      (modo === "cortar" ? " · y revisá el audio vinculado, no está medido si lo arrastra" : ""),
+      /* Medido el 2026-10-18: el corte de escena parte también el audio vinculado, en los mismos puntos
+         (auditoría `audio#13`), y el clip que queda seleccionado es la parte de la izquierda, que existe:
+         un `fijar` y un `keyframe` enseguida no tiraron nada (`objetivo#6`). */
+      (modo === "cortar" ? " · el audio vinculado se parte con el video, en los mismos puntos" : ""),
     clip: donde.nombre, pista: donde.pista, modo: modo, via: via,
     detectados: detectados, antes: antes, despues: despues,
     seleccion: seleccion && seleccion.resumen ? seleccion.resumen : null,
@@ -12280,18 +12421,45 @@ async function subclip(params) {
     throw new Error(`Ya hay un item llamado "${params.nombre}" en el proyecto. Elegí otro nombre.`);
   }
 
+  /*
+   * LOS BORDES VAN AL CUADRO MÁS CERCANO DEL MEDIO (2026-10-18, medido). Premiere BAJA el largo de un subclip
+   * al cuadro: pedido de 74,5 cuadros entró con 74, y de 75,5 con 75. Así, un rango apenas debajo de un borde
+   * —0–14,733333 a 30 fps, que son 441,99999 cuadros— perdía uno entero, la trampa de `armarSecuencia`
+   * (auditoría 2026-10-17, `cuadro#11`). La grilla es la del MEDIO, porque el subclip vive en su tiempo, y sale
+   * de su interpretación; sin fps legible —una imagen, un audio— los bordes van como vinieron.
+   */
+  let fpsMedio = null;
+  try {
+    const fi = await clipItem.getFootageInterpretation();
+    const v = fi ? await fi.getFrameRate() : null;
+    fpsMedio = Number(v && typeof v === "object" && v.value !== undefined ? v.value : v);
+  } catch (e) { fpsMedio = null; }
+  const tpfMedio = isFinite(fpsMedio) && fpsMedio > 0 ? Math.round(TICKS_POR_SEGUNDO / fpsMedio) : null;
+  const kDesde = ticksAlCuadro(Math.round(desde * TICKS_POR_SEGUNDO), tpfMedio);
+  const kHasta = ticksAlCuadro(Math.round(hasta * TICKS_POR_SEGUNDO), tpfMedio);
+  const tDesde = ppro.TickTime.createWithTicks(String(kDesde)), tHasta = ppro.TickTime.createWithTicks(String(kHasta));
+  const desdeQ = kDesde / TICKS_POR_SEGUNDO, hastaQ = kHasta / TICKS_POR_SEGUNDO;
+  const alCuadro = Math.abs(desdeQ - desde) > 0.0005 || Math.abs(hastaQ - hasta) > 0.0005
+    ? `bordes al cuadro del medio (${fpsMedio} fps): ${desde}–${hasta} → ${Number(desdeQ.toFixed(3))}–${Number(hastaQ.toFixed(3))}`
+    : null;
+  if (!(kHasta > kDesde)) {
+    throw new Error(`El rango ${desde}–${hasta} no llega a un cuadro del medio (${fpsMedio} fps). NO se creó nada.`);
+  }
+
   const dur = params.duros === undefined ? true : !!params.duros;
+  /* La de CUATRO argumentos va primera: es la que entra, medido el 2026-08-19, y la de seis —la firma de
+     ExtendScript— contesta «Illegal Parameter type» y le sumaba 1,2 s de espera a cada subclip. */
   const formas = [
-    ["(nombre, desde, hasta, duros, video, audio)",
-      () => clipItem.createSubClipAction(params.nombre, aTick(desde), aTick(hasta), dur, true, true)],
     ["(nombre, desde, hasta, duros)",
-      () => clipItem.createSubClipAction(params.nombre, aTick(desde), aTick(hasta), dur)],
+      () => clipItem.createSubClipAction(params.nombre, tDesde, tHasta, dur)],
+    ["(nombre, desde, hasta, duros, video, audio)",
+      () => clipItem.createSubClipAction(params.nombre, tDesde, tHasta, dur, true, true)],
     ["(nombre, desde, hasta)",
-      () => clipItem.createSubClipAction(params.nombre, aTick(desde), aTick(hasta))],
+      () => clipItem.createSubClipAction(params.nombre, tDesde, tHasta)],
     ["(nombre, desde, hasta, duros, video, audio) con segundos",
-      () => clipItem.createSubClipAction(params.nombre, desde, hasta, dur, true, true)],
+      () => clipItem.createSubClipAction(params.nombre, desdeQ, hastaQ, dur, true, true)],
     ["(nombre, desde, hasta) con segundos",
-      () => clipItem.createSubClipAction(params.nombre, desde, hasta)]
+      () => clipItem.createSubClipAction(params.nombre, desdeQ, hastaQ)]
   ];
 
   const intentos = [];
@@ -12323,14 +12491,16 @@ async function subclip(params) {
 
   return {
     resumen:
-      `Subclip "${params.nombre}" de "${String(encontrado.name)}" · ${desde.toFixed(2)}–${hasta.toFixed(2)}s ` +
-      `(${(hasta - desde).toFixed(2)}s) · vía ${via} · el panel pasó de ${antes.length} a ${despues.length} item(s)` +
+      `Subclip "${params.nombre}" de "${String(encontrado.name)}" · ${desdeQ.toFixed(2)}–${hastaQ.toFixed(2)}s ` +
+      `(${(hastaQ - desdeQ).toFixed(2)}s)` + (alCuadro ? ` · ${alCuadro}` : "") +
+      ` · vía ${via} · el panel pasó de ${antes.length} a ${despues.length} item(s)` +
       (dur ? " · con límites duros" : " · sin límites duros: se puede extender más allá del rango") +
       (intentos.length ? ` · descartadas: ${intentos.length} forma(s)` : "") +
       (saltados ? ` · OJO: ${saltados} item(s) del panel no se pudieron leer y se saltearon` : "") +
       " · un Cmd+Z lo saca",
     subclip: params.nombre, medio: String(encontrado.name),
-    desde: desde, hasta: hasta, dura: Number((hasta - desde).toFixed(3)),
+    desde: desdeQ, hasta: hastaQ, dura: Number((hastaQ - desdeQ).toFixed(3)),
+    desdePedido: desde, hastaPedido: hasta, fpsMedio: isFinite(fpsMedio) ? fpsMedio : null,
     itemsAntes: antes.length, itemsDespues: despues.length,
     via: via, intentos: intentos
   };
