@@ -480,6 +480,15 @@ if (!HAY_MATERIAL) {
    *
    * En la practica casi todos traen `entrada`: `desde_secuencia.js` la lleva siempre desde
    * que se arreglo el round-trip.
+   *
+   * LOS DE TRES PASOS VAN PRIMERO, Y EN ORDEN DE TIEMPO (2026-10-18). Iban DESPUES del lote, y desde
+   * `fa6e9b5` `editar` rebota un movimiento que pasa por encima de otros clips —el que queda fuera de
+   * orden en la lista no se dibuja ni se exporta—: el viaje del limbo a su lugar cruzaba todos los
+   * fragmentos del lote que caen en el medio, y cualquiera sin `entrada` que fuera antes del último
+   * del lote quedaba varado a 600 s (auditoría 2026-10-17, `orden#1`). Primero y en orden, los que ya
+   * están quedan todos ANTES del que viaja, y no cruza ninguno. El lote pega después con overwrite, que
+   * inserta en orden en la lista: medido el 2026-10-18, una PNG puesta antes de un clip existente quedó
+   * primera y `revisar` no marcó nada.
    */
   const porLote = SIN_LOTE ? [] : plan.filter((p) => p.entrada !== null && p.entrada !== undefined);
   const porPaso = plan.filter((p) => porLote.indexOf(p) === -1);
@@ -487,6 +496,79 @@ if (!HAY_MATERIAL) {
               `${porPaso.length} por el camino de tres pasos` +
               (SIN_LOTE ? "  [--sin-lote: el lote esta APAGADO]" : "") +
               (porPaso.length && !SIN_LOTE ? "  (los de tres pasos son los que no traen `entrada`)" : ""));
+
+  for (let i = 0; i < porPaso.length; i++) {
+    const p = porPaso[i];
+    const et = `[${i + 1}/${porPaso.length}]`;
+    try {
+      await dormir(PAUSA);
+      /* pistaAudio EXPLICITA: con -1 cae en A1 y el overwrite pisa lo que haya. */
+      let r = await enviar("insertar", g({ medio: p.clip, pista: PISTA, pistaAudio: PISTA_AUDIO,
+                                        segundos: LIMBO }), 300000);
+      /* Por el CAMPO y no por la frase: hoy "NO SE PUSO NADA" sale exactamente cuando `entro` es
+       * false, pero una frase se reescribe y un campo no. Colocar_sincro y colocar_propuesta
+       * validaban por la palabra "quedó", y esa sale tambien en el fantasma. */
+      if (r.entro !== true) {
+        fallados.push({ p, por: "insertar: " + String(r.resumen).slice(0, 80) }); continue;
+      }
+      /* Ubicar el clip recien puesto: es el que arranca en el limbo. */
+      /* SIN PAUSA: el espaciado es contra rafagas de TRANSACCIONES, y `clips` no transacciona
+       * ni lee valores de param. Medido el 2026-09-05 en un proyecto pesado: la lectura inmediata
+       * ve el estado recien escrito 8 de 8 veces sobre un valor y 6 de 6 sobre un clip
+       * recien insertado, con solo los ~203ms del transporte en el medio. */
+      /* Por tiempo Y por medio, en la pista de video y si no en la de audio: un WAV no pone nada en V,
+       * y buscándolo sólo ahí una locución sin `entrada` «no aparecía en el limbo» y quedaba a 600 s
+       * (auditoría 2026-10-17, `relectura#7`). El resto del camino sigue en la pista donde apareció. */
+      const delLimbo = async (exacto) => {
+        for (const enPista of ["V" + PISTA, "A" + PISTA_AUDIO]) {
+          const cs = (await enviar("clips", g({ pista: enPista }))).clips || [];
+          const c = cs.find((x) => (exacto ? Math.abs(x.desde - LIMBO) < 0.05 : x.desde >= LIMBO - 0.05) &&
+                                   contieneN(x.nombre, p.clip));
+          if (c) return { c, pista: enPista };
+        }
+        return null;
+      };
+      const hallado = await delLimbo(true);
+      if (!hallado) { fallados.push({ p, por: `no aparecio en el limbo, ni en V${PISTA} ni en A${PISTA_AUDIO}` }); continue; }
+      const pistaMio = hallado.pista;
+      let mio = hallado.c;
+
+      await dormir(PAUSA);
+      const entQuiero = p.entrada !== null ? p.entrada : cuadro(mio.entrada);
+      const pedido = { pista: pistaMio, indice: mio.indice,
+                       salida: entQuiero + p.dura };  // sin toFixed: ver `cuadro`
+      if (p.entrada !== null) pedido.entrada = p.entrada;
+      r = await enviar("editar", g(pedido), 300000);
+      /* NO se juzga por el MENSAJE, se juzga por el ESTADO.
+       *
+       * `editar` contesta "NO CAMBIÓ NADA" cuando lo que se le pide es lo que ya hay — y eso
+       * pasa siempre que el fragmento sea el clip ENTERO: entrada 0 y la duracion completa. Es
+       * la respuesta correcta del verbo, no un fallo. Tratarla como fallo dejo los dos clips de
+       * un rearmado tirados en el limbo, con la herramienta informando 0 de 2.
+       *
+       * Asi que se relee el clip y se compara contra lo pedido, con tolerancia de un frame. */
+      /* SIN PAUSA: el espaciado es contra rafagas de TRANSACCIONES, y `clips` no transacciona
+       * ni lee valores de param. Medido el 2026-09-05 en un proyecto pesado: la lectura inmediata
+       * ve el estado recien escrito 8 de 8 veces sobre un valor y 6 de 6 sobre un clip
+       * recien insertado, con solo los ~203ms del transporte en el medio. */
+      const tras = await delLimbo(false);
+      mio = tras && tras.pista === pistaMio ? tras.c : null;
+      if (!mio) { fallados.push({ p, por: "se perdio despues del recorte" }); continue; }
+      const okEnt = Math.abs((mio.entrada ?? entQuiero) - entQuiero) <= F + 0.001;
+      const okDur = Math.abs(mio.dura - p.dura) <= F + 0.001;
+      if (!okEnt || !okDur) {
+        fallados.push({ p, por: `el recorte no quedo: entrada ${mio.entrada} (queria ${entQuiero}), ` +
+                                `dura ${mio.dura} (queria ${p.dura})` });
+        continue;
+      }
+
+      await dormir(PAUSA);
+      r = await enviar("editar", g({ pista: pistaMio, indice: mio.indice, desde: p.desde }), 300000);
+      puestos.push(p);
+      console.log(`  ${et} ${String(p.desde).padStart(7)}s +${String(p.dura).padEnd(6)} ` +
+                  `${p.clip.slice(-24)}  ${String(r.resumen).slice(0, 54)}`);
+    } catch (e) { fallados.push({ p, por: String(e.message || e).slice(0, 90) }); }
+  }
 
   if (porLote.length) {
     await dormir(PAUSA);
@@ -515,66 +597,6 @@ if (!HAY_MATERIAL) {
     } catch (e) {
       for (const p of porLote) fallados.push({ p, por: "colocarLote: " + String(e.message || e).slice(0, 80) });
     }
-  }
-
-  for (let i = 0; i < porPaso.length; i++) {
-    const p = porPaso[i];
-    const et = `[${i + 1}/${porPaso.length}]`;
-    try {
-      await dormir(PAUSA);
-      /* pistaAudio EXPLICITA: con -1 cae en A1 y el overwrite pisa lo que haya. */
-      let r = await enviar("insertar", g({ medio: p.clip, pista: PISTA, pistaAudio: PISTA_AUDIO,
-                                        segundos: LIMBO }), 300000);
-      /* Por el CAMPO y no por la frase: hoy "NO SE PUSO NADA" sale exactamente cuando `entro` es
-       * false, pero una frase se reescribe y un campo no. Colocar_sincro y colocar_propuesta
-       * validaban por la palabra "quedó", y esa sale tambien en el fantasma. */
-      if (r.entro !== true) {
-        fallados.push({ p, por: "insertar: " + String(r.resumen).slice(0, 80) }); continue;
-      }
-      /* Ubicar el clip recien puesto: es el que arranca en el limbo. */
-      /* SIN PAUSA: el espaciado es contra rafagas de TRANSACCIONES, y `clips` no transacciona
-       * ni lee valores de param. Medido el 2026-09-05 en un proyecto pesado: la lectura inmediata
-       * ve el estado recien escrito 8 de 8 veces sobre un valor y 6 de 6 sobre un clip
-       * recien insertado, con solo los ~203ms del transporte en el medio. */
-      let cs = (await enviar("clips", g({ pista: "V" + PISTA }))).clips || [];
-      let mio = cs.find((c) => Math.abs(c.desde - LIMBO) < 0.05);
-      if (!mio) { fallados.push({ p, por: "no aparecio en el limbo" }); continue; }
-
-      await dormir(PAUSA);
-      const entQuiero = p.entrada !== null ? p.entrada : cuadro(mio.entrada);
-      const pedido = { pista: "V" + PISTA, indice: mio.indice,
-                       salida: entQuiero + p.dura };  // sin toFixed: ver `cuadro`
-      if (p.entrada !== null) pedido.entrada = p.entrada;
-      r = await enviar("editar", g(pedido), 300000);
-      /* NO se juzga por el MENSAJE, se juzga por el ESTADO.
-       *
-       * `editar` contesta "NO CAMBIÓ NADA" cuando lo que se le pide es lo que ya hay — y eso
-       * pasa siempre que el fragmento sea el clip ENTERO: entrada 0 y la duracion completa. Es
-       * la respuesta correcta del verbo, no un fallo. Tratarla como fallo dejo los dos clips de
-       * un rearmado tirados en el limbo, con la herramienta informando 0 de 2.
-       *
-       * Asi que se relee el clip y se compara contra lo pedido, con tolerancia de un frame. */
-      /* SIN PAUSA: el espaciado es contra rafagas de TRANSACCIONES, y `clips` no transacciona
-       * ni lee valores de param. Medido el 2026-09-05 en un proyecto pesado: la lectura inmediata
-       * ve el estado recien escrito 8 de 8 veces sobre un valor y 6 de 6 sobre un clip
-       * recien insertado, con solo los ~203ms del transporte en el medio. */
-      cs = (await enviar("clips", g({ pista: "V" + PISTA }))).clips || [];
-      mio = cs.find((c) => c.desde >= LIMBO - 0.05);
-      if (!mio) { fallados.push({ p, por: "se perdio despues del recorte" }); continue; }
-      const okEnt = Math.abs((mio.entrada ?? entQuiero) - entQuiero) <= F + 0.001;
-      const okDur = Math.abs(mio.dura - p.dura) <= F + 0.001;
-      if (!okEnt || !okDur) {
-        fallados.push({ p, por: `el recorte no quedo: entrada ${mio.entrada} (queria ${entQuiero}), ` +
-                                `dura ${mio.dura} (queria ${p.dura})` });
-        continue;
-      }
-
-      await dormir(PAUSA);
-      r = await enviar("editar", g({ pista: "V" + PISTA, indice: mio.indice, desde: p.desde }), 300000);
-      puestos.push(p);
-      console.log(`  ${et} ${String(p.desde).padStart(7)}s +${String(p.dura).padEnd(6)} ` +
-                  `${p.clip.slice(-24)}  ${String(r.resumen).slice(0, 54)}`);
-    } catch (e) { fallados.push({ p, por: String(e.message || e).slice(0, 90) }); }
   }
   await dormir(PAUSA);
   console.log("\nguardado despues: " + String((await enviar("guardar")).resumen).split("·")[0]);

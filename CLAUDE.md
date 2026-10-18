@@ -75,7 +75,9 @@ El bridge se verifica **con el bridge**, que es cómodo y peligroso a la vez.
   instante sin Premiere, y a los 25 s con Premiere y el panel cerrado.
 - **Cada cambio en `plugin/` necesita recargar.** Y si el plugin está INSTALADO —no cargado
   por UDT— la copia instalada es una COPIA, no un symlink: hay que reinstalar y reiniciar
-  Premiere. `test.js` compara las dos copias y falla nombrando el archivo.
+  Premiere. Reinstalar es COPIAR `plugin/` sobre su carpeta en
+  `~/Library/Application Support/Adobe/UXP/Plugins/External/`: `recargar.js --reiniciar` sólo
+  reinicia, no copia. `test.js` compara las dos copias y falla nombrando el archivo.
 - Sin las herramientas MCP cargadas, el transporte directo sirve igual:
   `node -e "require('./server/bridge.js').enviar('estado').then(r=>console.log(r.resumen))"`
 
@@ -126,6 +128,10 @@ tocar cualquier verbo nuevo, preguntate qué hace con el audio:
 - **El vínculo la API no lo expone**: no hay `getLinkedItems` y el segundo argumento de
   `addItem` no los trae. Se deducen por medio de origen y rango de tiempo iguales. `borrar`
   y `editar` los arrastran; sin eso, borrar deja el audio huérfano y mover lo desincroniza.
+- **`sociosDe` es el ÚNICO emparejador**: junta todos los streams de un multicanal, y a dos planos
+  del mismo medio en el mismo instante los desempata por in-point, o no toca y lo dice.
+  `buscarVinculados` delega en él desde el 2026-10-18: emparejaba aparte y el desempate no le había
+  llegado. Un verbo nuevo que necesite los vinculados los pide ahí. → `verificacion.md`
 - Contar solo pistas de video da por bueno un cambio a medias.
 
 ---
@@ -135,8 +141,8 @@ tocar cualquier verbo nuevo, preguntate qué hace con el audio:
 Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que se nombra.
 
 - **El plugin instalado es una COPIA**, no un symlink: un cambio en `plugin/` no corre hasta
-  reinstalar y reiniciar Premiere (`node herramientas/recargar.js --reiniciar`), y reiniciar le
-  corta el trabajo a quien esté usando Premiere. `test.js` compara las dos copias.
+  copiarlo a la carpeta de UXP y reiniciar Premiere (`node herramientas/recargar.js --reiniciar`, que
+  no copia), y reiniciar le corta el trabajo a quien esté usando Premiere. `test.js` compara las dos.
 - **El espaciado que cuenta es `PAUSA + MS_POLL`** y tiene que dar 500 ms o más: a ~200 ms se cae.
   El borde se mueve con el peso del proyecto y con la acción. → `crashes.md`
 - **Menos transacciones antes que menos espera.** Agrupar con `porTransaccion` hasta `TOPE_LOTE`
@@ -236,15 +242,13 @@ no la tienen estén **declarados a propósito** en una lista. El default —no h
   separado. Los 500 ms quedan. → `crashes.md`
 - **Las listas de la API a veces traen un null**: los items de un bin en `importar`, y los de
   `getTrackItems` en el `armarSecuencia` de un proyecto pesado. Sigue sin causa: en un proyecto de prueba
-  no se reprodujo. Está blindado `armarSecuencia`, `sociosDe`, `buscarVinculados` y `desactivar`;
-  `importar` NO: su `nombresDe`, `bins`, `asegurarBin` y `moverABin` leen `h.name` sin `nombreDeItem`, y
-  el chequeo de `test.js` busca otra forma (auditoría del 2026-10-17). → `verificacion.md`
-- **Lo que dejó la auditoría de reglas del 2026-10-17**, leído en el código y sin medir. Primero el audio
-  vinculado: `borrar` y `editar` sobre un plano con un gemelo del mismo archivo en el mismo instante se
-  llevan el audio del otro, y desde un stream de un multicanal arrastran sólo el video. Después `param`,
-  con un `getKeyframePtr` por keyframe —el patrón del SIGBUS—, y `cortar`, que rebota un corte válido a
-  un cuadro del borde a 50 o 60 fps. Se mide en el proyecto de prueba, y lo que se cierra sale también de
-  «Defectos conocidos» de USO.md. → `verificacion.md`
+  no se reprodujo. Está blindado `armarSecuencia`, `sociosDe`, `buscarVinculados`, `desactivar` e
+  `importar`: su `nombresDe`, `bins`, `asegurarBin` y `moverABin` pasan por `nombreDeItem` desde el
+  2026-10-18. → `verificacion.md`
+- **Lo que sigue abierto de la auditoría de reglas del 2026-10-17** —lo arreglable se cerró y se midió
+  en el proyecto de prueba el 2026-10-18—: medir antes de tocar el espaciado de `armarSecuencia` y
+  `escalaFija` y las lecturas en volumen de `revisar`, los bordes `PENDIENTE` de `ATICK_ANOTADOS`
+  (`exportar`, `subclip`, `marcar`) y lo que quedó sin medir. → `verificacion.md`
 - **Los crashes de la interfaz no tienen arreglo medido**: no se reproducen a pedido. Los del panel
   —marcados como PROPUESTA en `plugin/index.js`— no mueven lo acumulado: medido por tasa el 2026-10-01,
   Premiere cayó igual que antes. → `crashes.md`

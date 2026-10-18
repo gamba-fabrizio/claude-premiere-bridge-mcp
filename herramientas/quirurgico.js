@@ -513,7 +513,13 @@ async function reponer() {
     const acciones = [], yaEstaba = [];
     if (v.desactivado === true) {
       if (destino.desactivado === true) yaEstaba.push("ojito ya apagado");
-      else acciones.push({ tipo: "ojito", verbo: "desactivar", params: { pista: pista, indice: destino.indice } });
+      /* En una pista de AUDIO, sólo ese stream (2026-10-18, auditoría `audio#9`): el estado guardado es el de
+         ESE clip, y `desactivar` apuntado a un stream apaga el plano entero —el video y los otros streams—.
+         En una de video se arrastra el audio a propósito: es lo que hace Premiere con el vínculo, y sin eso
+         el suplente apagado seguiría sonando. */
+      else acciones.push({ tipo: "ojito", verbo: "desactivar",
+        params: /^A/i.test(String(pista)) ? { pista: pista, indice: destino.indice, vinculados: false }
+                                          : { pista: pista, indice: destino.indice } });
     }
     /* Por nombre Y aparición (2026-10-01), como los clips: con dos Lumetri, el segundo guardado se compara con el
        segundo de ahora, y si no está se agrega. */

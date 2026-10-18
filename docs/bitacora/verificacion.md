@@ -1,6 +1,6 @@
 
 
-## Vigente (2026-10-17)
+## Vigente (2026-10-18)
 
 - **Una guarda se verifica haciéndola fallar**, mirando por posición y sin comentarios ni strings.
   → «Una guarda se verifica HACIÉNDOLA FALLAR»
@@ -16,8 +16,8 @@
 - **Antes de informar que algo no está, un control positivo.** → «Antes de informar que algo no
   está»
 - **Lo que se escribe tiene que poder releerse.** → «Escribir algo que nada puede releer»
-- **Un item nulo no voltea un recorrido: se cuenta.** Los que leen `h.name` —el de `importar` y los de
-  bins— todavía no: pendiente. → «Recorrer bins: un item nulo»
+- **Un item nulo no voltea un recorrido: se cuenta**, también en `importar` y los de bins desde el
+  2026-10-18. → «Recorrer bins: un item nulo»
 - **Un nombre parcial que engancha más de uno rebota.** → «El match parcial del proyecto»
 - **`clips` y `revisar` leen la salida de cada pista.** → «Una pista con el OJO APAGADO»
 - **`revisar` marca a los vecinos que REPITEN MATERIAL en la fuente**, sólo a 1x y confirmados por la ruta;
@@ -29,8 +29,8 @@
   —un symlink a él— y las `instructions` del servidor, su sección `Antes de la primera llamada` leída al
   arrancar, con tope de 4.096 caracteres. → «Las instructions del servidor y la skill»
 - **Una regla pagada se chequea en todo su mecanismo, no en el verbo donde se pagó**: un barrido de
-  `test.js` por mecanismo, con las excepciones anotadas, que falla en las dos direcciones. → «Una regla
-  pagada se chequea en todo su mecanismo»
+  `test.js` por mecanismo, con las excepciones anotadas, que falla en las dos direcciones. Lo que encontró
+  se arregló y se midió con Premiere el 2026-10-18. → «Una regla pagada se chequea en todo su mecanismo»
 
 # Método de verificación
 
@@ -422,8 +422,33 @@ donde se pagó. Los más caros:
   el panel cerrado.
 
 **Lo que se cerró sin Premiere**: los textos —descripciones MCP, README, USO.md—, el servidor, y las
-herramientas que no pasan por el plugin. Lo del plugin se mide en el proyecto de prueba antes de
-cerrarlo; mientras tanto, lo que más muerde está en «Defectos conocidos» de USO.md.
+herramientas que no pasan por el plugin.
+
+**Lo que se cerró con Premiere (2026-10-18)**, en el proyecto de prueba, con el plugin reinstalado y
+releyendo cada cambio con `clips`:
+
+- **`sociosDe` pasó a ser el único emparejador** del audio vinculado. Con un multicanal de seis streams
+  y un gemelo del mismo archivo en el mismo instante, `borrar`, `editar` y `desactivar` tocaron sólo el
+  plano pedido, también apuntados a un stream de audio; con dos copias idénticas no tocaron nada y lo
+  dijeron. El consejo de ese rebote, `vinculados: false`, era imposible desde MCP: `premiere_borrar` y
+  `premiere_editar` no lo declaraban, y una clave sin declarar rebota.
+- **Los veredictos buscan por tiempo y medio** también en `clonar`, en `insertar` de un medio sin
+  video y en `armarSecuencia` con un WAV y una PNG seguidos.
+- **Lo que se rechazaba o crasheaba**: `cortar` a 50 fps corta a un cuadro del borde, y `param` lee los
+  valores con `getValueAtTime`, de a uno y con tope.
+- **Los Cmd+Z que dice cada verbo** —`marcar`, `resolucion`, `escala`, `sacarRangos`, `cerrarHuecos`,
+  `editarMarcador`— coincidieron con lo que subió el contador de transacciones de la sesión. Contarlos
+  destapó una transacción vacía en cada cambio de fps: la primera forma del reloj no entraba nunca.
+- **El camino de tres pasos de `colocar_fragmentos`** —los fragmentos sin `entrada`, que pasan por un
+  limbo— va antes del lote y en orden de tiempo: después del lote cruzaba sus fragmentos, y `editar`
+  rebota ese cruce.
+- **Medido de paso**: la POSICIÓN del overwrite va al cuadro más cercano (1,03 s quedó en 1,04 y 7,01
+  en 7,00, a 25 fps); un multicanal con `pistaAudio` en una pista nueva crea las de todos sus streams;
+  el subclip de un medio sin video no entra; y Premiere no normaliza los nombres que le pone la API.
+
+**Y lo que sigue abierto**: el espaciado de `armarSecuencia` y `escalaFija` y las lecturas en volumen de
+`revisar` —medir antes de tocar un verbo estable—, los bordes que siguen anotados como PENDIENTE, y lo
+que la auditoría marcó como sin medir.
 
 **Y la regla nueva, mecanizada.** `test.js` suma barridos POR MECANISMO, cada uno con su mutación o su
 control y probado contra el código viejo:

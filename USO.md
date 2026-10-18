@@ -78,13 +78,16 @@ en `CLAUDE.md`.
   MUEVE el clip**: la entrada en una llamada y `desde` en otra. En un clip con video, a 1x, `desde`,
   `entrada` y `salida` van al cuadro MÁS CERCANO —de `salida`, el fin en la secuencia— y el resumen
   dice qué movió. Un audio solo queda exacto, para la sincro fina, y a otra velocidad también.
-- **`borrar` y `editar` arrastran el audio vinculado**, que se deduce por medio y rango iguales.
-  `desactivar` y el `apagado` de las capas apagan también el audio socio: TODOS los streams de un
-  medio multicanal. Si dos planos del mismo medio están en el mismo instante y el in-point no
-  desempata, no lo tocan y lo dicen.
+- **`borrar`, `editar` y `desactivar` arrastran el audio vinculado**, que se deduce por medio, rango e
+  in-point: TODOS los streams de un multicanal, y apuntados a un stream de audio, también el video y
+  los otros streams. Si dos planos del mismo medio están en el mismo instante y el in-point no
+  desempata, no tocan nada y lo dicen; `vinculados: false` toca sólo el clip nombrado. El `apagado`
+  de `editar` es SÓLO el clip, a propósito: el plano entero se apaga con `desactivar`.
 - **`pistaAudio` es 1-based (A1 es 1)**: 0 rebota, y una que no existe se crea, pero UNA y al final:
-  pidiendo A9 con seis, el audio cae en A7 (`pistaAudioReal` dice dónde quedó). El overwrite PISA
-  también en audio, así que dos cosas en la misma pista y posición se comen.
+  pidiendo A9 con seis, el audio cae en A7 (`pistaAudioReal` dice dónde quedó). Un multicanal pone un
+  stream por pista desde ahí y crea las que falten, y `insertar` dice dónde cayeron los otros
+  (`otrasPistasAudio`). El overwrite PISA también en audio, así que dos cosas en la misma pista y
+  posición se comen.
 - **Un medio sin video no pone nada en V**: su clip se busca en la pista de audio.
 - **`borrar` rebota desde el 6º borrado en 60 s.** Vaciar una pista es seleccionarla y Delete en
   Premiere, o `borrarSecuencia` + `armarSecuencia`. Nunca barrerla, y menos con solapes: tiró
@@ -114,7 +117,10 @@ en `CLAUDE.md`.
   secuencia que contenga el texto, borra ésa. Si coinciden varias rebota, y dos con el mismo nombre se
   eligen con `duracion`. Dos gemelas —mismo nombre y mismo largo— se borran a mano.
 - **`marcar` cuantiza al cuadro.** Con `clip`, el marcador va al MEDIO: `segundos` es tiempo de
-  fuente y aparece en toda instancia de ese material.
+  fuente y aparece en toda instancia de ese material. Con comentario y color son tres transacciones,
+  y el resumen dice cuántos Cmd+Z: como todo verbo que escribe en varias, cuenta las que corrieron.
+- **`subclip` de un medio SIN VIDEO no entra**: con un WAV committea y no aparece nada (medido el
+  2026-10-18), y el verbo lo dice como fallo. El de un video entra.
 - **`transicion` es solo video** —el crossfade de audio va a mano— y no se puede releer: el conteo
   prueba que apareció, no que esté bien puesta.
 - **Con dos efectos del mismo nombre** —dos Lumetri—, pasá `indiceEfecto`: 0 el primero, y `efectos` los
@@ -149,21 +155,6 @@ en `CLAUDE.md`.
   uno cuyo `.prproj` ya no está en disco —guardarlo abriría un cartel que el panel no ve—: esos los
   cierra el editor. Si el que cerrás tenía el foco, el foco se va solo a otro, y el resumen dice a
   cuál.
-
-## Defectos conocidos, sin arreglar todavía
-
-Leídos en el código por la auditoría del 2026-10-17 y sin medir: el arreglo se mide en Premiere, y
-al cerrarlo se saca de acá. Hasta entonces:
-
-- **`borrar` y `editar` sobre un plano que tiene un gemelo del mismo medio en el mismo instante** —un
-  suplente sacado del mismo archivo— arrastran también el audio del otro. Ese caso, a mano.
-- **Sobre un stream de audio de un multicanal**, `borrar`, `editar` y `desactivar` arrastran sólo el
-  video, y los otros streams quedan. Apuntá al VIDEO del plano.
-- **`editar` con sólo `apagado`** apaga el clip y contesta «NO CAMBIÓ NADA», y su audio sigue
-  sonando: para apagar todo, `desactivar`.
-- **`param` sobre un param con decenas de keyframes** pide un puntero por keyframe, el patrón del
-  SIGBUS diferido. El valor, con `leer_param`, que lee con `getValueAtTime`.
-- **`cortar` a 50 o 60 fps** rebota un corte a un cuadro de un borde, que es válido: ése, a mano.
 
 ## Lo que NO se hace por el bridge
 

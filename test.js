@@ -655,17 +655,17 @@ if (!cuerpoCerrar) {
 }
 
 /*
- * `buscarVinculados` tiene que exigir que el socio sea del OTRO tipo.
+ * `buscarVinculados` le pide los vinculados a `sociosDe`, el ÚNICO emparejador (2026-10-18).
  *
- * Sin eso empareja video con video —mismo medio, mismo rango— y `editar` le
- * manda al falso socio el mismo `salida` de FUENTE: si los materiales arrancan
- * en distinto lugar, quedan con duraciones distintas. Reproducido el 2026-08-16
- * en el proyecto de prueba: uno pedido en 3s dejó al otro en 20s intacto, y en
- * la variante legal uno quedó en 5s y el otro en 10s.
+ * Emparejaba por su cuenta y el desempate por in-point de `sociosDe` (2026-09-24) no le llegó: `borrar` o
+ * `editar` sobre un suplente del mismo archivo, en el mismo instante, se llevaban el audio del principal, y
+ * desde un stream de audio volvía sólo el video (auditoría del 2026-10-17, `audio#1-4`). Antes de eso, el
+ * 2026-08-16, emparejaba video con video y `editar` le mandaba al falso socio un punto de fuente ajeno.
  *
- * Se chequea el filtro final y además que NO vuelva `getMediaType()`: se probó
- * con ese getter y salió al revés, porque los valores de Constants.MediaType no
- * son primitivos y comparados como texto dan "[object Object]".
+ * Se chequea que delegue y que NO vuelva `getMediaType()` —sus valores no son primitivos y comparados como
+ * texto dan "[object Object]"—, y se EJECUTAN los dos contra una secuencia de mentira: un multicanal de seis
+ * streams con un suplente del mismo archivo encima, desde el video y desde un stream; dos copias IGUALES, que
+ * no se tocan; un WAV solo; y un audio sin in-point legible con otro igual al lado.
  */
 const cuerpoVinc = srcComandos.match(/async function buscarVinculados[\s\S]*?\n\}/);
 if (!cuerpoVinc) {
@@ -673,11 +673,66 @@ if (!cuerpoVinc) {
 } else if (/getMediaType/.test(cuerpoVinc[0])) {
   mal("`buscarVinculados` volvió a decidir el tipo con `getMediaType()`",
       "los valores de Constants.MediaType no son primitivos: comparados como texto dan \"[object Object]\"");
-} else if (!/\.video !== esVideo/.test(cuerpoVinc[0])) {
-  mal("`buscarVinculados` no exige que el vinculado sea del otro tipo",
-      "empareja video con video y `editar` le manda un punto de fuente que no le corresponde");
+} else if (!/sociosDe\(sequence, \[clip\], esVideo\)/.test(cuerpoVinc[0].replace(/\/\*[\s\S]*?\*\//g, ""))) {
+  mal("`buscarVinculados` no le pide los vinculados a `sociosDe`",
+      "emparejar por su cuenta es lo que dejó afuera el desempate por in-point: un suplente se llevaba el audio del principal");
 } else {
-  ok("`buscarVinculados` solo empareja video con audio");
+  ok("`buscarVinculados` delega en `sociosDe`, el único emparejador");
+}
+{
+  const fuentes = ["async function buscarVinculados(", "async function sociosDe("].map((f) => cuerpoDeFuncion(srcComandos, f));
+  const casos = (() => {
+    if (fuentes.some((f) => !f)) return { error: "falta buscarVinculados o sociosDe" };
+    const guion = `
+      const vm = require("vm"), fuentes = ${JSON.stringify(fuentes)};
+      const mundo = (video, audio) => {
+        const hacer = (x, et) => ({ et, getStartTime: async () => ({ ticks: String(x.s) }), getEndTime: async () => ({ ticks: String(x.e) }),
+          getProjectItem: async () => ({ name: x.medio }),
+          getInPoint: async () => { if (x.i === null) throw new Error("sin in-point"); return { ticks: String(x.i) }; } });
+        const V = video.map((l, p) => l.map((x) => hacer(x, "V" + (p + 1)))), A = audio.map((l, p) => l.map((x) => hacer(x, "A" + (p + 1))));
+        const pista = (l) => (l ? { getTrackItems: async () => l.slice() } : null);
+        return { V, A, sequence: { getVideoTrackCount: async () => V.length, getAudioTrackCount: async () => A.length,
+          getVideoTrack: async (i) => pista(V[i]), getAudioTrack: async (i) => pista(A[i]) } };
+      };
+      const ctx = { ppro: { Constants: { TrackItemType: { CLIP: "CLIP" } } } };
+      vm.runInNewContext(fuentes.join("\\n") + "\\nthis.buscarVinculados = buscarVinculados;", ctx);
+      const ver = async (w, clip) => { const r = await ctx.buscarVinculados(w.sequence, clip);
+        return { et: r.map((x) => x.et).sort().join(","), motivo: r.motivo || null, hayVideo: r.hayVideo }; };
+      const ISO = (i) => ({ medio: "ISO.mov", s: 0, e: 100, i });
+      (async () => {
+        /* V1 + A1–A6 es el principal (in 0); V2 + A7–A12, un suplente del MISMO archivo en el mismo instante (in 10). */
+        const g = mundo([[ISO(0)], [ISO(10)]], [0, 0, 0, 0, 0, 0, 10, 10, 10, 10, 10, 10].map((i) => [ISO(i)]));
+        const deV2 = await ver(g, g.V[1][0]), deA3 = await ver(g, g.A[2][0]), deA9 = await ver(g, g.A[8][0]);
+        /* Dos copias IGUALES —mismo in-point—: no se sabe de cuál es el audio. */
+        const c = mundo([[ISO(0)], [ISO(0)]], [[ISO(0)], [ISO(0)]]);
+        const copias = await ver(c, c.V[1][0]), copiasA = await ver(c, c.A[0][0]);
+        const w = mundo([[]], [[{ medio: "tono.wav", s: 0, e: 50, i: 0 }]]);
+        const wav = await ver(w, w.A[0][0]);
+        const n = mundo([[]], [[{ medio: "dos.wav", s: 0, e: 50, i: null }], [{ medio: "dos.wav", s: 0, e: 50, i: 30 }]]);
+        const sinIn = await ver(n, n.A[0][0]);
+        console.log(JSON.stringify({ deV2, deA3, deA9, copias, copiasA, wav, sinIn }));
+      })().catch((e) => console.log(JSON.stringify({ error: String(e.message || e) })));`;
+    try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
+    catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
+  })();
+  const { deV2, deA3, deA9, copias, copiasA, wav, sinIn } = casos;
+  if (casos.error) mal("`buscarVinculados` no se pudo ejecutar contra una secuencia de mentira", casos.error);
+  else if (deV2.et !== "A10,A11,A12,A7,A8,A9" || deV2.motivo) {
+    mal("`buscarVinculados` sobre el suplente no devuelve SU audio, sólo el suyo",
+        "se llevaba el del principal, del mismo archivo y en el mismo instante · " + JSON.stringify(deV2));
+  } else if (deA3.et !== "A1,A2,A4,A5,A6,V1" || !deA3.hayVideo || deA9.et !== "A10,A11,A12,A7,A8,V2") {
+    mal("`buscarVinculados` desde un stream de audio no devuelve el video y los otros streams de SU plano",
+        "borrar o editar A1 de una ISO dejaba A2–A6 sueltos · " + JSON.stringify({ deA3, deA9 }));
+  } else if (copias.et || !copias.motivo || copiasA.et || !copiasA.motivo) {
+    mal("`buscarVinculados` arrastra algo con dos copias IGUALES en el mismo instante, o no dice por qué no",
+        JSON.stringify({ copias, copiasA }));
+  } else if (wav.et || wav.motivo || wav.hayVideo) {
+    mal("`buscarVinculados` sobre un WAV solo devuelve algo, o una duda", JSON.stringify(wav));
+  } else if (sinIn.et || !sinIn.motivo) {
+    mal("`buscarVinculados` arrastra otro audio igual sin poder leer el in-point", JSON.stringify(sinIn));
+  } else {
+    ok("`buscarVinculados` desempata por in-point desde el video y desde el audio, y duda en voz alta con dos copias iguales");
+  }
 }
 
 /*
@@ -715,11 +770,11 @@ if (!cuerpoEditar) {
  * velocidad, que va sin llevar al cuadro y lo dice.
  */
 {
-  const fuentes = ["async function editar(", "async function ubicarClip(", "async function buscarVinculados(",
+  const fuentes = ["async function editar(", "async function ubicarClip(", "async function buscarVinculados(", "async function sociosDe(",
     "async function rompeElOrden(", "async function tiemposDe(", "async function ticksDe(", "async function velocidadDe(",
     "function aNumero(", "function ticksAlCuadro(", "function enCuadros("].map((f) => cuerpoDeFuncion(srcComandos, f));
   const casos = (() => {
-    if (fuentes.some((f) => !f)) return { error: "falta una de: editar, ubicarClip, buscarVinculados, rompeElOrden, tiemposDe, ticksDe, velocidadDe, aNumero, ticksAlCuadro, enCuadros" };
+    if (fuentes.some((f) => !f)) return { error: "falta una de: editar, ubicarClip, buscarVinculados, sociosDe, rompeElOrden, tiemposDe, ticksDe, velocidadDe, aNumero, ticksAlCuadro, enCuadros" };
     const guion = `
       const vm = require("vm"), fuentes = ${JSON.stringify(fuentes)};
       const TPS = 254016000000, TPF = TPS / 30;
@@ -733,6 +788,9 @@ if (!cuerpoEditar) {
           it.getName = async () => it.nombre;
           it.getProjectItem = async () => ({ name: it.medio });
           it.getSpeed = async () => it.vel;
+          it.apagado = false;
+          it.isDisabled = async () => it.apagado;
+          it.createSetDisabledAction = (b) => () => { it.apagado = b; };
           /* AL TICK, sin pegarse al cuadro: es lo medido para recortar y mover. */
           it.createSetOutPointAction = (k) => () => { it.e = it.s + Math.round((Number(k.ticks) - it.i) / it.vel); };
           it.createMoveAction = (k) => () => { const d = Number(k.ticks); it.s += d; it.e += d; };
@@ -755,6 +813,7 @@ if (!cuerpoEditar) {
           vm.runInNewContext(fuentes.join("\\n") + "\\nthis.editar = editar;", ctx);
           const r = await ctx.editar(params);
           return { cambio: r.cambio, cuadros: r.cuadros.despues, alCuadro: r.alCuadro.length, entre: r.entreCuadros, resumen: r.resumen,
+                   apagado: r.apagado, audioApagado: w.A.flat().map((x) => x.apagado),
                    iniV: w.V.flat().map((x) => x.s / TPF), finV: w.V.flat().map((x) => x.e / TPF), finA: w.A.flat().map((x) => x.e / TPF) };
         } catch (e) { return { error: String(e.message || e).slice(0, 200) }; }
       };
@@ -768,13 +827,16 @@ if (!cuerpoEditar) {
                                   { pista: "V1", indice: 0, salida: 10.123456 });
         const desde = await correr(mundo([[{ nombre: "cam.mp4", s: f(30), e: f(300), i: 0 }]], []), { pista: "V1", indice: 0, desde: 40.000333 });
         const lento = await correr(mundo([[{ nombre: "cam.mp4", s: f(30), e: f(300), i: 0, vel: 0.5 }]], []), { pista: "V1", indice: 0, salida: 5.0004 });
-        console.log(JSON.stringify({ reporte, audio1, audio2, vinc, desde, lento }));
+        /* Sólo \`apagado\`, sobre un plano con audio: es un cambio, y el audio sigue sonando a propósito (auditoría, \`audio#7\`). */
+        const apagar = await correr(mundo([[{ nombre: "cam.mp4", s: f(30), e: f(300), i: 0 }]], [[{ nombre: "cam.mp4", s: f(30), e: f(300), i: 0 }]]),
+                                    { pista: "V1", indice: 0, apagado: true });
+        console.log(JSON.stringify({ reporte, audio1, audio2, vinc, desde, lento, apagar }));
       })();`;
     try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
     catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
   })();
-  const err = casos.error || ["reporte", "audio1", "audio2", "vinc", "desde", "lento"].map((k) => casos[k] && casos[k].error).find(Boolean);
-  const { reporte: r, audio1: a1, audio2: a2, vinc: v, desde: d, lento: l } = casos;
+  const err = casos.error || ["reporte", "audio1", "audio2", "vinc", "desde", "lento", "apagar"].map((k) => casos[k] && casos[k].error).find(Boolean);
+  const { reporte: r, audio1: a1, audio2: a2, vinc: v, desde: d, lento: l, apagar: ap } = casos;
   if (err) mal("el `editar` de mentira no se pudo ejecutar", err);
   else if (r.finV[0] !== 1364 || !r.cambio || r.alCuadro !== 1 || !r.cuadros || r.cuadros.dura !== 442) {
     mal("`editar salida` no lleva el FIN al cuadro más cercano",
@@ -790,8 +852,12 @@ if (!cuerpoEditar) {
     mal("`editar desde` no lleva el inicio al cuadro más cercano", JSON.stringify(d));
   } else if (l.alCuadro !== 0 || !/sin llevar al cuadro/.test(l.resumen)) {
     mal("`editar` lleva al cuadro a otra velocidad, o no dice que no lo hizo", JSON.stringify(l));
+  } else if (!ap.cambio || /NO CAMBIÓ NADA|movidos con él/.test(ap.resumen) || !ap.apagado || ap.apagado.despues !== true ||
+             ap.audioApagado.some(Boolean) || !/SÓLO este clip/.test(ap.resumen)) {
+    mal("`editar` con sólo `apagado` no lo cuenta como cambio, o no dice que el audio sigue sonando",
+        "contestaba «N vinculado(s) movidos con él · NO CAMBIÓ NADA» habiendo apagado el video · " + JSON.stringify(ap));
   } else {
-    ok("`editar` lleva los bordes de video al cuadro más cercano, deja exacto el audio solo y juzga el cambio en ticks");
+    ok("`editar` lleva los bordes de video al cuadro más cercano, deja exacto el audio solo, juzga el cambio en ticks y cuenta el apagado");
   }
 }
 
@@ -862,7 +928,7 @@ if (!cuerpoEditar) {
  */
 {
   const sinCom = (x) => (x ? x.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "") : "");
-  const fuentes = ["async function cortar(", "async function sociosDe(", "async function enLotes(",
+  const fuentes = ["async function cortar(", "async function sociosDe(", "async function enLotes(", "async function ticksDe(",
     "async function contarItems(", "async function tiemposDe(", "async function velocidadDe(",
     "async function ubicarClip(", "function aNumero(", "function borradoPermitido(", "function anotarBorrado(",
     "async function vaciarSeleccion(", "async function sacarRangos(", "function pistaDeVideo(",
@@ -2429,6 +2495,7 @@ titulo("Con dos efectos del mismo nombre, las escrituras eligen o rebotan y las 
       const project = { lockedAccess: (fn) => fn(),
         executeTransaction: (fn) => { const acc = []; fn({ addAction: (x) => acc.push(x) }); acc.forEach((x) => x.aplicar()); return true; } };
       const ctx = { TICKS_POR_SEGUNDO: T, aSegundos: (t) => Number(t.ticks) / T, setTimeout: (fn) => fn(),
+        norm: (x) => String(x == null ? "" : x).normalize("NFC"),
         getProyectoYSecuencia: async () => ({ project, sequence: {} }),
         ubicarClip: async () => ({ clip: elClip, pista: "V1", indice: 0 }), exigirClip: async () => ({ clip: elClip, trackIndex: 0 }),
         transaccion: (p, fn, n) => p.executeTransaction(fn, n), listarParams: (pr, c) => c.params,
@@ -2559,6 +2626,7 @@ titulo("`agregarEfecto` y `motion` operan sobre el clip nombrado, no sobre el se
       const project = { lockedAccess: (fn) => fn(),
         executeTransaction: (fn) => { const acc = []; fn({ addAction: (x) => acc.push(x) }); acc.forEach((x) => x.aplicar()); return true; } };
       const ctx = { TICKS_POR_SEGUNDO: T, aSegundos: (t) => Number(t.ticks) / T,
+        norm: (x) => String(x == null ? "" : x).normalize("NFC"),
         getProyectoYSecuencia: async () => ({ project, sequence: { getPlayerPosition: async () => ({ ticks: String(playhead * T) }) } }),
         exigirClip: async () => ({ clip: sel, esAudio: false, trackIndex: 0 }),
         ubicarClip: async (sq, p) => { if (p.pista === "V1" && p.indice === 1) return { clip: otro, pista: "V1", indice: 1 }; throw new Error("no hay " + JSON.stringify(p)); },
@@ -4416,10 +4484,10 @@ const ATICK_ANOTADOS = {
   limpiarRangos: [2, "pone un SENTINEL fuera de todo rango, no un borde"],
   inOutMedio: [1, "escribe el valor tal cual: no tiene una secuencia de referencia (insertar-y-armado.md)"],
   cortar: [1, "`tickCorte` sale de aTick y se REASIGNA al cuadro con alignToNearestFrame antes de usarse"],
-  /* PENDIENTES de la auditoría del 2026-10-17: se cierran midiendo en Premiere. */
-  unirAudio: [1, "PENDIENTE: estira hasta el fin de tiemposDe, redondeado al milisegundo"],
-  insertar: [1, "PENDIENTE: la posición del overwrite; no está medido hacia dónde la pega Premiere"],
-  armarSecuencia: [1, "PENDIENTE: la posición de cada fragmento, ídem"],
+  armarSecuencia: [1, "el cursor es el fin EXACTO del fragmento anterior, releído en ticks: aTick(aSegundos(k)) vuelve al mismo tick, y ese fin ya está en el cuadro"],
+  insertar: [1, "la posición del overwrite: Premiere la pega al cuadro MÁS CERCANO, medido el 2026-10-18 a 25 fps (1,03 → 1,04 y 7,01 → 7,00)"],
+  /* PENDIENTES de la auditoría del 2026-10-17: se cierran midiendo en Premiere. `unirAudio` se cerró el
+     2026-10-18: estira hasta el fin releído en ticks. */
   exportar: [2, "PENDIENTE: el in/out de la secuencia, que es el rango del export"],
   subclip: [3, "PENDIENTE: el rango del subclip"],
   marcar: [4, "PENDIENTE: la duración del marcador; el tiempo sí va al cuadro"],
@@ -4479,8 +4547,9 @@ titulo("Ningún `getKeyframePtr` adentro de un bucle");
  * Lo que este barrido NO ve: una función con una llamada suelta que otra llama en un bucle, que es
  * justo `valorEnTiempo` —sin medir, en la auditoría—.
  */
+/* `param` se cerró el 2026-10-18: los tiempos de los keyframes en el lock, y los valores con getValueAtTime,
+   de a uno y con tope. */
 const PTR_PENDIENTES = {
-  param: "PENDIENTE de la auditoría: leer cada keyframe con getValueAtTime, midiendo en Premiere",
 };
 function punterosEnBucle(src) {
   const B = blanquear(src);
@@ -4524,7 +4593,8 @@ function punterosEnBucle(src) {
   for (const f of ["suelta", "comentada"]) if (sint[f]) ciegos.push(`marca ${f}`);
   if (problemas.length) mal("hay getKeyframePtr adentro de un bucle", problemas.join(" · ") + ". Los valores salen de getValueAtTime: ver crashes.md");
   else if (ciegos.length) mal("el barrido de getKeyframePtr no ve sus controles", ciegos.join(" · "));
-  else ok("ningún getKeyframePtr en un bucle fuera de la lista", `PENDIENTE de la auditoría: ${Object.keys(PTR_PENDIENTES).join(", ")}`);
+  else ok("ningún getKeyframePtr en un bucle fuera de la lista",
+    Object.keys(PTR_PENDIENTES).length ? `PENDIENTE de la auditoría: ${Object.keys(PTR_PENDIENTES).join(", ")}` : "sin pendientes");
 }
 
 titulo("Todo lo que corre un clip en la secuencia pasa por `rompeElOrden`, salvo lo anotado");
@@ -7874,10 +7944,12 @@ titulo("`relink` y `clonar` conservan lo que costo medirlos");
     mal("`clonar` no cuantiza al cuadro",
       "la API acepta sub-frame; un clip entre frames deja huecos de medio cuadro que `revisar`\n         " +
       "informa y que nadie pidio. Es el defecto que `marcar` ya pago con 121 de 139 marcadores.");
-  } else if (!/getTrackItems[\s\S]*Math\.abs\(t\.desde\s*-\s*segDestino\)/.test(cClonar)) {
-    mal("`clonar` no busca el clon releyendo la pista destino",
+  } else if (!/getTrackItems[\s\S]*clipDelMedio\(\s*lista\s*,\s*segDestino\s*,\s*medioOrigen/.test(cClonar)) {
+    /* Por tiempo Y por medio (auditoría 2026-10-17, `relectura#2`): por tiempo solo, un clip ajeno que
+       arrancaba en ese segundo pasaba por el clon, y el verbo contestaba CLONADO sin haber clonado. */
+    mal("`clonar` no busca el clon releyendo la pista destino, por tiempo y por medio",
       "`executeTransaction` devolvio true sobre clones que no entraron, y contar la pista\n         " +
-      "equivocada informo \"NO CLONO\" sobre tres que si. El veredicto es encontrar el clip.");
+      "equivocada informo \"NO CLONO\" sobre tres que si. El veredicto es encontrar el clip, y del medio.");
   } else if (!/pasó de \$\{cuantasV\} a \$\{cuantasDespues\} pistas/.test(cClonar)) {
     mal("`clonar` no avisa cuando CREA pistas de video",
       "clonar las crea —la secuencia de prueba paso de 6 a 8— y no hay API para borrarlas.\n         " +
@@ -8255,7 +8327,8 @@ const srcRecargar = fs.readFileSync(path.join(__dirname, "herramientas", "recarg
   const iGuarda = c.indexOf('typeof p.proyecto === "string"');
   const trozo = iGuarda === -1 ? "" : c.slice(iGuarda, iGuarda + 4000);
   const desambigua = /coinciden\.length > 1/.test(trozo);
-  const soloParcial = /nom\.toLowerCase\(\) !== p\.proyecto\.toLowerCase\(\)/.test(trozo);
+  /* En NFC los dos lados desde el 2026-10-18: con tilde, un nombre de RUTA venía en NFD (auditoría, `relectura#6`). */
+  const soloParcial = /norm\(nom\)\.toLowerCase\(\) !== norm\(p\.proyecto\)\.toLowerCase\(\)/.test(trozo);
   const noFrenaSinSaber = /catch \([^)]*\) \{ abiertos = \[\]; \}/.test(trozo);
   if (iGuarda === -1) {
     mal("no se encontró la guarda `proyecto` en el despachador");
@@ -8289,7 +8362,7 @@ const srcRecargar = fs.readFileSync(path.join(__dirname, "herramientas", "recarg
   const iG = c.indexOf('typeof p.secuencia === "string"');
   const trozo = iG === -1 ? "" : c.slice(iG, iG + 4000);
   const desambigua = /coinciden\.length > 1/.test(trozo);
-  const soloParcial = /nombre\.toLowerCase\(\) !== p\.secuencia\.toLowerCase\(\)/.test(trozo);
+  const soloParcial = /norm\(nombre\)\.toLowerCase\(\) !== norm\(p\.secuencia\)\.toLowerCase\(\)/.test(trozo);
   const noFrenaSinSaber = /catch \([^)]*\) \{ todas = \[\]; \}/.test(trozo);
   if (iG === -1) {
     mal("no se encontró la guarda `secuencia` en el despachador");

@@ -135,7 +135,7 @@ ln -s "/RUTA/A/TU/COPIA/premiere-bridge/skills/premiere" ~/.claude/skills/premie
 | `premiere_editar` | Mueve, recorta o apaga un clip. Mover un clip por encima de otro rebota: quedaría fuera de orden y no se dibujaría |
 | `premiere_medios` | Qué hay en el panel de proyecto, bin por bin |
 | `premiere_insertar` | Pone un medio en una pista, en el segundo que se pida |
-| `premiere_borrar` | Saca un clip y sus vinculados |
+| `premiere_borrar` | Saca un clip y sus vinculados —todos los streams, también apuntado a un stream de audio—; con dos copias iguales en el mismo instante no toca nada y lo dice |
 | `premiere_cortar` | Parte un clip en dos, en un segundo dado. La cola es un clon: efectos, nombre y el mismo audio, pero sin vínculo en Premiere |
 | `premiere_sacar_rangos` | Saca tramos de la secuencia cerrando el hueco; ~7 rangos por minuto, y frena limpio en el tope |
 | `premiere_cerrar_huecos` | Cierra las juntas de un frame que dejan los cortes |
@@ -160,7 +160,7 @@ ln -s "/RUTA/A/TU/COPIA/premiere-bridge/skills/premiere" ~/.claude/skills/premie
 | `premiere_relink` | Repunta un medio a otro archivo; el archivo tiene que existir y NO hay Cmd+Z |
 | `premiere_transicion` | Pone un fundido en un corte. Default Cross Dissolve moderno; el AUDIO no lo toca |
 | `premiere_clonar` | Duplica un clip con sus efectos; el clon es INDEPENDIENTE del original y nace SIN su audio vinculado. A la pista siguiente a la última, la crea |
-| `premiere_subclip` | Un pedazo con nombre de un medio, en el panel; verifica que el item aparezca |
+| `premiere_subclip` | Un pedazo con nombre de un medio, en el panel; verifica que el item aparezca. De un medio sin video no entra |
 | `premiere_desactivar` | Apaga o prende el ojito DE UN CLIP, o de una pista entera, con TODOS los streams del audio vinculado y en lotes de 10 acciones; existe para dejar los suplentes a la vista sin que tapen el corte |
 | `premiere_renombrar_pista` | Le pone nombre a una pista de video o audio; relee para confirmar |
 | `premiere_exportar` | Renderiza la secuencia con un preset `.epr`. `modo` es obligatorio: `ya` bloquea y comprueba que el archivo aparezca; `ame` lo encola en Media Encoder, sin confirmar, arranca la cola sólo si estaba parada —o si Media Encoder estaba cerrado—, y con un `.mov` no admite rango |

@@ -819,6 +819,10 @@ server.registerTool(
     title: "Sacar un clip del timeline",
     description:
       "Saca un clip, por nombre o por pista+índice. Es el inverso de premiere_insertar.\n\n" +
+      "**ARRASTRA EL AUDIO VINCULADO**: todos los streams del plano, que se deducen por medio, rango e " +
+      "in-point —la API no expone el vínculo—. Apuntado a un stream de AUDIO, se lleva también el video y " +
+      "los otros streams. Si dos planos del mismo medio están en el mismo instante y el in-point no " +
+      "desempata, NO borra nada y lo dice: `vinculados: false` saca sólo el clip nombrado.\n\n" +
       "Por defecto DEJA EL HUECO: no mueve nada más. Con `dejarHueco: false` hace ripple y corre " +
       "todo lo que está a la derecha — eso descoloca cualquier cosa alineada con el clip, así que " +
       "usalo solo si el usuario lo pidió.\n\n" +
@@ -842,13 +846,17 @@ server.registerTool(
       dejarHueco: z
         .boolean()
         .optional()
-        .describe("true (el default) saca el clip y no mueve nada. false hace ripple.")
+        .describe("true (el default) saca el clip y no mueve nada. false hace ripple."),
+      /* Lo aconseja el rebote de dos copias iguales, y sin declararlo desde MCP rebotaba como clave
+         inventada: el consejo era imposible de seguir (2026-10-18). */
+      vinculados: z.boolean().optional().describe("false saca SÓLO el clip nombrado, sin su audio vinculado. Por defecto true.")
     })
   },
   async (args) => {
     try {
       const r = await enviar("borrar", args);
-      return texto(r.resumen, { clipsAntes: r.clipsAntes, clipsDespues: r.clipsDespues, seleccionVaciada: r.seleccionVaciada });
+      return texto(r.resumen, { clipsAntes: r.clipsAntes, clipsDespues: r.clipsDespues, seleccionVaciada: r.seleccionVaciada,
+                                vinculadosSacados: r.vinculadosSacados, transacciones: r.transacciones });
     } catch (e) {
       return fallo(e);
     }
@@ -878,7 +886,7 @@ server.registerTool(
         ),
       medio: z.string().describe("Nombre del medio, de premiere_medios. Coincidencia parcial."),
       pista: z.number().int().min(1).optional().describe("Pista como en el timeline: 1 es V1. Por defecto V1."),
-      pistaAudio: z.number().int().min(1).optional().describe("Pista de audio. Por defecto espeja la de video: insertar en V3 manda el audio a A3. Con A1 fijo, el audio PISA lo que haya ahí. Si no existe, Premiere crea UNA al final y el audio cae ahí —pidiendo A9 con seis, en A7—: `pistaAudioReal` dice dónde quedó."),
+      pistaAudio: z.number().int().min(1).optional().describe("Pista de audio. Por defecto espeja la de video: insertar en V3 manda el audio a A3. Con A1 fijo, el audio PISA lo que haya ahí. Si no existe, Premiere crea UNA al final y el audio cae ahí —pidiendo A9 con seis, en A7—: `pistaAudioReal` dice dónde quedó. Un multicanal pone un stream por pista desde ésa, y crea las que falten; `otrasPistasAudio` dice dónde cayeron los otros streams, que PISAN lo que haya."),
       segundos: z.number().min(0).optional().describe("Dónde arranca, en segundos. Por defecto el playhead.")
     })
   },
@@ -889,7 +897,7 @@ server.registerTool(
        * video, un .wav que SI entro se mostraba como "1 → 1, puesto: []". */
       return texto(r.resumen, { entro: r.entro, clipsAntes: r.clipsAntes, clipsDespues: r.clipsDespues, puesto: r.puesto,
                                 pistaAudio: r.pistaAudio, pistaAudioReal: r.pistaAudioReal, clipsAudioAntes: r.clipsAudioAntes,
-                                clipsAudioDespues: r.clipsAudioDespues, puestoAudio: r.puestoAudio });
+                                clipsAudioDespues: r.clipsAudioDespues, puestoAudio: r.puestoAudio, otrasPistasAudio: r.otrasPistasAudio });
     } catch (e) {
       return fallo(e);
     }
@@ -940,13 +948,14 @@ server.registerTool(
       desde: z.number().min(0).optional().describe("Mover el clip para que arranque en este segundo de la secuencia."),
       entrada: z.number().min(0).optional().describe("Punto de entrada, en segundos dentro de la fuente."),
       salida: z.number().min(0).optional().describe("Punto de salida, en segundos dentro de la fuente."),
-      apagado: z.boolean().optional().describe("true apaga SÓLO este clip (sigue en el timeline pero no se ve): su audio vinculado sigue sonando. Para apagar un plano con todo su audio, premiere_desactivar.")
+      apagado: z.boolean().optional().describe("true apaga SÓLO este clip (sigue en el timeline pero no se ve): su audio vinculado sigue sonando. Para apagar un plano con todo su audio, premiere_desactivar."),
+      vinculados: z.boolean().optional().describe("false edita SÓLO el clip nombrado: su audio vinculado no se mueve ni se recorta. Por defecto true, y desde un stream de audio arrastra el video y los otros streams.")
     })
   },
   async (args) => {
     try {
       const r = await enviar("editar", args);
-      return texto(r.resumen, { antes: r.antes, despues: r.despues, cuadros: r.cuadros, alCuadro: r.alCuadro, cambio: r.cambio });
+      return texto(r.resumen, { antes: r.antes, despues: r.despues, cuadros: r.cuadros, alCuadro: r.alCuadro, cambio: r.cambio, apagado: r.apagado });
     } catch (e) {
       return fallo(e);
     }
@@ -1847,7 +1856,8 @@ server.registerTool(
       "llamando `buscarVinculados` por clip: eso serian N recorridos, el patron medido como causa de " +
       "crash. Con `vinculados:false` se toca solo lo nombrado.\n\n" +
       "**TODOS los streams**: un medio multicanal deja un clip de audio por pista, y se apagan todos. " +
-      "Hasta el 2026-09-24 se apagaba UNO: una ISO de 6 streams quedaba con 5 sonando. Y si dos planos " +
+      "Hasta el 2026-09-24 se apagaba UNO: una ISO de 6 streams quedaba con 5 sonando. Apuntado a un " +
+      "stream de AUDIO apaga el plano entero —su video y los otros streams— desde el 2026-10-18. Y si dos planos " +
       "de video del mismo medio estan en el mismo instante —un suplente sacado del mismo archivo que el " +
       "principal—, el audio se atribuye por el in-point de fuente, y si ni eso desempata NO se toca: el " +
       "resumen lo nombra en vez de adivinar.\n\n" +
