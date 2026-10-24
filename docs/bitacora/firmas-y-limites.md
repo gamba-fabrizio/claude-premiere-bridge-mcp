@@ -23,6 +23,8 @@
   BLOQUEA»
 - **El `.prproj` tiene lo que la API no expone**, y un lector no informa "no hay" sin un control
   positivo. → «Lo que el `.prproj` tiene», «Tres falsos negativos»
+- **A otra velocidad, la entrada de la API va en tiempo de clip**: fuente ÷ velocidad, al leer y al
+  escribir (2026-10-20). → «A otra velocidad, la entrada de la API va en TIEMPO DE CLIP»
 
 # Firmas de la API, medidas y no deducidas
 
@@ -380,3 +382,35 @@ pasado un control positivo.** El daño de equivocarse acá no es un número mal:
 editor que su trabajo no entró.
 
 ---
+
+## A otra velocidad, la entrada de la API va en TIEMPO DE CLIP: fuente ÷ velocidad (2026-10-20)
+
+No se sabía si `getInPoint`, a otra velocidad que 1x, devuelve el punto de fuente o uno escalado, y dos partes del
+bridge suponían cosas distintas. Se midió con el editor, que puso la velocidad a mano —la API no la escribe—, y con
+la verdad de AFUERA: un material de prueba con el timecode y el número de cuadro quemados, y un `frame` que dice qué
+segundo de la fuente se ve.
+
+```
+el mismo medio dos veces, 25 fps
+  al 200%, 0–4 s      el cuadro muestra la fuente 6      getInPoint 3      → fuente = API × 2
+  al 50%, 20–28 s     el cuadro muestra la fuente 2      getInPoint 4      → fuente = API × 0,5
+  al 50%: entrada 5 a la API        el cuadro muestra 2,48 (5 × 0,5, al cuadro) y el clip pasó de 20 a 21 s
+  al 200%: entrada 7 a la API       el clip quedó de LARGO CERO: la fuente 14 era su salida
+```
+
+**La entrada de la API va en tiempo de clip**, y el arranque se corre lo mismo que ella, sin dividir por la
+velocidad. Lo demás del bridge la tomaba como fuente: `editar` pasaba la fuente cruda y dejó un clip de largo cero
+sin un aviso —Premiere lo acepta y el clip deja de verse—; `clips` y `radiografia` daban la entrada de la API como
+fuente; `revisar` contaba esos pares como sin medir, a propósito; y `transicion` restaba una fuente a una entrada en
+tiempo de clip.
+
+Ahora `editar` divide `entrada` y `salida` por la velocidad antes de escribir, informa en fuente, mira el orden con
+el corrimiento real y rebota un largo cero o de menos de un cuadro, a cualquier velocidad. Invertido o sin poder leer
+la velocidad, rebota: no está medido. `clips` y `radiografia` informan en fuente, `revisar` mide las repeticiones en
+fuente con la velocidad de cada clip, y `transicion` no calcula el handle de un clip a otra velocidad. Verificado con
+el cuadro: una entrada de 7 a un clip al 200% muestra 6,96 en su primer cuadro, y un clon pegado se marca como
+material repetido, que es lo cierto. `test.js` ejecuta `editar` con una API de mentira que recorta en tiempo de clip.
+
+Lo que queda sin medir: la SALIDA de la API a otra velocidad —se supone igual, y la salida de `editar` verificada con
+el cuadro lo respalda, pero `getOutPoint` no se leyó—, los clips invertidos y la velocidad variable, que la API no
+expone.

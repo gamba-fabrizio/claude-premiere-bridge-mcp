@@ -38,6 +38,13 @@ function palabrasWhisper(j) {
     fuente: "whisper", tiempoExacto: true, seguro: false,
   }));
 }
+/* Las TRES formas que produce el propio repo (2026-10-24, S01E02): sólo leía la primera, y con las otras la parte de
+ * Premiere salía VACÍA sin aviso —el "borrador" era Whisper solo—. Las dos de archivo traen tiempo por palabra, más
+ * cerca que el del segmento; igual viajan como `tiempoExacto: false`, porque la precisión de esos tiempos no está
+ * medida para cortar.
+ *   {segmentos:[{texto, desdeFuente, hastaFuente}]}     la respuesta del verbo `transcripcion`
+ *   {palabras:[{texto, desde, dura}]}                   el .audio.json de `audio.js --motor premiere`
+ *   {segments:[{start, words:[{text, start, duration}]}]} el .premiere.json, el esquema de Premiere */
 function palabrasPremiere(j) {
   const out = [];
   for (const s of j.segmentos || []) {
@@ -45,17 +52,30 @@ function palabrasPremiere(j) {
     for (const t of String(s.texto || "").split(/\s+/)) if (t)
       out.push({ texto: t, desde: d, hasta: h, fuente: "premiere", tiempoExacto: false, seguro: false });
   }
+  if (!out.length) for (const p of j.palabras || []) {
+    const t = String(p.texto || "").trim(), d = Number(p.desde ?? 0);
+    if (t) out.push({ texto: t, desde: d, hasta: d + Number(p.dura ?? 0), fuente: "premiere", tiempoExacto: false, seguro: false });
+  }
+  if (!out.length) for (const s of j.segments || []) for (const w of s.words || []) {
+    const t = String(w.text || "").trim(), d = Number(w.start ?? s.start ?? 0);
+    if (t) out.push({ texto: t, desde: d, hasta: d + Number(w.duration ?? 0), fuente: "premiere", tiempoExacto: false, seguro: false });
+  }
   return out;
 }
+/* Cada palabra se normaliza UNA vez, y la tabla va en 16 bits mientras alcance: con un episodio entero eran 200
+ * millones de `normalize` y ~430 MB (ver `cotejar_transcripcion.js`). */
 function pares(a, b) {
   const n = a.length, m = b.length;
-  const L = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
-    L[i][j] = norm(a[i].texto) && norm(a[i].texto) === norm(b[j].texto)
-      ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const na = a.map((x) => norm(x.texto)), nb = b.map((x) => norm(x.texto));
+  const Fila = Math.min(n, m) < 65536 ? Uint16Array : Int32Array;
+  const L = Array.from({ length: n + 1 }, () => new Fila(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    const ai = na[i], Li = L[i], Ls = L[i + 1];
+    for (let j = m - 1; j >= 0; j--) Li[j] = ai && ai === nb[j] ? Ls[j + 1] + 1 : Math.max(Ls[j], Li[j + 1]);
+  }
   const out = []; let i = 0, j = 0;
   while (i < n && j < m) {
-    if (norm(a[i].texto) && norm(a[i].texto) === norm(b[j].texto)) { out.push([i, j]); i++; j++; }
+    if (na[i] && na[i] === nb[j]) { out.push([i, j]); i++; j++; }
     else if (L[i + 1][j] >= L[i][j + 1]) i++; else j++;
   }
   return out;
@@ -63,7 +83,24 @@ function pares(a, b) {
 
 const wj = JSON.parse(fs.readFileSync(W, "utf8")), pj = JSON.parse(fs.readFileSync(P, "utf8"));
 const w = palabrasWhisper(wj), p = palabrasPremiere(pj.premiere || pj);
-if (!w.length) { console.error("El JSON de Whisper no trae palabras."); process.exit(1); }
+/* Un vacío es "no lo encontré", no "no hay": se dice qué claves traía el archivo. */
+const claves = (j) => (j && typeof j === "object") ? "[" + Object.keys(j).slice(0, 8).join(", ") + "]" : typeof j;
+if (!w.length) { console.error("El JSON de Whisper no trae palabras: trae " + claves(wj) + "."); process.exit(1); }
+if (!p.length) {
+  console.error("El JSON de Premiere no trae palabras que se puedan leer: trae " + claves(pj) + ". Sin ellas, el " +
+    "\"borrador\" sería Whisper solo.");
+  process.exit(1);
+}
+/* La MISMA transcripción en dos formatos: el .premiere.json que deja `audio.js` es del motor que corrió. */
+if (pj.motor && pj.motor === wj.motor) {
+  console.error(`Las dos son del motor "${pj.motor}": no hay nada que fusionar. --premiere tiene que ser la de Premiere.`);
+  process.exit(1);
+}
+if (w.length === p.length && w.every((x, i) => norm(x.texto) === norm(p[i].texto) && Math.abs(x.desde - p[i].desde) < 0.001)) {
+  console.error(`Las dos son la MISMA transcripción (${w.length} palabras, con los mismos tiempos): casi seguro una en ` +
+    "dos formatos. El .premiere.json que deja audio.js es del motor que corrió, no de Premiere.");
+  process.exit(1);
+}
 
 const pr = pares(w, p);
 const fus = [];

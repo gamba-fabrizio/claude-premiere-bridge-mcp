@@ -257,6 +257,13 @@ La ironía vale tenerla: agrupar existe para bajar la exposición al régimen qu
 **agrupar DE MÁS lo vuelve a producir por otro camino**. La palanca tiene un óptimo, no una
 dirección.
 
+**Desde el 2026-10-24, `aplicarEscalas` agrupa de a `TOPE_LOTE` por defecto**: todos los que lo usaban ya
+pedían 8 o 10, y el 1 sólo le quedaba a una llamada suelta. Un Cmd+Z deshace el lote entero, y el resumen dice
+cuántos hacen falta. `aplicarZooms` y `aplicarAnim` siguen en 1: agrupados podrían colgar después de activar
+—o de limpiar— los diez clips del lote, y eso no está medido. Y en una tanda de reels que se cayó a ~250
+transacciones —lo acumulado, otra vez—, la que más pone es `armarSecuencia`, dos por capa: las capas que sólo
+aportan imagen van con `sinAudio`, que saca su audio en UNA transacción en vez de apagarlo pista por pista.
+
 ## Y un verbo que hace su PROPIO bucle de lotes no lo alcanza la pausa
 
 El espaciado de las herramientas separa **LLAMADAS**. Un verbo que recorre sus lotes adentro

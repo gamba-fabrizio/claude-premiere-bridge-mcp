@@ -200,6 +200,11 @@ Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que
 - **Una regla pagada se chequea en TODO su mecanismo, no en el verbo donde se pagó**: chequeada verbo por
   verbo, los de al lado la incumplían con `test.js` en verde. Los barridos de `test.js` anotan cada
   excepción con su razón, y fallan en las dos direcciones. → `verificacion.md`
+- **A otra velocidad, la entrada de la API va en TIEMPO DE CLIP: fuente ÷ velocidad**, al leer y al escribir, y el
+  arranque se corre lo mismo que ella. Pasada cruda, una entrada de fuente dejó un clip de largo cero.
+  → `firmas-y-limites.md`
+- **Cada transacción en la que se entró es UN Cmd+Z**, también la que tira armando su acción y la que no hace
+  nada: un verbo que probaba once formas decía cinco Cmd+Z, y hicieron falta doce. → `verificacion.md`
 
 ## Al escribir un verbo nuevo
 
@@ -234,7 +239,7 @@ no la tienen estén **declarados a propósito** en una lista. El default —no h
   adentro de Premiere. **Mover el repo obliga a editar la del panel**, y `test.js` compara
   las dos.
 
-## Pendientes abiertos (2026-10-17)
+## Pendientes abiertos (2026-10-24)
 
 - **El borde de ~200 ms del espaciado no se reproduce hoy.** Mató a un proyecto pesado en 26.3.2 y a un
   banco pesado en 26.5; el 2026-10-01 una copia pesada, con la secuencia y el material de aquel banco,
@@ -248,15 +253,14 @@ no la tienen estén **declarados a propósito** en una lista. El default —no h
 - **Lo que sigue abierto de la auditoría de reglas del 2026-10-17** —lo arreglable se cerró y se midió
   en el proyecto de prueba el 2026-10-18, también los casos borde, los bordes PENDIENTE y lo sin medir—:
   medir antes de tocar el espaciado de `armarSecuencia` y `escalaFija` y las lecturas en volumen de
-  `revisar`, y `borrar` con la pista del clip bloqueada, que la API no deja armar. → `verificacion.md`
+  `revisar`, y los Cmd+Z de los otros verbos que prueban formas adentro de una transacción. El candado y la
+  velocidad se midieron con el editor el 2026-10-20. → `verificacion.md`
 - **Los crashes de la interfaz no tienen arreglo medido**: no se reproducen a pedido. Los del panel
   —marcados como PROPUESTA en `plugin/index.js`— no mueven lo acumulado: medido por tasa el 2026-10-01,
   Premiere cayó igual que antes. → `crashes.md`
-- **`getInPoint` a otra velocidad que 1x**: no está medido si devuelve el punto de fuente o uno escalado.
-  `radiografia` supone lo primero —su `salida` suma la duración por la velocidad— y nunca se midió a otra
-  velocidad; `relojDelClip` sí, pero con keyframes, que no dicen cuál de las dos es la entrada. Por eso
-  `revisar` no mide repeticiones a otra velocidad. Hace falta un clip a otra velocidad, que la API no pone:
-  a mano. → `verificacion.md`
+- **`getOutPoint` a otra velocidad y los clips INVERTIDOS** (2026-10-20): la entrada se midió —va en tiempo de
+  clip—, la salida se supone igual y no se leyó, e invertido no se midió nada. `editar` rebota un invertido y
+  `transicion` no calcula ese handle. → `firmas-y-limites.md`
 
 Cerrados el 2026-09-23, medidos en vivo: el reloj de `armarSecuencia` (pone el formato de display con
 los fps y lo relee), el `frame` truncado (espera el cierre del PNG) y `audio.js` pisando la

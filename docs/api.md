@@ -123,6 +123,15 @@ independiente — con la fórmula corregida, el bridge leyó los keyframes viejo
 (escritos por el código roto) en los mismos timecodes que mostraba Premiere, y
 eso no puede salir de un error simétrico.
 
+**Y la entrada de la API, a otra velocidad, va en TIEMPO DE CLIP: fuente ÷ velocidad** (2026-10-20). Es lo que
+la fórmula de arriba ya suponía —`velocidad × entrada` es la fuente del primer cuadro—, y se midió con la verdad
+de afuera, un medio con el timecode quemado: al 200% el cuadro mostraba la fuente 6 y `getInPoint` leía 3; al 50%,
+la fuente 2 y leía 4. `createSetInPointAction` toma la misma unidad —5 al 50% mostró el 2,5— y corre el arranque lo
+mismo que ella, sin dividir. En esas unidades la salida es la entrada más la duración en la secuencia. Quien pide
+o informa un punto de FUENTE multiplica o divide por la velocidad: una entrada de fuente pasada cruda a un clip al
+200% fue su punto de salida, y lo dejó de largo cero. La SALIDA de la API a otra velocidad y los clips invertidos
+no se midieron.
+
 ## Qué hace y qué no hace cada acción del timeline
 
 - **No hay razor arbitrario.** Ni `Sequence` ni `TrackItem` tienen nada de
@@ -152,6 +161,14 @@ eso no puede salir de un error simétrico.
   secuencia: es el equivalente a arrastrar su borde izquierdo, no a cambiar qué
   parte de la fuente se ve dejándolo en su lugar.
 - `createMoveAction` toma un **delta**, no un tiempo absoluto.
+- **Cada `executeTransaction` en la que se entró deja UN paso en el historial**, haga lo que haga: también la
+  que committea sin efecto y la que TIRA armando su acción —«Illegal Parameter type» adentro del callback—
+  (2026-10-20, con el editor apretando Cmd+Z: `borrar` con V1 bloqueada probó once formas, cinco committearon y
+  seis tiraron, y reponer pidió once pasos más el del borrado siguiente). Un verbo que prueba formas adentro de
+  una transacción cuenta sus Cmd+Z por las que ENTRARON, no por las que devolvieron `true`.
+- **Con la pista BLOQUEADA**, `createRemoveItemsAction` committea, saca lo de las pistas libres de la selección y
+  deja lo de la bloqueada: el audio de un plano sale y su video queda. La API no expone el candado —sólo
+  `EVENT_TRACK_LOCK_CHANGED`—; se deduce contando cada pista.
 - Sí hay: mover, recortar entrada y salida, apagar, renombrar, y transiciones
   (`createAddVideoTransitionAction`).
 
@@ -541,7 +558,9 @@ el bridge: cada una es una medición contra Premiere, no una deducción del nomb
   `VideoClipTrackItem`. `createSetDisabledAction(true)` sobre el audio lo calla en el render: medido
   por banda en un export, -47 dB apagado contra -2 dB prendido.
 - `VideoTrack.isMuted()` / `setMute()` es el ojito de la pista y llega al render; no pasa por
-  `executeTransaction`.
+  `executeTransaction`. En `AudioTrack`, `isMuted()` es la M de la pista —el `Mute` del `AudioFader` en
+  el `.prproj`, guardado como `<CurrentValue>true</CurrentValue>`—, y la lee bien también con un efecto
+  de pista adelante del fader (medido el 2026-10-22, cinco casos). La API no expone los efectos de pista.
 - `getTrackItems(tipo, false)`: con `true` incluye los vacíos, y sin el segundo argumento tira
   "Illegal Parameter type". Con `TrackItemType.TRANSITION` la lista tiene el largo correcto y todos
   sus items son `null`: las transiciones se cuentan, no se leen.

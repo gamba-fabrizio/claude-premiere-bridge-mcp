@@ -649,7 +649,8 @@ server.registerTool(
           dura: z.number().min(0).describe("Cuánto dura, en segundos."),
           nombre: z.string().optional().describe("Renombra el clip puesto, para rotular qué es sin tener que abrirlo."),
           pistaAudio: z.number().int().min(1).optional().describe("Pista de AUDIO, 1-based (A1 es 1). Por defecto la del mismo número que `pista`. Un medio de varios streams ocupa ésa y las siguientes, una por stream."),
-          apagado: z.boolean().optional().describe("Lo deja apagado —el video y TODO su audio vinculado—: ocupa lugar en la pista y ni se ve ni suena. Sirve para dejar tomas alternativas a mano sin que tapen al titular.")
+          apagado: z.boolean().optional().describe("Lo deja apagado —el video y TODO su audio vinculado—: ocupa lugar en la pista y ni se ve ni suena. Sirve para dejar tomas alternativas a mano sin que tapen al titular."),
+          sinAudio: z.boolean().optional().describe("Sólo la IMAGEN: el audio vinculado —todos sus streams— se pega en pistas propias, después de todo lo demás, y se saca al final en una sola transacción. Esas pistas quedan vacías. No va con `pistaAudio`.")
         }).strict())
         .optional()
         .describe("Medios en posiciones explícitas: capas de anotación, o una pista de tomas alternativas apagadas sobre el corte.")
@@ -660,7 +661,7 @@ server.registerTool(
       /* 10 minutos: apagar el audio de muchas capas va en lotes espaciados —57 capas de 6 streams
          son ~23 s más—, y con 180 s el servidor podía dejar de esperar a un panel que seguía. */
       const r = await enviar("armarSecuencia", args, 600000);
-      return texto(r.resumen, { secuencia: r.secuencia, puestos: r.puestos, capasPuestas: r.capasPuestas, fallidos: r.fallidos, capasFallidas: r.capasFallidas, largoDistinto: r.largoDistinto, pisados: r.pisados, audioApagado: r.audioApagado, sinReleer: r.sinReleer, duracion: r.duracionTotal, reajuste: r.reajuste, inOut: r.inOut });
+      return texto(r.resumen, { secuencia: r.secuencia, puestos: r.puestos, capasPuestas: r.capasPuestas, fallidos: r.fallidos, capasFallidas: r.capasFallidas, largoDistinto: r.largoDistinto, pisados: r.pisados, audioApagado: r.audioApagado, audioSacado: r.audioSacado, sinReleer: r.sinReleer, duracion: r.duracionTotal, reajuste: r.reajuste, inOut: r.inOut });
     } catch (e) {
       return fallo(e);
     }
@@ -923,7 +924,9 @@ server.registerTool(
       "secuencia —de `salida`, el FIN en la secuencia— y el resumen dice qué movió: mover y recortar " +
       "no se pegan al cuadro, y una salida con seis decimales dejaba el fin entre dos y Premiere " +
       "dibujaba uno de más. Un audio solo queda exacto, para la sincro fina; a otra velocidad, también, " +
-      "y lo avisa.\n\n" +
+      "y lo avisa. A otra velocidad `entrada` y `salida` siguen siendo de FUENTE: la API las toma en " +
+      "tiempo de clip —fuente ÷ velocidad, medido— y el verbo convierte. Invertido rebota, y un clip que " +
+      "quedaría de largo cero, también.\n\n" +
       "Mover un clip POR ENCIMA de otro rebota sin tocar nada: la API no reordena la lista de la " +
       "pista, y un clip fuera de orden no se dibuja ni sale en el export (medido). Para llevarlo entre " +
       "otros clips, lo seguro es moverlo a mano en Premiere. premiere_clonar a la posición nueva y " +
@@ -1966,7 +1969,8 @@ server.registerTool(
       "**La verificación es que el ARCHIVO APAREZCA en disco**, no que la llamada no tire. En la " +
       "cola eso no se puede comprobar —lo escribe otro proceso después— y el verbo lo dice en vez de " +
       "fingir que confirmó. Y si el archivo YA EXISTÍA, avisa que no puede afirmar que se reescribió. " +
-      "Si el export se CANCELA o falla, lo dice y NO reintenta.\n\n" +
+      "Si el export se CANCELA o falla, lo dice y NO reintenta. La carpeta de `salida` tiene que EXISTIR: si no, " +
+      "rebota sin mandar nada —Premiere contestaba \"Invalid parameter\" y Media Encoder no escribía nada—.\n\n" +
       "Premiere trae ~1000 presets en `Contents/MediaIO/systempresets`; para H.264 sirve " +
       "\"00 - Match Source - High bitrate.epr\".",
     inputSchema: soloEstas({
@@ -2420,8 +2424,8 @@ server.registerTool(
       "· JUNTAS REMOVIBLES — dos clips pegados, mismo medio y continuos en el material, o sea un " +
       "corte que no corta nada. Se limpian con el verbo `unirAudio`.\n" +
       "· REPITE MATERIAL — dos vecinos del mismo medio que se PISAN EN LA FUENTE: el timeline está " +
-      "limpio y ese tramo se ve o se oye dos veces. Cuenta lugares: el video y su audio son uno. Sólo " +
-      "a 1x; los pares a otra velocidad los cuenta como sin medir. Una repetición deliberada también sale.",
+      "limpio y ese tramo se ve o se oye dos veces. Cuenta lugares: el video y su audio son uno. Mide " +
+      "a cualquier velocidad; los invertidos los cuenta como sin medir. Una repetición deliberada también sale.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       proyecto: z
@@ -2462,7 +2466,11 @@ server.registerTool(
       "acepta la llamada y no importa nada —que en esta API pasa— el conteo lo delata.\n\n" +
       "Con `bin` los deja en un bin, creándolo si no está; acepta rutas anidadas con `/`. Y " +
       "COMPRUEBA que quedaron ahí: si la forma que aceptó Premiere fue una sin bin, los mueve " +
-      "después y lo dice. Un \"importados 12\" con el bin vacío es un informe que miente.",
+      "después y lo dice. Un \"importados 12\" con el bin vacío es un informe que miente.\n\n" +
+      "Un archivo que se está ESCRIBIENDO —cambió en los últimos 5 s, o un proceso lo tiene abierto para " +
+      "escribir— rebota sin mandar nada: importarlo a medias saca el modal «File Import Failure», que traba " +
+      "el panel. Y un .mov, .mp4 o .wav ROTO que ffprobe no abre, que saca el mismo modal aunque se pida sin " +
+      "diálogos. Si Premiere sí lo abre, se importa a mano.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       proyecto: z

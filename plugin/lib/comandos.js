@@ -1239,13 +1239,18 @@ async function quitarEfecto(params) {
   };
 }
 
+/* UNA lista, para los dos mensajes que la dicen: estaban escritas a mano, una con seis verbos y la de `estado` con
+   ocho (2026-10-24). */
+const VERBOS_SIN_SECUENCIA = "secuencias, medios, guardar, importar, api, armarSecuencia, abrirProyecto, crearProyecto, " +
+  "y transcripcion con `medio`";
+
 async function getProyectoYSecuencia() {
   const project = await getProyecto();
   const sequence = await project.getActiveSequence();
   if (!sequence) {
     throw new Error(
       "Hay un proyecto abierto pero ninguna secuencia activa. " +
-      "Los verbos que NO necesitan secuencia son: secuencias, medios, guardar, importar, api, armarSecuencia."
+      "Los verbos que NO necesitan secuencia son: " + VERBOS_SIN_SECUENCIA + "."
     );
   }
   return { project, sequence };
@@ -2125,6 +2130,14 @@ async function clips(params) {
       for (let i = 0; i < items.length; i++) {
         const t4 = await tiemposDe(items[i]);
         const k4 = tpf === null ? null : await ticksDe(items[i]);
+        /* La ENTRADA en segundos de FUENTE, que es lo que pide `editar`: a otra velocidad, `getInPoint` va en tiempo de
+           clip —fuente ÷ velocidad, medido el 2026-10-20—, y un clip al 200% que mostraba el segundo 6 se listaba con
+           entrada 3. Lo que la usa para pasar de fuente a secuencia, como `audio.js`, la toma como fuente. Invertido o
+           sin leer, queda cruda: no está medido. */
+        const vel = await velocidadDe(items[i]);
+        const factor = typeof vel === "number" && vel > 0 ? vel : 1;
+        const entrada = factor === 1 ? t4.entrada
+          : Number(((k4 ? k4.i / TICKS_POR_SEGUNDO : t4.entrada) * factor).toFixed(3));
         salida.push({
           pista: etiqueta,
           indice: i,
@@ -2133,11 +2146,11 @@ async function clips(params) {
           hasta: t4.hasta,
           dura: Number((t4.hasta - t4.desde).toFixed(3)),
           cuadros: k4 === null ? null : { desde: enCuadros(k4.s, tpf), hasta: enCuadros(k4.e, tpf) },
-          entrada: t4.entrada,
-          desfase: t4.desfase,
+          entrada: entrada,
+          desfase: factor === 1 ? t4.desfase : Number((entrada - t4.desde).toFixed(3)),
           // La velocidad importa para los keyframes y para los tiempos de la
           // transcripción: si no es 1, los dos relojes corren distinto.
-          velocidad: await velocidadDe(items[i]),
+          velocidad: vel,
           /*
            * Y si es CAPA DE AJUSTE, porque no se trata como un clip.
            *
@@ -2583,7 +2596,14 @@ async function agregarEfecto(params) {
  * se prueban los sujetos candidatos y se informa cuál contestó.
  */
 async function transcripcion(params) {
-  const { project, sequence } = await getProyectoYSecuencia();
+  /*
+   * Con `medio` NO se exige secuencia (2026-10-24, un reporte de uso): la cabecera de abajo lo decía y
+   * `getProyectoYSecuencia` lo contradecía, así que `audio.js --motor premiere` en un proyecto recién
+   * creado importaba, transcribía y al RELEER tiraba "ninguna secuencia activa". Es el mismo agujero
+   * que tuvo `estado` el 2026-08-29. Las otras dos formas de nombrar el sujeto sí la necesitan.
+   */
+  const project = await getProyecto();
+  const sequence = params.medio ? null : (await getProyectoYSecuencia()).sequence;
 
   /*
    * Tres formas de nombrar el sujeto, y la de `medio` NO necesita timeline:
@@ -3082,6 +3102,15 @@ async function armarSecuencia(params) {
       throw new Error(`La capa ${i + 1} pide \`pistaAudio: ${c.pistaAudio}\`, y se cuenta desde 1 (A1 es 1): con 0 el índice ` +
         "interno queda en -1, que tira el audio en A1 PISANDO lo que haya. NO se creó nada.");
     }
+    /* Con `sinAudio` el audio de la capa va a pistas PROPIAS y se saca (abajo): un `pistaAudio` ahí lo pondría encima
+       del corte antes de sacarlo —el overwrite PISA— y dejaría un hueco en el audio del switch. */
+    if (c && c.sinAudio !== undefined && typeof c.sinAudio !== "boolean") {
+      throw new Error(`La capa ${i + 1} pide \`sinAudio: ${JSON.stringify(c.sinAudio)}\`: es true o false. NO se creó nada.`);
+    }
+    if (c && c.sinAudio === true && typeof c.pistaAudio === "number") {
+      throw new Error(`La capa ${i + 1} pide \`sinAudio\` y \`pistaAudio\` juntos: con \`sinAudio\` su audio va a pistas propias, ` +
+        "después de todo lo demás, y se saca; puesto en otra pista PISARÍA lo que hubiera ahí antes de sacarlo. NO se creó nada.");
+    }
   }
 
   /*
@@ -3349,6 +3378,42 @@ async function armarSecuencia(params) {
   const capasFallidas = [];
   const apagadasV = [];
 
+  /*
+   * CAPAS SIN AUDIO (2026-10-24, un reporte de uso de un podcast). Las ISO de una capa sólo aportan imagen, y cada
+   * una traía sus 6 streams: 136 clips de audio mudos en un reel, que por el bridge no se podían borrar —`borrar`
+   * frena al 6.º en 60 s y barrer pistas tiró Premiere— y que la tanda apagaba pista por pista, ocho transacciones
+   * por reel. Pegar sólo el video no se puede: el cuarto argumento en -1 no suprime el audio (`docs/api.md`). Así
+   * que el audio se pega y se SACA, todo junto al final, en UNA transacción.
+   *
+   * Y no se pega encima de nada: el overwrite PISA, así que en la pista del switch dejaría un hueco al sacarlo. Va
+   * a un SUMIDERO, desde la pista después de la última de audio con algo. Las capas que no se pisan en el tiempo
+   * comparten un bloque de pistas; una que se pisa con otra va al bloque siguiente, porque pisada dejaría restos que
+   * `sociosDe` ya no reconoce. Un medio que no se vio todavía estrena bloque: no se sabe cuántos streams trae.
+   */
+  const sumidero = { inicio: null, bloques: [] };
+  const streamsDe = {};
+  const sinAudioV = [];
+  const bloqueSinAudio = async (medio, a, b) => {
+    if (sumidero.inicio === null) {
+      sumidero.inicio = 0;
+      const n = await nueva.getAudioTrackCount();
+      for (let t = n - 1; t >= 0; t--) {
+        const tr = await nueva.getAudioTrack(t);
+        const its = tr ? await tr.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
+        if (its.some(Boolean)) { sumidero.inicio = t + 1; break; }
+      }
+    }
+    const k = streamsDe[medio];
+    const libre = (bl) => !bl.ocupado.some(([x, y]) => a < y - 0.001 && x < b - 0.001);
+    let bl = typeof k === "number" ? sumidero.bloques.find((x) => x.tam >= k && libre(x)) : null;
+    if (!bl) {
+      const ult = sumidero.bloques[sumidero.bloques.length - 1];
+      bl = { inicio: ult ? ult.inicio + Math.max(ult.tam, 1) : sumidero.inicio, tam: 0, ocupado: [] };
+      sumidero.bloques.push(bl);
+    }
+    return bl;
+  };
+
   for (let i = 0; i < capas.length; i++) {
     const c = capas[i];
     if (typeof c.en !== "number" || typeof c.dura !== "number" || c.dura <= 0) {
@@ -3358,6 +3423,7 @@ async function armarSecuencia(params) {
     const pistaIndex = (typeof c.pista === "number" ? c.pista : 2) - 1;
     try {
       const mc = await resolver(c.medio);
+      const bloque = c.sinAudio === true ? await bloqueSinAudio(mc.nombre, c.en, c.en + c.dura) : null;
       /*
        * `desde` es el punto de FUENTE donde arranca la capa. Antes siempre
        * arrancaba en 0, que alcanza para un Transparent Video —un generador
@@ -3389,7 +3455,7 @@ async function armarSecuencia(params) {
            * quince capas dejaban un solo audio audible. Se prueba pasarle el
            * índice de pista de audio; si resulta ser otra cosa, el verbo lo
            * informa contando dónde aparecieron los clips de audio. */
-          const pistaAudio = typeof c.pistaAudio === "number" ? c.pistaAudio - 1 : pistaIndex;
+          const pistaAudio = bloque ? bloque.inicio : typeof c.pistaAudio === "number" ? c.pistaAudio - 1 : pistaIndex;
           a.addAction(editor.createOverwriteItemAction(mc.medio, tickAlCuadro(c.en, tpfNueva), pistaIndex, pistaAudio));
         }, "poner la capa " + (i + 1));
       });
@@ -3401,7 +3467,7 @@ async function armarSecuencia(params) {
        * en video bastaba el tiempo, y una capa de audio sobre el `en` de una PNG le ponía su nombre y su
        * `apagado` a la PNG. Ver `clipDelMedio`.
        */
-      const pistaAudioIdx = typeof c.pistaAudio === "number" ? c.pistaAudio - 1 : pistaIndex;
+      const pistaAudioIdx = bloque ? bloque.inicio : typeof c.pistaAudio === "number" ? c.pistaAudio - 1 : pistaIndex;
       const lugares = [
         { etiqueta: "V" + (pistaIndex + 1), audio: false, traer: () => nueva.getVideoTrack(pistaIndex) },
         { etiqueta: "A" + (pistaAudioIdx + 1), audio: true, traer: () => nueva.getAudioTrack(pistaAudioIdx) }
@@ -3459,7 +3525,30 @@ async function armarSecuencia(params) {
           });
           if (quedoNombre === false) capasFallidas.push(`capa ${i + 1}: NO se renombró a "${c.nombre}"`);
           // Un audio solo ya quedó apagado arriba: no tiene socios de audio que buscarle.
-          if (c.apagado === true && !lugar.audio) apagadasV.push({ capa: i + 1, item: x.item, puesta: capasPuestas[capasPuestas.length - 1] });
+          if (c.apagado === true && !lugar.audio && !bloque) apagadasV.push({ capa: i + 1, item: x.item, puesta: capasPuestas[capasPuestas.length - 1] });
+          if (bloque) {
+            /* Cuántos streams dejó en el bloque: los del mismo medio en ese `en`, pista tras pista. */
+            let k = 0;
+            const n = await nueva.getAudioTrackCount();
+            for (let t = bloque.inicio; t < n; t++) {
+              const tr = await nueva.getAudioTrack(t);
+              const its = tr ? await tr.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
+              const enPistaA = [];
+              for (const it of its) { if (it) { const tt = await tiemposDe(it); enPistaA.push({ desde: tt.desde, hasta: tt.hasta, item: it }); } }
+              if (!(await clipDelMedio(enPistaA, c.en, mc.nombre, 0.15))) break;
+              k++;
+            }
+            bloque.tam = Math.max(bloque.tam, k);
+            bloque.ocupado.push([c.en, c.en + c.dura]);
+            streamsDe[mc.nombre] = k;
+            if (lugar.audio) {
+              capasFallidas.push(`capa ${i + 1}: "${mc.nombre}" no tiene video y pediste \`sinAudio\`: quedó en ${lugar.etiqueta}, ` +
+                "sonando, porque sacarle el audio no dejaba nada");
+            } else {
+              sinAudioV.push({ capa: i + 1, item: x.item, medio: mc.nombre, en: x.desde, hasta: x.hasta, pista: lugar.etiqueta,
+                puesta: capasPuestas[capasPuestas.length - 1] });
+            }
+          }
           avance.capas = capasPuestas.length;
         }
       }
@@ -3555,6 +3644,80 @@ async function armarSecuencia(params) {
   }
 
   /*
+   * SACAR EL AUDIO DE LAS CAPAS `sinAudio`: sus socios salen de `sociosDe` —TODOS los streams, y lo dudoso queda y se
+   * dice—, y se sacan en UNA transacción sobre una selección con todos. Una acción sobre muchos clips no es un
+   * barrido: el crash de `borrar` fue el séptimo borrado SEPARADO, sobre una pista con solapes. Nunca sale nada de
+   * afuera del sumidero, cuente lo que cuente `sociosDe`. Después se relee: lo que quedó en el sumidero de esos
+   * medios, y que el video de cada capa siga ahí entero. Las pistas del sumidero quedan vacías: no hay API para
+   * borrar pistas.
+   */
+  let audioSacado = null;
+  if (sinAudioV.length) {
+    audioSacado = { capas: sinAudioV.length, pedidos: 0, quedan: 0, pistas: null, fuera: 0, dudosas: [], sinSocio: [],
+                    videoRoto: [], seleccionVaciada: null, error: null };
+    try {
+      const res = await sociosDe(nueva, sinAudioV.map((a) => a.item), true);
+      const vistos = new Set(), items = [], claves = [];
+      res.forEach((r, j) => {
+        const a = sinAudioV[j];
+        if (r.motivo) { audioSacado.dudosas.push(`capa ${a.capa}: ${r.motivo}`); return; }
+        let n = 0;
+        for (const so of r.socios) {
+          const idx = Number(String(so.pista).slice(1)) - 1;
+          if (!/^A/.test(so.pista) || idx < sumidero.inicio) { audioSacado.fuera++; continue; }
+          const k = so.pista + "|" + so.indice;
+          if (vistos.has(k)) continue;
+          vistos.add(k); items.push(so.clip); claves.push({ idx: idx, medio: a.medio }); n++;
+        }
+        if (!n) audioSacado.sinSocio.push(a.capa);
+        a.puesta.audioSacado = n;
+      });
+      audioSacado.pedidos = items.length;
+      if (items.length) {
+        const sel = await nueva.getSelection();
+        const previos = await sel.getTrackItems();
+        for (let z = 0; z < previos.length; z++) sel.removeItem(previos[z]);
+        for (const it of items) { try { sel.addItem(it, false); } catch (e) { try { sel.addItem(it); } catch (e2) { /* se cuenta abajo */ } } }
+        /* La clave de cada uno ANTES de sacarlo —pista, inicio, fin y medio—: después el objeto ya no sirve, y por
+           medio solo se contaría como "quedó" el audio de una capa normal del mismo medio que cayó en esas pistas. */
+        for (let z = 0; z < items.length; z++) {
+          claves[z].ini = String((await items[z].getStartTime()).ticks);
+          claves[z].fin = String((await items[z].getEndTime()).ticks);
+        }
+        project.lockedAccess(() => {
+          transaccion(project, (a) => {
+            a.addAction(editor.createRemoveItemsAction(sel, false, ppro.Constants.MediaType.AUDIO));
+          }, "sacar el audio de las capas sin audio");
+        });
+        anotarBorrado();
+        audioSacado.seleccionVaciada = await vaciarSeleccion(nueva, sel, items);
+      }
+      const n = await nueva.getAudioTrackCount();
+      if (n > sumidero.inicio) audioSacado.pistas = `A${sumidero.inicio + 1}` + (n - 1 > sumidero.inicio ? `–A${n}` : "");
+      for (const t of Array.from(new Set(claves.map((c) => c.idx)))) {
+        const tr = t < n ? await nueva.getAudioTrack(t) : null;
+        const its = tr ? await tr.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
+        for (const it of its) {
+          if (!it) continue;
+          const ini = String((await it.getStartTime()).ticks), fin = String((await it.getEndTime()).ticks);
+          if (!claves.some((c) => c.idx === t && c.ini === ini && c.fin === fin)) continue;
+          let m = null;
+          try { m = String((await it.getProjectItem()).name); } catch (e) { m = null; }
+          if (m === null || claves.some((c) => c.idx === t && c.ini === ini && c.fin === fin && igualN(c.medio, m))) audioSacado.quedan++;
+        }
+      }
+      for (const a of sinAudioV) {
+        const tr = await nueva.getVideoTrack(Number(a.pista.slice(1)) - 1);
+        const its = tr ? await tr.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
+        const enPistaV = [];
+        for (const it of its) { if (it) { const tt = await tiemposDe(it); enPistaV.push({ desde: tt.desde, hasta: tt.hasta, item: it }); } }
+        const x = await clipDelMedio(enPistaV, a.en, a.medio, 0.15);
+        if (!x || Math.abs(x.hasta - a.hasta) > 0.15) audioSacado.videoRoto.push(`capa ${a.capa} (${a.pista} ${a.en.toFixed(2)}s)`);
+      }
+    } catch (e) { audioSacado.error = e && e.message ? e.message : String(e); }
+  }
+
+  /*
    * DEVOLVER LOS in/out DE LOS MEDIOS. No lo hacía, y es el mismo daño que ya
    * pagó `cortar`: `createSetInOutPointsAction` escribe en el ProjectItem, que es
    * de TODO el proyecto y no de este corte, así que cada medio quedaba recortado
@@ -3632,6 +3795,17 @@ async function armarSecuencia(params) {
             ? ` · OJO: audio SIN TOCAR porque no se puede atribuir sin adivinar: ${audioApagado.dudosas.join(" | ")}` : "") +
           (audioApagado.sinSocio.length ? ` · sin audio vinculado: capa(s) ${audioApagado.sinSocio.join(", ")}` : "")
         : "") +
+      (audioSacado
+        ? ` · audio de ${audioSacado.capas} capa(s) sin audio: ${audioSacado.pedidos} clip(s) sacados` +
+          (audioSacado.pistas ? ` de ${audioSacado.pistas} (esas pistas quedan: no hay API para borrar pistas)` : "") +
+          (audioSacado.quedan ? ` · OJO: QUEDAN ${audioSacado.quedan} clip(s) de esos medios en esas pistas, sonando: releé con clips` : "") +
+          (audioSacado.videoRoto.length ? ` · OJO: el VIDEO no quedó entero en: ${audioSacado.videoRoto.join(", ")}` : "") +
+          (audioSacado.dudosas.length ? ` · OJO: audio SIN SACAR porque no se puede atribuir sin adivinar: ${audioSacado.dudosas.join(" | ")}` : "") +
+          (audioSacado.sinSocio.length ? ` · sin audio que sacar: capa(s) ${audioSacado.sinSocio.join(", ")}` : "") +
+          (audioSacado.fuera ? ` · ${audioSacado.fuera} socio(s) afuera de esas pistas, que NO se tocaron` : "") +
+          (audioSacado.seleccionVaciada === false ? " · OJO: la selección NO quedó vacía: deseleccioná (Cmd+Shift+A) antes de editar ahí" : "") +
+          (audioSacado.error ? ` · OJO: ${audioSacado.error} — el audio de esas capas PUEDE SEGUIR AHÍ` : "")
+        : "") +
       (sinReleer.length
         ? ` · OJO: la API devolvió huecos al releer ${sinReleer.length} fragmento(s) y su fin se CALCULÓ, ` +
           `puede haber un cuadro de hueco o de solape: ${sinReleer.join(", ")} — pasá revisar`
@@ -3651,6 +3825,7 @@ async function armarSecuencia(params) {
     pisados: pisados,
     capasPuestas: capasPuestas,
     audioApagado: audioApagado,
+    audioSacado: audioSacado,
     sinReleer: sinReleer,
     capasFallidas: capasFallidas,
     largoDistinto: largoDistinto,
@@ -4806,6 +4981,9 @@ async function buscarVinculados(sequence, clip) {
   /* Si en el grupo hay VIDEO: desde un audio, los socios pueden ser sólo otros streams, y un audio solo
      queda exacto en `editar` —la sincro fina lo usa—, aunque arrastre hermanos. */
   vinculados.hayVideo = esVideo || r.socios.some((s) => /^V/.test(s.pista));
+  /* Y la pista de cada uno, en el orden de la lista: `borrar` cuenta cada una antes y después para nombrar la que
+     no bajó —con su candado puesto, la transacción saca el resto y la deja (medido el 2026-10-20)—. */
+  vinculados.pistas = r.socios.filter((s) => s.clip !== clip).map((s) => s.pista);
   return vinculados;
 }
 
@@ -5066,65 +5244,57 @@ async function borrar(params, ventana) {
     () => editor.createRemoveItemsAction([encontrado.clip], ripple, true)
   ]);
 
+  /* Cada pista de la selección se cuenta antes y después: la que no bajó lo que se le sacaba es la que tiene el
+     candado, y la API no lo expone de otra forma (no hay `isLocked()`). */
+  const enLaSeleccion = {};
+  for (const p of [encontrado.pista].concat(vinculados.pistas || [])) enLaSeleccion[p] = (enLaSeleccion[p] || 0) + 1;
+  const contarEtiqueta = async (etq) => {
+    try {
+      const n = Number(String(etq).slice(1)) - 1;
+      const tr = /^V/.test(etq) ? await sequence.getVideoTrack(n) : await sequence.getAudioTrack(n);
+      return tr ? (await tr.getTrackItems(ppro.Constants.TrackItemType.CLIP, false)).length : null;
+    } catch (e) { return null; }
+  };
+  const porPistaAntes = {};
+  for (const p of Object.keys(enLaSeleccion)) porPistaAntes[p] = await contarEtiqueta(p);
+
   const intentos = [];
   let via = null;
   /* Una forma que committea sin efecto también queda en el historial: los Cmd+Z son las que corrieron,
-     y `sacarRangos` los suma para decir los suyos (auditoría 2026-10-17, `tandas#11`). */
+     y `sacarRangos` los suma para decir los suyos (auditoría 2026-10-17, `tandas#11`).
+   *
+   * Y TAMBIÉN LA QUE TIRA ADENTRO de la transacción (2026-10-20). Con V1 bloqueada, el bucle viejo probó las once
+   * formas: cinco committearon —la primera sacó los seis audios, las otras nada— y seis tiraron «Illegal Parameter
+   * type» al armar la acción. Reponer el audio pidió DOCE Cmd+Z, apretados por el editor: once de este borrado y uno
+   * del que vino después, y el verbo decía cinco. Cada `executeTransaction` en la que se entró deja un paso, haga lo
+   * que haga; se cuentan las que llegaron a armar su acción, que es donde tiran.
+   *
+   * Y LA PRIMERA QUE COMMITTEA CORTA EL BUCLE, saque o no. Que committee es que la firma entró; si no sacó el clip es
+   * que su pista tiene el CANDADO, y las formas siguientes no lo iban a sacar tampoco. Medido después del arreglo,
+   * con V1 y A1 bloqueadas: una transacción, salieron A2–A6, y UN Cmd+Z los repuso. */
   let corrieron = 0;
   for (let i = 0; i < formas.length && !via; i++) {
+    let entro = false, contada = false;
     try {
       let ok = false;
       project.lockedAccess(() => {
         ok = transaccion(project, (acciones) => {
+          entro = true;
           acciones.addAction(formas[i][1]());
         }, "sacar " + encontrado.nombre);
       });
-      if (ok) corrieron++;
+      if (ok || entro) { corrieron++; contada = true; }
       const ahora = await contarPista();
       if (ahora < antes) { via = formas[i][0]; break; }
       intentos.push(formas[i][0] + ": la transacción devolvió " + ok + " y la pista sigue con " + ahora);
+      if (ok) break;
     } catch (e) {
+      if (entro && !contada) corrieron++;
       intentos.push(formas[i][0] + ": " + (e && e.message ? e.message : e));
     }
   }
 
   const despues = await contarPista();
-
-  if (despues >= antes) {
-    /* CON LA PISTA DEL CLIP BLOQUEADA, la misma transacción saca igual lo que está en pistas libres —su audio
-       vinculado— y la pista del clip no baja (auditoría 2026-10-17, `objetivo#7`). La API no expone el bloqueo
-       —sólo el evento de su cambio, reflejado el 2026-10-18—, así que no se puede armar ni medir por API: se
-       cuenta la secuencia entera y, si se fue algo, se dice qué y cuántos Cmd+Z lo reponen. */
-    let seFueOtro = "";
-    try {
-      const tras = await contarItems(sequence);
-      const v = totalAntes.video - tras.video, a = totalAntes.audio - tras.audio;
-      if (v > 0 || a > 0) {
-        seFueOtro = `. OJO: igual SALIERON ${v > 0 ? `${v} clip(s) de video` : ""}${v > 0 && a > 0 ? " y " : ""}` +
-          `${a > 0 ? `${a} de audio` : ""} de OTRAS pistas —su audio vinculado, si esa pista no estaba bloqueada—: ` +
-          `${corrieron || 1} Cmd+Z lo repone${(corrieron || 1) > 1 ? "n" : ""}`;
-      }
-    } catch (e) { /* sin poder contar queda lo de abajo */ }
-    throw new Error(
-      /*
-       * Cuando TODAS las formas committean `true` y la pista no cambia, la causa
-       * casi siempre es que la pista está BLOQUEADA — pasó, y el mensaje viejo
-       * escupía once intentos sin nombrarla nunca.
-       *
-       * No se puede confirmar desde acá: `VideoTrack` expone
-       * `EVENT_TRACK_LOCK_CHANGED` pero NO un `isLocked()`. Así que se nombra la
-       * sospecha y se dice que no se puede verificar, en vez de callarla o de
-       * afirmarla.
-       */
-      `No se pudo sacar "${encontrado.nombre}" de ${encontrado.pista}: la pista sigue con ` +
-      `${despues} clips` +
-      (intentos.some((i) => /devolvió true/.test(i))
-        ? `. Todas las formas committearon sin efecto: lo más probable es que ${encontrado.pista} esté BLOQUEADA ` +
-          "(el candado en el timeline). La API no expone `isLocked()`, así que desde acá no se puede confirmar."
-        : "") + seFueOtro +
-      `. Intentos: ${intentos.join(" | ")}.`
-    );
-  }
 
   /*
    * LA SELECCIÓN SE VACÍA DESPUÉS DE BORRAR (2026-09-24). La selección se arma sobre el objeto VIVO
@@ -5135,6 +5305,9 @@ async function borrar(params, ventana) {
    * proyecto de prueba al primer ensayo —borrar una capa e insertar en el mismo lugar—, con la pila
    * del reporte. En la interfaz, Delete deja la selección vacía; acá se hace a mano, con los mismos
    * items que se agregaron, y se espera a que el aviso se procese con todo en orden.
+   *
+   * Y TAMBIÉN CUANDO REBOTA (2026-10-20): con la pista bloqueada, lo de las pistas libres sale igual y quedaba
+   * adentro de la selección, con el error ya en camino.
    */
   let seleccionVaciada = false;
   try {
@@ -5150,6 +5323,61 @@ async function borrar(params, ventana) {
   // vinculado y quedó suelto, acá se ve. Contar una parte del efecto confirma lo
   // que uno esperaba, no lo que pasó.
   const totalDespues = await contarItems(sequence);
+  const salieron = (totalAntes.video + totalAntes.audio) - (totalDespues.video + totalDespues.audio);
+
+  /*
+   * LA PISTA QUE NO BAJÓ (2026-10-20, auditoría 2026-10-17, `objetivo#7`). Con el candado en la pista de UNO de los
+   * clips de la selección, la transacción saca los demás y deja ése: el plano queda partido. Medido apuntando al
+   * audio con el video en V1 bloqueada: salieron los seis streams, el video quedó, y el verbo contestaba «con 6
+   * vinculado(s)» como si nada.
+   */
+  const quedaron = [];
+  for (const p of Object.keys(enLaSeleccion)) {
+    const ahora = await contarEtiqueta(p);
+    if (porPistaAntes[p] !== null && ahora !== null && porPistaAntes[p] - ahora < enLaSeleccion[p]) quedaron.push(p);
+  }
+  const cmdZ = corrieron;
+  const textoCmdZ = (n) => (n === 1 ? "UN Cmd+Z" : `${n} Cmd+Z`);
+
+  if (despues >= antes) {
+    /* CON LA PISTA DEL CLIP BLOQUEADA, la misma transacción saca igual lo que está en pistas libres —su audio
+       vinculado— y la pista del clip no baja (auditoría 2026-10-17, `objetivo#7`, medido el 2026-10-20). La API no
+       expone el bloqueo —sólo el evento de su cambio, reflejado el 2026-10-18—: se cuenta pista por pista y la
+       secuencia entera, y se dice qué salió y cuántos Cmd+Z lo reponen. */
+    if (salieron > 0) {
+      if (ventana === "pieza") anotarPieza(); else BORRADOS_RECIENTES.push(Date.now());
+    }
+    let seFueOtro = "";
+    {
+      const v = totalAntes.video - totalDespues.video, a = totalAntes.audio - totalDespues.audio;
+      if (v > 0 || a > 0) {
+        seFueOtro = `. OJO: igual SALIERON ${v > 0 ? `${v} clip(s) de video` : ""}${v > 0 && a > 0 ? " y " : ""}` +
+          `${a > 0 ? `${a} de audio` : ""} de OTRAS pistas —su audio vinculado, si esa pista no estaba bloqueada—: ` +
+          `el plano quedó PARTIDO, y ${textoCmdZ(cmdZ)} lo repone${cmdZ > 1 ? "n" : ""}`;
+      } else if (corrieron) {
+        seFueOtro = `. No salió nada, pero la transacción quedó en el historial: ${cmdZ === 1 ? "el primer Cmd+Z no cambia" : `los primeros ${cmdZ} Cmd+Z no cambian`} nada visible`;
+      }
+    }
+    if (!seleccionVaciada) seFueOtro += ". OJO: la selección NO quedó vacía: antes de otra edición, deseleccioná en Premiere";
+    throw new Error(
+      /*
+       * Cuando la transacción committea `true` y la pista no cambia, la causa casi siempre es que la pista está
+       * BLOQUEADA —pasó, y el mensaje viejo escupía once intentos sin nombrarla nunca—, y el 2026-10-20 se midió:
+       * con el candado en V1, la pista no bajó y su audio salió igual.
+       *
+       * No se puede confirmar desde acá: `VideoTrack` expone `EVENT_TRACK_LOCK_CHANGED` pero NO un `isLocked()`.
+       * Así que se nombra la sospecha y se dice que no se puede verificar, en vez de callarla o de afirmarla.
+       */
+      `No se pudo sacar "${encontrado.nombre}" de ${encontrado.pista}: la pista sigue con ` +
+      `${despues} clips` +
+      (intentos.some((i) => /devolvió true/.test(i))
+        ? `. La transacción committeó sin sacarlo: lo más probable es que ${encontrado.pista} esté BLOQUEADA ` +
+          "(el candado en el timeline). La API no expone `isLocked()`, así que desde acá no se puede confirmar."
+        : "") + seFueOtro +
+      `. Intentos: ${intentos.join(" | ")}.`
+    );
+  }
+
   const audioSuelto = totalDespues.audio === totalAntes.audio && totalAntes.audio > 0;
 
   /*
@@ -5164,18 +5392,27 @@ async function borrar(params, ventana) {
       ` · secuencia ${totalAntes.video}v+${totalAntes.audio}a → ${totalDespues.video}v+${totalDespues.audio}a` +
       (ripple ? " (con ripple: se corrió lo de la derecha)" : " (dejando el hueco)") +
       (vinculados.length ? ` · con ${vinculados.length} vinculado(s)` : "") +
+      (quedaron.length
+        ? ` · OJO: ${quedaron.join(", ")} NO ${quedaron.length > 1 ? "bajaron" : "bajó"} lo que se le sacaba —lo más probable, el CANDADO puesto—: salieron ` +
+          `${salieron} de ${1 + vinculados.length} y el plano quedó PARTIDO`
+        : "") +
       (audioSuelto ? " · OJO: no bajó ningún clip de audio, puede haber quedado suelto" : "") +
       (seleccionVaciada ? "" : " · OJO: la selección NO quedó vacía: antes de otra edición, deseleccioná en Premiere") +
-      ` · vía ${via} · se deshace con ${corrieron > 1 ? corrieron + " Cmd+Z, uno por transacción" : "UN Cmd+Z"}`,
+      ` · vía ${via} · se deshace con ${textoCmdZ(cmdZ)}${cmdZ > 1 ? ", uno por transacción —también las que tiraron o no sacaron nada—" : ""}`,
     clip: encontrado.nombre,
     pista: encontrado.pista,
     transacciones: corrieron,
+    /* Los pasos del historial: cada transacción en la que se entró, también la que tiró armando su acción. Las que
+       committearon son `transacciones`; `sacarRangos` suma éstos para decir sus Cmd+Z. */
+    cmdZ: cmdZ,
+    pistasQueNoBajaron: quedaron,
     clipsAntes: antes,
     clipsDespues: despues,
     secuenciaAntes: totalAntes,
     secuenciaDespues: totalDespues,
     ripple: ripple,
-    vinculadosSacados: vinculados.length,
+    /* Los que salieron de verdad, no los que se buscaron: con un candado no son lo mismo. */
+    vinculadosSacados: Math.max(0, salieron - 1),
     seleccionVaciada: seleccionVaciada,
     via: via
   };
@@ -5427,7 +5664,27 @@ async function editar(params) {
   if (!isFinite(tpf) || tpf <= 0) tpf = null;
   const conVideo = /^V/.test(String(encontrado.pista)) || vinculados.hayVideo === true;
   const tocaBordes = ["desde", "entrada", "salida"].some((k) => typeof params[k] === "number");
-  const velocidad = tocaBordes && conVideo ? await velocidadDe(clip) : null;
+  /*
+   * A OTRA VELOCIDAD, LA ENTRADA DE LA API VA EN TIEMPO DE CLIP: fuente ÷ velocidad (medido el 2026-10-20, con el
+   * cuadro y su timecode quemado como verdad de afuera). Un clip al 200% que mostraba el segundo 6 del material
+   * leía `getInPoint` 3, y uno al 50% que mostraba el 2 leía 4; y al revés, poner 5 al 50% mostró el 2,5. Este
+   * verbo recibe `entrada` y `salida` en segundos de FUENTE —es lo que dice su contrato— y se las pasaba crudas:
+   * `entrada: 7` a un clip al 200% fue el 14 del material, su punto de salida, y lo dejó de LARGO CERO sin un aviso.
+   * Se dividen por la velocidad antes de escribir, y lo que se informa se multiplica por ella.
+   */
+  const vel = await velocidadDe(clip);
+  const tocaMaterial = typeof params.entrada === "number" || typeof params.salida === "number";
+  if (tocaMaterial && !(typeof vel === "number" && vel > 0)) {
+    throw new Error(`"${encontrado.nombre}" en ${encontrado.pista}[${encontrado.indice}] va a ` +
+      (vel === null ? "una velocidad que no se pudo leer" : `velocidad ${vel} —invertido—`) +
+      ": la entrada y la salida de la API a esa velocidad no están medidas, y pasarlas sin convertir corre el material " +
+      "o deja el clip de largo cero. NO se tocó nada. Los bordes, a mano en Premiere.");
+  }
+  const factor = typeof vel === "number" && vel > 0 ? vel : 1;
+  const aApi = (segFuente) => Math.round(segFuente * TICKS_POR_SEGUNDO / factor);
+  const enFuente = (t) => (factor === 1 ? t : Object.assign({}, t, {
+    entrada: Number((t.entrada * factor).toFixed(3)), desfase: Number((t.entrada * factor - t.desde).toFixed(3)) }));
+  const velocidad = tocaBordes && conVideo ? vel : null;
   const alCuadro = conVideo && tpf !== null && velocidad === 1;
   const sinCuadro = tocaBordes && conVideo && !alCuadro
     ? (tpf === null ? "no se pudo leer el timebase" : `va a ${velocidad === null ? "una velocidad que no se pudo leer" : velocidad + "x"}`)
@@ -5480,7 +5737,9 @@ async function editar(params) {
    * `desde` y el de la `entrada`, que lo corre igual que arrastrar el borde izquierdo. Medido el 2026-10-18:
    * bajarle la entrada a un clip de 6 a 4,5 lo llevó de 3 a 1,52 s, por encima del de 2 s, y quedaron siete
    * clips fuera de orden con el verbo dando el cambio por bueno; sólo se miraba `desde` (auditoría 2026-10-17,
-   * `orden#3`). A otra velocidad, el delta de material se divide por ella.
+   * `orden#3`). A otra velocidad el arranque se corre lo mismo que la entrada de la API, que ya va en tiempo de
+   * clip: al 50%, de 4 a 5 llevó el clip de 20 a 21 s, y al 200%, de 3 a 7, de 0 a 4 (medido el 2026-10-20). Antes
+   * se dividía por la velocidad, y el chequeo del orden miraba un arranque que no era.
    */
   let dDesde = 0, dEntrada = 0, sDesde = null, iNueva = null;
   if (typeof params.desde === "number") {
@@ -5488,15 +5747,10 @@ async function editar(params) {
     dDesde = sDesde - kAntes.s;
   }
   if (typeof params.entrada === "number") {
-    iNueva = llevar("entrada", params.entrada, Math.round(params.entrada * TICKS_POR_SEGUNDO));
+    iNueva = llevar("entrada", params.entrada, aApi(params.entrada));
     dEntrada = iNueva - kAntes.i;
   }
-  let velOrden = velocidad;
-  if (dEntrada !== 0 && !(isFinite(velOrden) && velOrden > 0)) {
-    try { velOrden = await velocidadDe(clip); } catch (e) { velOrden = 1; }
-  }
-  if (!(isFinite(velOrden) && velOrden > 0)) velOrden = 1;
-  const dInicio = dDesde + Math.round(dEntrada / velOrden);
+  const dInicio = dDesde + dEntrada;
   if (dInicio !== 0) {
     const rotos = await rompeElOrden(sequence, [clip].concat(vinculados), dInicio);
     if (rotos.length) {
@@ -5518,10 +5772,11 @@ async function editar(params) {
   }
   if (typeof params.entrada === "number") {
     aTodos((c, suyo) => c.createSetInPointAction(tickDe(suyo.i + dEntrada)));
-    pedido.push(`entrada a ${seg(iNueva)}s (delta ${seg(dEntrada)}s sobre el material)`);
+    pedido.push(`entrada a ${seg(iNueva * factor)}s de fuente (delta ${seg(dEntrada * factor)}s sobre el material)`);
   }
+  let oNueva = null;
   if (typeof params.salida === "number") {
-    let o = Math.round(params.salida * TICKS_POR_SEGUNDO);
+    let o = aApi(params.salida);
     if (alCuadro) {
       /* Lo que tiene que caer en un cuadro es el FIN en la secuencia, no el punto de fuente: a 1x el fin es
          desde + (salida − entrada). Con `entrada` en la misma llamada el in-point mueve el clip, así que
@@ -5533,8 +5788,26 @@ async function editar(params) {
       o = q;
     }
     const dSalida = o - kAntes.i;
+    oNueva = o;
     aTodos((c, suyo) => c.createSetOutPointAction(tickDe(suyo.i + dSalida)));
-    pedido.push(`salida a ${seg(o)}s (${seg(dSalida)}s después de su entrada)`);
+    pedido.push(`salida a ${seg(o * factor)}s de fuente (${seg(dSalida * factor)}s de material después de su entrada)`);
+  }
+  /*
+   * NI LARGO CERO NI NEGATIVO (2026-10-20). Premiere acepta un clip de largo cero —no se ve en el timeline, y
+   * `revisar` lo encuentra después—, y una entrada pasada la salida lo dejaba así sin aviso: fue lo que hizo la
+   * entrada de fuente pasada cruda a un clip al 200%. En unidades de la API la salida es la entrada más la
+   * duración en la secuencia, a cualquier velocidad, y el borde que no se pide queda donde está.
+   */
+  if (tocaMaterial) {
+    const inFinal = iNueva !== null ? iNueva : kAntes.i;
+    const outFinal = oNueva !== null ? oNueva : kAntes.i + (kAntes.e - kAntes.s);
+    const largo = outFinal - inFinal;
+    if (largo < (tpf || 1)) {
+      throw new Error(`"${encontrado.nombre}" en ${encontrado.pista}[${encontrado.indice}]: con entrada ` +
+        `${seg(inFinal * factor)}s y salida ${seg(outFinal * factor)}s de fuente` + (factor !== 1 ? ` (va a ${factor}x)` : "") +
+        ` quedaría de ${largo <= 0 ? "largo CERO o negativo" : "menos de un cuadro"}: Premiere lo acepta y el clip deja de verse. ` +
+        `Hoy tiene entrada ${seg(kAntes.i * factor)}s y salida ${seg((kAntes.i + kAntes.e - kAntes.s) * factor)}s. NO se tocó nada.`);
+    }
   }
   if (typeof params.apagado === "boolean") {
     acciones.push(() => clip.createSetDisabledAction(params.apagado));
@@ -5542,10 +5815,11 @@ async function editar(params) {
   }
 
   if (!acciones.length) {
+    const a = enFuente(antes);
     return {
-      resumen: `"${encontrado.nombre}" en ${encontrado.pista}: ${antes.desde}–${antes.hasta}s, ` +
-               `entrada ${antes.entrada}s, desfase ${antes.desfase}s. No se pidió ningún cambio.`,
-      clip: encontrado.nombre, antes: antes, despues: antes, cambio: false
+      resumen: `"${encontrado.nombre}" en ${encontrado.pista}: ${a.desde}–${a.hasta}s, ` +
+               `entrada ${a.entrada}s, desfase ${a.desfase}s. No se pidió ningún cambio.`,
+      clip: encontrado.nombre, antes: a, despues: a, cambio: false
     };
   }
 
@@ -5566,8 +5840,9 @@ async function editar(params) {
     excepcion = e && e.message ? e.message : String(e);
   }
 
-  // La prueba: releer. Una transacción puede "salir bien" sin mover nada.
-  const despues = await tiemposDe(clip);
+  // La prueba: releer. Una transacción puede "salir bien" sin mover nada. Y en FUENTE, como se pidió.
+  const despues = enFuente(await tiemposDe(clip));
+  const antesF = enFuente(antes);
   /* EN TICKS (2026-10-12, un reporte de uso): con los segundos redondeados, una salida de 14,7334 llevada a
      14,733333 —0,07 ms— contestó «NO CAMBIÓ NADA», y la transacción había corrido: el export siguiente
      salió distinto. */
@@ -5608,8 +5883,9 @@ async function editar(params) {
   return {
     resumen:
       `"${encontrado.nombre}" en ${encontrado.pista}: ` +
-      `${antes.desde}–${antes.hasta}s (entrada ${antes.entrada}s) → ` +
+      `${antesF.desde}–${antesF.hasta}s (entrada ${antesF.entrada}s) → ` +
       `${despues.desde}–${despues.hasta}s (entrada ${despues.entrada}s, desfase ${despues.desfase}s)` +
+      (factor !== 1 ? ` · a ${factor}x: entradas en segundos de FUENTE` : "") +
       (cDespues ? ` · cuadros ${cDespues.desde}–${cDespues.hasta} (${cDespues.dura})` : "") +
       (llevados.length ? ` · al cuadro más cercano: ${llevados.join(", ")}` : "") +
       (sinCuadro ? ` · OJO: los bordes van sin llevar al cuadro: ${sinCuadro}` : "") +
@@ -5625,8 +5901,9 @@ async function editar(params) {
     clip: encontrado.nombre,
     pista: encontrado.pista,
     pedido: pedido,
-    antes: antes,
+    antes: antesF,
     despues: despues,
+    velocidad: vel,
     cuadros: { antes: cAntes, despues: cDespues },
     alCuadro: llevados,
     entreCuadros: entreCuadros,
@@ -5762,8 +6039,7 @@ async function estado() {
       : (project.name ? String(project.name) : "sin guardar");
     return {
       resumen: `[${nom}] SIN SECUENCIA ACTIVA · el proyecto está abierto y no hay ninguna secuencia ` +
-               "puesta al frente. Los verbos que no la necesitan: secuencias, medios, guardar, " +
-               "importar, api, armarSecuencia, abrirProyecto, crearProyecto.",
+               "puesta al frente. Los verbos que no la necesitan: " + VERBOS_SIN_SECUENCIA + ".",
       info: { secuencia: null, proyecto: project.path || null, proyectoNombre: nom, haySecuencia: false }
     };
   }
@@ -7790,7 +8066,13 @@ async function sacarRangos(params) {
   /* Los Cmd+Z son la suma de lo que corrió en cada `cortar` y cada `borrar`: con 7 rangos, ~77. Sin
      decirlo, el editor no sabe hasta dónde deshacer (auditoría 2026-10-17, `tandas#11`). */
   let transacciones = 0;
-  const sumar = (res) => { if (res && isFinite(Number(res.transacciones))) transacciones += Number(res.transacciones); return res; };
+  /* Los pasos del historial, no las transacciones, cuando el verbo los distingue: en `borrar` también deja su paso la
+     transacción que tira armando la acción (2026-10-20). */
+  const sumar = (res) => {
+    const n = res && isFinite(Number(res.cmdZ)) ? Number(res.cmdZ) : res ? Number(res.transacciones) : NaN;
+    if (isFinite(n)) transacciones += n;
+    return res;
+  };
 
   for (let i = 0; i < rangos.length; i++) {
     const r = rangos[i];
@@ -9015,17 +9297,19 @@ async function aplicarEscalas(params) {
    * TRANSACCION, no por clip. Con una por clip, 94 clips son 94 esperas: ~47s de
    * puro dormir. Agrupando 10, son 10.
    *
-   * El default es 1 A PROPOSITO: no cambia el comportamiento de nada de lo que ya
-   * andaba, y agrupar se pide.
+   * El default fue 1 hasta el 2026-10-24, "para no cambiar lo que ya andaba", y desde ese día es
+   * `TOPE_LOTE`, por decisión del editor: todos los scripts que lo usan ya pedían 8 o 10 —los de las
+   * tandas de un podcast, 10—, y 10 es lo medido a escala (53 clips, 6 transacciones, 53 de
+   * 53 releídos). El 1 sólo le quedaba a una llamada suelta que no lo pidiera.
    *
    * Y va en la direccion CORRECTA respecto del crash: lo que tira Premiere es una
-   * RAFAGA de transacciones, y esto tiene menos transacciones, no mas. Una
-   * transaccion grande ademas se deshace con UN Cmd+Z en vez de 94.
+   * RAFAGA de transacciones, y esto tiene menos transacciones, no mas.
    *
    * El costo es que la transaccion es TODO O NADA: si no corre, fallan los N del
-   * lote juntos, y el informe los nombra a los N.
+   * lote juntos, y el informe los nombra a los N. Y un Cmd+Z deshace el lote ENTERO:
+   * el resumen dice cuántos hacen falta, contando las transacciones en las que se ENTRÓ.
    */
-  const porTx = Math.max(1, Math.min(TOPE_LOTE, typeof params.porTransaccion === "number" ? params.porTransaccion : 1));
+  const porTx = Math.max(1, Math.min(TOPE_LOTE, typeof params.porTransaccion === "number" ? params.porTransaccion : TOPE_LOTE));
 
   const hechos = [], fallidos = [], saltados = [], animados = [];
   let lote = [], transacciones = 0;
@@ -9033,16 +9317,19 @@ async function aplicarEscalas(params) {
   /* Manda el lote en UNA transaccion y lo vacia. Los keyframes ya se crearon. */
   const soltarLote = () => {
     if (!lote.length) return;
-    let corrio = false;
+    let corrio = false, entro = false;
     project.lockedAccess(() => {
       corrio = transaccion(project, (a) => {
+        entro = true;
         for (const w of lote) {
           a.addAction(w.pEsc.createSetValueAction(w.kEsc));
           if (w.kPos) a.addAction(w.pPos.createSetValueAction(w.kPos));
         }
       }, lote.length === 1 ? "escala y posición" : `escala y posición (${lote.length} clips)`);
     });
-    transacciones++;
+    /* Cada transacción en la que se ENTRÓ es un Cmd+Z, también la que tiró armando sus acciones (medido el
+       2026-10-20 con `borrar`); una que no llegó a entrar no deja nada que deshacer. */
+    if (entro) transacciones++;
     if (corrio) sumarEscrituras(lote.reduce((n, w) => n + (w.kPos ? 2 : 1), 0) - 1);
     for (const w of lote) {
       if (!corrio) { fallidos.push(`[${w.i}] en ${w.desde}s: la transacción del lote NO corrió`); continue; }
@@ -9117,6 +9404,8 @@ async function aplicarEscalas(params) {
           (animados.length > 3 ? ` (y ${animados.length - 3} más)` : "")
         : "") +
       (fallidos.length ? ` · FALLARON ${fallidos.length}: ${fallidos.slice(0, 3).join(" | ")}` : "") +
+      (transacciones ? ` · ${transacciones === 1 ? "UN Cmd+Z lo deshace" : `${transacciones} Cmd+Z lo deshacen`}` +
+        (porTx > 1 && hechos.length > 1 ? `, cada uno un lote entero de hasta ${porTx} clips` : "") : "") +
       (hasta < items.length ? ` · FALTAN desde el índice ${hasta}` : " · terminado"),
     aplicados: hechos.length,
     animados: animados,
@@ -10675,17 +10964,20 @@ async function revisar(params) {
          * de un curso, uno llegaba a 434,88 s del medio y el siguiente arrancaba en 432,00, y la frase sonaba
          * dos veces con `revisar` diciendo "sin solapes": sólo miraba el TIMELINE.
          *
-         * Se mide SÓLO a 1x, con lo que ya se leyó —la salida de fuente es la entrada más la duración—, y
-         * no es un atajo: a otra velocidad no está medido si `getInPoint` es punto de fuente o va escalado
-         * (`relojDelClip` y `radiografia` suponen cosas distintas). Esos pares se cuentan como sin medir, para
-         * que un "sin problemas" no los incluya. Y el medio se confirma por la RUTA, que además deja afuera lo
-         * que no tiene tiempo: dos cámaras que numeran igual dejan dos medios con el mismo nombre, y dos
-         * pedazos de una misma foto, un título o una capa de ajuste arrancan en el mismo punto sin repetir nada.
+         * Se mide en FUENTE, con lo que ya se leyó. A otra velocidad también desde el 2026-10-20: `getInPoint` va
+         * en tiempo de clip —fuente ÷ velocidad, medido con el cuadro al 200% y al 50%, y es lo que ya suponía
+         * `relojDelClip`—, así que el tramo de fuente es la entrada y la entrada más la duración, por la velocidad
+         * de cada uno. Invertido o sin leer, se cuenta como sin medir, para que un "sin problemas" no lo incluya.
+         * Y el medio se confirma por la RUTA, que además deja afuera lo que no tiene tiempo: dos cámaras que
+         * numeran igual dejan dos medios con el mismo nombre, y dos pedazos de una misma foto, un título o una
+         * capa de ajuste arrancan en el mismo punto sin repetir nada.
          */
         if (d >= -1 && d <= (tpf ? topeFrames * tpf : 1) && a.nombre === b.nombre && a.entrada !== null && b.entrada !== null) {
-          if ((await velocidadEn(i - 1)) !== 1 || (await velocidadEn(i)) !== 1) info.repitenSinMedir++;
+          const va = await velocidadEn(i - 1), vb = await velocidadEn(i);
+          if (!(typeof va === "number" && va > 0 && typeof vb === "number" && vb > 0)) info.repitenSinMedir++;
           else {
-            const pisa = Math.min(a.entrada + (a.fin - a.ini), b.entrada + (b.fin - b.ini)) - Math.max(a.entrada, b.entrada);
+            const pisa = Math.min((a.entrada + (a.fin - a.ini)) * va, (b.entrada + (b.fin - b.ini)) * vb) -
+              Math.max(a.entrada * va, b.entrada * vb);
             const ma = pisa > umbralRepite ? await medioDe(i - 1) : null, mb = ma ? await medioDe(i) : null;
             if (ma && mb && ma.ruta && ma.ruta === mb.ruta && !ES_IMAGEN_FIJA.test(ma.ruta)) {
               info.repiten.push({ en: mmss(b.ini), segundos: enSeg(b.ini), indices: [a.indice, b.indice],
@@ -10703,7 +10995,10 @@ async function revisar(params) {
           // o sea un corte que no corta nada. Es lo que deja una reparación de
           // audio, y se limpia con `unirAudio`.
           a.nombre === b.nombre && a.entrada !== null && b.entrada !== null &&
-          Math.abs(a.entrada + (a.fin - a.ini) - b.entrada) < 1
+          Math.abs(a.entrada + (a.fin - a.ini) - b.entrada) < 1 &&
+          /* A la MISMA velocidad: las entradas van en tiempo de clip, que sólo es comparable entre dos que corren
+             igual, y un corte donde cambia la velocidad es deliberado aunque el material siga (2026-10-20). */
+          (await velocidadEn(i - 1)) === (await velocidadEn(i))
         ) {
           /*
            * Pero en VIDEO un corte así puede ser deliberado: la alternancia de
@@ -10793,7 +11088,7 @@ async function revisar(params) {
       ` · ${pistas.length} pista(s) con contenido, ${pistas.reduce((n, p) => n + p.clips, 0)} clips` +
       (huecosGrandes ? ` · ${huecosGrandes} hueco(s) grande(s), probablemente a propósito` : "") +
       (deliberados ? ` · ${deliberados} corte(s) de video continuos pero con distinto Motion: son deliberados, NO unir` : "") +
-      (repitenSinMedir ? ` · ${repitenSinMedir} par(es) de vecinos con el mismo nombre a otra velocidad que 1x (o sin poder leerla): ` +
+      (repitenSinMedir ? ` · ${repitenSinMedir} par(es) de vecinos con el mismo nombre INVERTIDOS o sin poder leer su velocidad: ` +
         "si repiten material NO se midió" : "") +
       (tpf === null ? " · OJO: no se pudo leer el timebase, los huecos van sin medir en frames" : "") +
       (detalle.length ? `\n  ${detalle.join("\n  ")}` : ""),
@@ -13114,13 +13409,16 @@ async function radiografia(params) {
     const it = items[i];
     const t = await tiemposDe(it);
     const vel = await velocidadDe(it);
+    /* `entrada` y `salida` son puntos DE FUENTE, que es lo que piden `editar` y el rearmado. A otra velocidad la API
+     * da la entrada en tiempo de clip —fuente ÷ velocidad, medido el 2026-10-20—: se multiplica, y la salida es la
+     * entrada más la duración, todo por la velocidad. Esto suponía la entrada ya en fuente, y un clip al 200% que
+     * mostraba del 6 al 14 del material salía de 3 a 11. Invertido o sin leer, queda crudo: no está medido. */
+    const factor = typeof vel === "number" && vel > 0 ? vel : 1;
     const fila = {
       pista: etiqueta, indice: i, nombre: String(await it.getName()),
       desde: t.desde, hasta: t.hasta, dura: Number((t.hasta - t.desde).toFixed(3)),
-      entrada: t.entrada,
-      /* `salida` es el punto DE FUENTE donde termina, que es lo que pide `editar salida`.
-       * Se calcula con la velocidad porque a 2x el clip consume el doble de material. */
-      salida: Number((t.entrada + (t.hasta - t.desde) * (vel || 1)).toFixed(3)),
+      entrada: Number((t.entrada * factor).toFixed(3)),
+      salida: Number(((t.entrada + (t.hasta - t.desde)) * factor).toFixed(3)),
       velocidad: vel, desactivado: null, esCapaDeAjuste: await esCapaDeAjuste(it),
       motion: null, efectos: [], tocado: [], intacto: true
     };
@@ -13685,6 +13983,11 @@ async function transicion(params) {
    */
   const handleDe = async (c) => {
     if (!c) return null;
+    /* A OTRA VELOCIDAD NO SE CALCULA (2026-10-20): la entrada de la API va en tiempo de clip —fuente ÷ velocidad,
+       medido— y restarle el arranque del medio, que es fuente, mezclaba unidades. La salida a otra velocidad no está
+       medida, así que se dice sin medir en vez de dar un handle inventado. */
+    const v = await velocidadDe(c);
+    if (v !== 1) return { error: v === null ? "velocidad sin leer" : `va a ${v}x: el handle a otra velocidad no está medido` };
     try {
       const inP = aSegundos(await c.getInPoint());
       const outP = aSegundos(await c.getOutPoint());
@@ -14375,7 +14678,7 @@ async function ejecutar(cmd, params) {
   const CLAVES_DE_OBJETO = {
     armarSecuencia: {
       fragmentos: ["desde", "hasta", "medio"],
-      capas: ["apagado", "desde", "dura", "en", "medio", "nombre", "pista", "pistaAudio"],
+      capas: ["apagado", "desde", "dura", "en", "medio", "nombre", "pista", "pistaAudio", "sinAudio"],
     },
     keyframe: { lista: ["db", "segundos", "valor", "x", "y"] },
     aplicarEscalas: { plan: ["desde", "escala", "x", "y"] },

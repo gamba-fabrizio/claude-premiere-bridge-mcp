@@ -548,6 +548,32 @@ const PLIST_CMDQ = `<?xml version="1.0" encoding="UTF-8"?>
 </array>
 </plist>
 `;
+/*
+ * LAS VENTANAS DE PREMIERE SIN TRAERLO AL FRENTE (2026-10-24). `ventanaAlFrente` necesita a Premiere adelante, que es
+ * justo lo que falta cuando el macro no lo pudo activar. `CGWindowListCopyWindowInfo` lista las ventanas en pantalla
+ * de cualquier app, por JXA, en ~0,2 s. Medido el 2026-10-22: el modal «File Import Failure» es una ventana APARTE,
+ * en la capa 8, y la del proyecto lleva la ruta del .prproj. [{titulo, capa}], o null si no se pudo mirar.
+ */
+function ventanasDePremiere() {
+  const jxa = "ObjC.import('CoreGraphics');" +
+    "JSON.stringify(ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0)))" +
+    ".filter(w => /^Adobe Premiere/.test(w.kCGWindowOwnerName || '')).map(w => ({ titulo: w.kCGWindowName || '', capa: w.kCGWindowLayer })))";
+  try {
+    return JSON.parse(require("child_process").execFileSync("osascript", ["-l", "JavaScript", "-e", jxa],
+      { encoding: "utf8", timeout: 8000 }));
+  } catch (e) { return null; }
+}
+/* Sólo con certeza: se pudieron leer, hay alguna, y TODAS son el proyecto. Un cartel, o un título que no se pudo
+   leer, es "no sé", y eso deja la traba de siempre. */
+function sinCartelVisible(ventanas) {
+  return Array.isArray(ventanas) && ventanas.length > 0 && ventanas.every((w) => /\.prproj/i.test(String(w.titulo || "")));
+}
+/* El macro dice que corrió y Premiere sigue vivo con OTRA app al frente: el Cmd+Q no le llegó. Si no se pudo mirar
+   quién está al frente, no se sabe, y se espera como siempre. */
+function macroNoLoActivo(vivo, frente) {
+  return vivo === true && typeof frente === "string" && frente !== "" && !/Premiere/i.test(frente);
+}
+
 async function cerrarConGuarda() {
   try { require("child_process").execFileSync("open", ["-a", APP_PREMIERE], { timeout: 15000 }); }
   catch (e) { return { enviado: false, detalle: "open -a no pudo activar Premiere: " + (e && e.message ? e.message : e) }; }
@@ -682,6 +708,34 @@ async function reiniciarPremiere() {
     viaGuarda = await cerrarConGuarda();
     console.log(viaGuarda.enviado ? "  Cmd+Q enviado a Premiere" : `  NO se envió el Cmd+Q: ${viaGuarda.detalle}`);
   }
+  /*
+   * EL MACRO "CORRIÓ" Y EL Cmd+Q NO LLEGÓ (2026-10-22, un reporte de uso). Con WhatsApp al frente, KM ejecutó el macro sin
+   * anotar ninguna falla, Premiere no se enteró, y esto esperó 180 s y TRABÓ el transporte. El macro activa Premiere
+   * y le manda el Cmd+Q: si la activación no ocurre —esa app al frente, quizás en pantalla completa—, la tecla no
+   * llega y KM no lo registra. A los ~5 s, vivo y con OTRA app al frente es eso, y se prueba la vía con guarda.
+   * Si tampoco ésa pudo, Premiere no recibió nada: con sólo la ventana del proyecto en pantalla, está guardado y
+   * sano, y trabar el transporte sólo obligaba a `--destrabar`.
+   */
+  if (!falloMacro) {
+    await dormir(4000);
+    const frente = alFrente();
+    if (macroNoLoActivo(premiereAbierto(), frente)) {
+      console.log(`  Premiere sigue abierto y al frente quedó "${frente}": el macro no lo activó, y el Cmd+Q no le llegó.`);
+      console.log("  pruebo la otra vía: LaunchServices activa Premiere y el Cmd+Q va con guarda…");
+      viaGuarda = await cerrarConGuarda();
+      console.log(viaGuarda.enviado ? "  Cmd+Q enviado a Premiere" : `  NO se envió el Cmd+Q: ${viaGuarda.detalle}`);
+      if (!viaGuarda.enviado) {
+        const vs = ventanasDePremiere();
+        if (sinCartelVisible(vs)) {
+          console.error("  Premiere NO recibió ningún Cmd+Q, está guardado y sin carteles: NO trabo el transporte.");
+          console.error(`  Traé Premiere adelante —si "${frente}" está en pantalla completa, salí de ella— y volvé a correr esto.`);
+          return false;
+        }
+        console.error("  y en pantalla hay ventanas de Premiere que no son el proyecto, o no se pudieron leer:" +
+          (Array.isArray(vs) ? " " + vs.map((w) => `"${w.titulo}"`).join(", ") : "") + ". Espero como siempre.");
+      }
+    }
+  }
   let cerro = false;
   let mtimeVisto = haceCuantoCambio(ruta);
   for (let i = 0; i < TOPE_CIERRE_S; i++) {
@@ -727,7 +781,14 @@ async function reiniciarPremiere() {
      * Es gratis aca: el macro ya activo Premiere para mandarle el Cmd+Q, y un modal se queda
      * con el foco, asi que la condicion que el lector necesita esta puesta.
      */
-    const v = ventanaDePremiere();
+    let v = ventanaDePremiere();
+    /* Sin Premiere al frente no se podía mirar; la lista de ventanas sí, y un cartel es una ventana que no es el
+       proyecto (2026-10-24). Si no hay ninguna así, sigue siendo "no pude mirar": no se afirma que no hay cartel. */
+    if (!v.miro) {
+      const vs = ventanasDePremiere();
+      const cartel = Array.isArray(vs) ? vs.find((w) => w.titulo && !/\.prproj/i.test(w.titulo)) : null;
+      if (cartel) v = { miro: true, esProyecto: false, titulo: cartel.titulo };
+    }
     if (v.miro && !v.esProyecto) {
       console.error(`  HAY UN CARTEL: al frente de Premiere esta "${v.titulo}", que no es su proyecto.`);
       console.error("  Eso es lo que bloquea el Cmd+Q. Resolvelo en pantalla —puede estar en OTRO MONITOR,");

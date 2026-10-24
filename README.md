@@ -149,7 +149,7 @@ ln -s "/RUTA/A/TU/COPIA/premiere-bridge/skills/premiere" ~/.claude/skills/premie
 | `premiere_desmarcar` | Saca marcadores por nombre, o todos |
 | `premiere_editar_marcador` | Mueve un marcador, le cambia el color o el rango, sin rehacerlo |
 | `premiere_transcripcion` | El texto del clip con tiempos de secuencia, o dónde dice algo |
-| `premiere_armar_secuencia` | Crea una secuencia y le pega fragmentos de un medio; las `capas` con `apagado` quedan sin verse ni sonar, con TODO su audio |
+| `premiere_armar_secuencia` | Crea una secuencia y le pega fragmentos de un medio; las `capas` con `apagado` quedan sin verse ni sonar, con TODO su audio, y con `sinAudio` ponen sólo la imagen |
 | `premiere_borrar_secuencia` | Saca una secuencia del proyecto: el nombre exacto gana, y si no hay, una PARCIAL única —la borra—; si coinciden varias rebota, y dos homónimas se eligen con `duracion` |
 | `premiere_renombrar_secuencia` | Renombra una secuencia en el lugar, elegida como en `borrar_secuencia`; rebota si el nombre nuevo ya existe, y relee por guid |
 | `premiere_cortes_de_escena` | Detecta cambios de plano en un clip; `marcar` no toca el timeline, `cortar` lo parte, `subclips` los crea |
@@ -269,7 +269,9 @@ node herramientas/audio.js material.mp4 --motor whisper \
 
 Sin `--destino` escribe al lado del material, y en una tanda de 147 clips eso son
 cientos de archivos nuevos entre los crudos. Los clips **sin palabras** solo
-dejan el `.audio.json`: el `.srt` y el `.premiere.json` estarían vacíos.
+dejan el `.audio.json`: el `.srt` y el `.premiere.json` estarían vacíos. Un medio **sin ningún
+stream de audio** —un video de WhatsApp, a veces— sale con 0 y deja el `.audio.json` vacío, con
+`sinAudio: true`, sin tocar Premiere.
 
 Y **no pisa la transcripción de otro motor**: si en el destino ya hay una de otro, rebota
 antes de transcribir —cuando pisar todavía no costó créditos ni minutos—, y `--pisar` la

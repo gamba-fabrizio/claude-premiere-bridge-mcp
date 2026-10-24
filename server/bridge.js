@@ -134,6 +134,60 @@ const premiereAbierto = () => procesoAbierto(/\/Contents\/MacOS\/Adobe Premiere 
  * El chequeo que ya existia en `index.js` mira el disco DESPUES de crear: informa el
  * daño, no lo evita.
  */
+/* Cuanto tiene que estar quieto un archivo para importarlo (ver `importar`, abajo). */
+const MS_ESCRIBIENDO = 5000;
+
+/*
+ * Que procesos tienen estos archivos abiertos PARA ESCRIBIR, con `lsof` en UNA llamada: [[ruta, quien]].
+ * `lsof` sale con 1 cuando ninguno esta abierto, y eso es "nadie". Si no se pudo correr —no esta, vencio—
+ * devuelve vacio: queda la fecha, y rebotar un import por no poder mirar seria rechazar uso correcto.
+ */
+function escritoresDe(rutas, lsof = require("fs").existsSync("/usr/sbin/lsof") ? "/usr/sbin/lsof" : "lsof") {
+  /* `lsof` se puede pasar para probar la rama de "no se pudo correr". Y `fs` aca es el de promesas. */
+  if (!rutas.length) return [];
+  const { execFileSync } = require("child_process");
+  let salida = "";
+  try {
+    salida = execFileSync(lsof, ["-F", "pcan", "--", ...rutas],
+      { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] });
+  } catch (e) {
+    if (e && e.status === 1) salida = String(e.stdout || "");
+    else return [];
+  }
+  const out = [];
+  let pid = "?", cmd = "?", acceso = "";
+  for (const l of salida.split("\n")) {
+    const k = l[0], v = l.slice(1);
+    if (k === "p") { pid = v; cmd = "?"; }
+    else if (k === "c") cmd = v;
+    else if (k === "a") acceso = v;
+    else if (k === "n" && /[wu]/.test(acceso)) out.push([v, `"${cmd}" (pid ${pid})`]);
+  }
+  return out;
+}
+
+/*
+ * Si ffprobe NO PUEDE ABRIR el archivo, el motivo; null si abre o si no se pudo mirar —no esta, vencio—,
+ * porque no poder mirar no autoriza a rechazar el import. Solo en los contenedores donde ffprobe es
+ * confiable y esta MEDIDO: lee el contenedor y no el codec, asi que un .mov sano con un codec que no conoce
+ * abre igual, y sobre 313 medios reales de una carpeta de trabajo (2026-10-22) no rechazo ninguno. .mxf queda afuera: no
+ * habia uno solo en los discos para medirlo. Fuera de la lista —MXF, BRAW, R3D, imagenes, proyectos— no se
+ * mira. Se busca primero el de Homebrew: el servidor MCP no siempre arranca con su carpeta en el PATH.
+ */
+const EXT_CON_FFPROBE = /\.(mov|mp4|wav)$/i;
+function noSeAbre(ruta, ffprobe = ["/usr/local/bin/ffprobe", "/opt/homebrew/bin/ffprobe"].find((r) => require("fs").existsSync(r)) || "ffprobe") {
+  const { execFileSync } = require("child_process");
+  try {
+    execFileSync(ffprobe, ["-v", "error", "-show_entries", "format=format_name", "-of", "csv=p=0", ruta],
+      { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "pipe"] });
+    return null;
+  } catch (e) {
+    if (!e || typeof e.status !== "number") return null;
+    const motivo = String(e.stderr || "").split("\n")
+      .map((l) => l.replace(/^\[[^\]]*\]\s*/, "").split(ruta + ":").join("").trim()).filter(Boolean);
+    return motivo.length ? motivo.join(" · ") : `ffprobe salio con ${e.status}`;
+  }
+}
 const PREVUELO = {
   /*
    * El panel NO VE EL DISCO. Relinkear a una ruta que no existe deja el medio apuntando a la
@@ -170,6 +224,71 @@ const PREVUELO = {
         "elegi otro nombre o borralo vos, para que no haya dudas de cual se piso.";
     }
     return null;
+  },
+  /*
+   * EXPORTAR A UNA CARPETA QUE NO EXISTE (2026-10-19 y 21, un reporte de uso; medido el 2026-10-22). Con `ya`,
+   * Premiere contesta "Invalid parameter" y nada mas, y se leyo como un problema de la «ñ» del nombre. Con
+   * `ame` es peor: el verbo dice "encolado", la cola arranca y para en un segundo, y el error queda solo en
+   * el log de Media Encoder ("The output destination could not be found"). Ninguno de los dos crea la
+   * carpeta. Se rebota y no se crea: una ruta mal tipeada dejaria una carpeta suelta donde nadie la busca.
+   */
+  exportar: (p) => {
+    if (!p || typeof p.salida !== "string" || !p.salida.trim()) return null;   /* lo rebota el verbo */
+    const fsx = require("fs"), px = require("path");
+    const carpeta = px.dirname(p.salida);
+    let st = null;
+    try { st = fsx.statSync(carpeta); } catch (e) { st = null; }
+    if (!st || !st.isDirectory()) {
+      return `"exportar": la carpeta de la salida "${carpeta}" NO EXISTE, y ni Premiere ni Media Encoder la ` +
+        "crean: con `ya` contesta \"Invalid parameter\" sin decir por que, y con `ame` dice \"encolado\" y no " +
+        "escribe nada. Creala primero. NO se ejecuto nada.";
+    }
+    return null;
+  },
+  /*
+   * UN ARCHIVO QUE SE ESTA ESCRIBIENDO NO SE IMPORTA (2026-10-19, un reporte de uso). Un .mov que ffmpeg
+   * todavia escribia saco el modal «File Import Failure»: el panel quedo trabado detras, la llamada
+   * vencio a los 300 s y las dos siguientes a los 30.
+   *
+   * La FECHA de modificacion SOLA NO ALCANZA (medido el 2026-10-22): ffmpeg escribe en bloques de 256 KB,
+   * y con poco bitrate paso 7 s sin tocar el archivo, asi que a los 5 s de quieto un .mov a medio escribir
+   * pasaba. Lo que manda es si algun proceso lo tiene ABIERTO PARA ESCRIBIR (`lsof`, ~0,1 s); la fecha
+   * queda para el que cierra y reabre entre escrituras. Sin esperas: el prevuelo es sincronico y una
+   * espera aca frena todo comando. El que no existe lo cuenta el verbo.
+   *
+   * Y uno ROTO ya cerrado saca el MISMO modal, aunque se lo pida sin dialogos: medido el 2026-10-22 con un
+   * .mov sin moov, la llamada espero 152 s hasta un clic en OK. Ese se mira con ffprobe (`noSeAbre`).
+   */
+  importar: (p) => {
+    const fsx = require("fs");
+    const rutas = typeof p.archivos === "string" ? [p.archivos] : (Array.isArray(p.archivos) ? p.archivos : []);
+    const frescos = [], existen = [];
+    for (const r of rutas) {
+      let st = null; try { st = fsx.statSync(String(r)); } catch (e) { st = null; }
+      if (!st || !st.isFile()) continue;
+      existen.push(String(r));
+      if (Date.now() - st.mtimeMs < MS_ESCRIBIENDO) {
+        frescos.push(`"${r}" (cambio hace ${Math.max(0, (Date.now() - st.mtimeMs) / 1000).toFixed(1)} s)`);
+      }
+    }
+    /* `lsof` da la ruta como la ve el sistema, que puede venir en otra normalizacion: se compara en NFC */
+    for (const [ruta, quien] of escritoresDe(existen)) {
+      const ya = frescos.some((f) => f.normalize("NFC").startsWith(`"${ruta.normalize("NFC")}"`));
+      if (!ya) frescos.push(`"${ruta}" (lo tiene abierto para escribir ${quien})`);
+    }
+    if (frescos.length) {
+      return `"importar": ${frescos.length === 1 ? "este archivo puede" : "estos archivos pueden"} estar ` +
+        `escribiendose —cambio en los ultimos ${MS_ESCRIBIENDO / 1000} s, o un proceso lo tiene abierto para escribir—: ` +
+        `${frescos.join(", ")}. ` +
+        "Importar uno a medias saca un cartel modal en Premiere que traba el panel. Espera a que termine y " +
+        "pedilo de nuevo. NO se ejecuto nada.";
+    }
+    const rotos = existen.filter((r) => EXT_CON_FFPROBE.test(r)).map((r) => [r, noSeAbre(r)]).filter(([, m]) => m);
+    if (!rotos.length) return null;
+    return `"importar": ffprobe no puede abrir ${rotos.length === 1 ? "este archivo" : "estos archivos"}: ` +
+      rotos.map(([r, m]) => `"${r}" (${m})`).join(", ") + ". Importar uno asi saca el modal «File Import Failure», " +
+      "que traba el panel hasta que alguien aprieta OK: pedirlo sin dialogos no lo apaga. Si Premiere si lo abre, " +
+      "importalo a mano. NO se ejecuto nada.";
   },
 };
 
@@ -339,4 +458,4 @@ async function enviar(cmd, params = {}, msTimeout = MS_TIMEOUT) {
   );
 }
 
-module.exports = { enviar, edadDelLatido, CARPETA, ponerTraba, sacarTraba, leerTraba, ameAbierto, premiereAbierto };
+module.exports = { enviar, edadDelLatido, CARPETA, PREVUELO, escritoresDe, noSeAbre, ponerTraba, sacarTraba, leerTraba, ameAbierto, premiereAbierto };

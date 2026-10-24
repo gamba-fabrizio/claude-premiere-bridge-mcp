@@ -48,8 +48,11 @@ en `CLAUDE.md`.
   blanco. Una opacidad se mide en el ALFA del PNG: la luminancia no la ve.
 - **`revisar` después de cada tanda**: ceros, solapes, huecos en cuadros, juntas, pistas con la
   salida apagada, y vecinos del mismo medio que REPITEN MATERIAL —se pisan en la fuente y ese tramo
-  sale dos veces, con el timeline limpio—. Esto último sólo a 1x: los pares a otra velocidad los cuenta
-  como sin medir. Verificar cada paso no verifica la tanda.
+  sale dos veces, con el timeline limpio—, también a otra velocidad: los invertidos los cuenta como sin
+  medir. Verificar cada paso no verifica la tanda.
+- **Una pista MUTEADA es lo que había AL LEER**, y el editor la cambia con la M: antes de decírselo, o de
+  exportar contándolo, releé. El 2026-10-22 un aviso de siete minutos atrás se repitió como actual, el
+  editor ya la había desmuteado, y se anotó como bug algo que `isMuted` leía bien.
 - **Un clip FUERA DE ORDEN en la lista de su pista no se dibuja ni sale en el export**, aunque `clips`
   lo lea en su lugar. Lo dejaba `cortar` hasta el 2026-09-30, y lo deja cualquier movimiento por API que
   pasa por encima de un vecino —`editar` ahora lo rebota—. `revisar` lo marca `FUERA DE ORDEN`. Se
@@ -78,7 +81,9 @@ en `CLAUDE.md`.
   MUEVE el clip**: la entrada en una llamada y `desde` en otra; si con eso pasa a un vecino, rebota como
   `desde`, porque quedaría fuera de orden. En un clip con video, a 1x, `desde`,
   `entrada` y `salida` van al cuadro MÁS CERCANO —de `salida`, el fin en la secuencia— y el resumen
-  dice qué movió. Un audio solo queda exacto, para la sincro fina, y a otra velocidad también.
+  dice qué movió. Un audio solo queda exacto, para la sincro fina, y a otra velocidad también. A otra
+  velocidad `entrada` y `salida` siguen siendo de FUENTE —la API las toma en tiempo de clip y el verbo
+  convierte—, `clips` y `radiografia` también informan en fuente, e invertido rebota. Un largo cero rebota.
 - **`borrar`, `editar` y `desactivar` arrastran el audio vinculado**, que se deduce por medio, rango e
   in-point: TODOS los streams de un multicanal, y apuntados a un stream de audio, también el video y
   los otros streams. Si dos planos del mismo medio están en el mismo instante y el in-point no
@@ -90,10 +95,14 @@ en `CLAUDE.md`.
   (`otrasPistasAudio`). El overwrite PISA también en audio, así que dos cosas en la misma pista y
   posición se comen.
 - **Un medio sin video no pone nada en V**: su clip se busca en la pista de audio.
+- **`importar` rebota un archivo que se está escribiendo** —cambió hace menos de 5 s, o un proceso lo
+  tiene abierto para escribir— y un .mov, .mp4 o .wav ROTO que ffprobe no abre: los dos sacaban el modal
+  «File Import Failure», que traba el panel hasta que alguien aprieta OK. Otros formatos no se miran.
 - **`borrar` rebota desde el 6º borrado en 60 s.** Vaciar una pista es seleccionarla y Delete en
   Premiere, o `borrarSecuencia` + `armarSecuencia`. Nunca barrerla, y menos con solapes: tiró
   Premiere. Y deja la selección VACÍA (`seleccionVaciada`): hasta el 2026-09-24 dejaba adentro el
-  clip borrado, y la edición siguiente en ese lugar tiraba Premiere.
+  clip borrado, y la edición siguiente en ese lugar tiraba Premiere. **Con el candado en una pista
+  del plano**, saca lo de las otras y deja ése: lo dice, nombra la pista y cuántos Cmd+Z lo reponen.
 - **`armarSecuencia` crea aunque el nombre exista**, no reemplaza. `fragmentos` son
   `{desde, hasta, medio}` en segundos de FUENTE; `capas`, `{en, dura, pista, medio, desde,
   pistaAudio}`. Pone los fps y el formato del reloj que les toca, y lo relee: si no entra, lo
@@ -108,6 +117,11 @@ en `CLAUDE.md`.
   salida: 5`. Y no se lo reconoce leyéndolo: se lee "sin marca", igual que un video sano; lo delata
   insertarlo en una secuencia descartable. Si dos fragmentos SEGUIDOS del mismo medio se pisan en la
   fuente, avisa (`pisados`): ese tramo va a salir dos veces. No lo rebota, por si es a propósito.
+  Una capa que sólo aporta imagen —una ISO de un multicámara— va con `sinAudio: true`: su audio se pega en
+  pistas propias, después de todo lo demás, y sale al final en UNA transacción (medido con 17 capas de 6
+  streams, tres veces seguidas). Esas pistas quedan vacías, y con `pistaAudio` rebota. En una tanda son ocho
+  transacciones de menos por reel que apagar ese audio con `desactivar`. `aplicarEscalas` agrupa solo de a 10
+  clips, y un Cmd+Z deshace el lote entero: el resumen dice cuántos hacen falta.
 - **La cola de `cortar` es un CLON**: trae efectos, nombre, apagado y el mismo audio en las mismas
   pistas, y no pisa nada. Con audio vinculado queda SIN VÍNCULO en Premiere —la API no crea
   vínculos—: el bridge la sigue emparejando, y a mano es Cmd+L. A otra velocidad que 1x rebota. Cada
@@ -131,7 +145,8 @@ en `CLAUDE.md`.
 - **`copiarEfecto` NO copia: COMPARTE la instancia.** Tocar el destino cambia el origen, en otra
   secuencia y sin aviso. Para una copia independiente, `clonar` (el clip entero) o Cmd+C / Cmd+V.
   Opacity y Blend Mode viven en el componente Opacity y se fijan aparte.
-- **`exportar` pide `modo` siempre, sin default**: `ya` es el único que se confirma, pero la llamada
+- **`exportar` pide `modo` siempre, sin default, y la carpeta de la salida tiene que existir** —si no, rebota:
+  Premiere decía "Invalid parameter" y Media Encoder no escribía nada—: `ya` es el único que se confirma, pero la llamada
   espera 30 min —si vence, el render sigue: no lo relances, mirá el disco—; `ame` no confirma nada y
   arranca la cola SÓLO si estaba parada: el play de Media Encoder alterna, así que con la cola corriendo
   el ítem entra a su turno y en pausa queda esperando. Con AME cerrado la arranca igual: su log no registra que se

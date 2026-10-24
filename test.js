@@ -559,6 +559,47 @@ if (!fs.existsSync(rutaAudio)) {
   } else {
     ok("`audio.js` no pisa la transcripción de otro motor, y lo decide antes de transcribir");
   }
+
+  /*
+   * Y un medio SIN AUDIO no es un fallo (2026-10-19): ffmpeg caia sobre el wav temporal con
+   * "Invalid argument", y una tanda lo contaba como FALLO. Se prueba CORRIENDOLA sobre un mp4 mudo
+   * generado: sale con 0 y deja el `.audio.json` con `sinAudio`; uno vacio de OTRO motor se pisa
+   * sin `--pisar`, y uno CON palabras de otro motor sigue rebotando sin tocarlo. Todo con
+   * `--motor premiere`, que sobre un mudo sale antes de extraer el wav: si la guarda se rompe, cae
+   * en ese ffmpeg y no llega a Premiere.
+   */
+  const tmpA = fs.mkdtempSync(path.join(os.tmpdir(), "audio-mudo-"));
+  try {
+    const mudo = path.join(tmpA, "mudo.mp4"), json = path.join(tmpA, "mudo.audio.json");
+    execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc2=s=160x90:r=25:d=0.4",
+      "-pix_fmt", "yuv420p", mudo, "-y"], { stdio: "pipe" });
+    const corre = () => require("child_process").spawnSync(process.execPath, [rutaAudio, mudo, "--motor", "premiere"],
+      { encoding: "utf8", timeout: 30000 });
+    const lee = () => { try { return JSON.parse(fs.readFileSync(json, "utf8")); } catch (e) { return null; } };
+    const problemas = [];
+    let r = corre(), j = lee();
+    if (r.status !== 0 || !j || j.sinAudio !== true || !Array.isArray(j.palabras) || j.palabras.length) {
+      problemas.push(`sobre un mp4 mudo salio con ${r.status} y ${j ? "un json sin `sinAudio`" : "sin json"}: ` +
+        String(r.stderr || r.stdout).trim().split("\n").pop());
+    }
+    fs.writeFileSync(json, JSON.stringify({ motor: "whisper", sinAudio: true, palabras: [], tramos: [] }));
+    r = corre(); j = lee();
+    if (r.status !== 0 || !j || j.motor !== "premiere") {
+      problemas.push("rebota sobre el `.audio.json` VACIO de otro motor: " + String(r.stderr).trim().split("\n").pop());
+    }
+    const ajeno = JSON.stringify({ motor: "whisper", palabras: [{ texto: "hola", desde: 0, dura: 0.3 }], tramos: [] });
+    fs.writeFileSync(json, ajeno);
+    r = corre();
+    if (r.status === 0 || fs.readFileSync(json, "utf8") !== ajeno) {
+      problemas.push("pisa una transcripcion CON palabras de otro motor porque el medio es mudo");
+    }
+    if (problemas.length) mal("`audio.js` no se porta bien con un medio sin audio", problemas.join("\n         "));
+    else ok("`audio.js` sobre un medio sin audio sale limpio con un `.audio.json` vacio, y no pisa el de otro motor con palabras");
+  } catch (e) {
+    mal("no se pudo armar el mp4 mudo de prueba", String(e.stderr || e.message).trim().slice(0, 200));
+  } finally {
+    try { fs.rmSync(tmpA, { recursive: true, force: true }); } catch (e) { /* era temporal */ }
+  }
 }
 
 /*
@@ -768,6 +809,12 @@ if (!cuerpoEditar) {
  * solo, que queda exacto —la sincro fina lo usa— y donde un cambio de 0,07 ms tiene que verse; un par vinculado con
  * in-points distintos, que tiene que terminar en el mismo cuadro; un `desde` con seis decimales; y uno a otra
  * velocidad, que va sin llevar al cuadro y lo dice.
+ *
+ * Y A OTRA VELOCIDAD, LAS UNIDADES MEDIDAS (2026-10-20): la entrada de la API va en tiempo de clip —fuente ÷
+ * velocidad—, el arranque se corre lo mismo que ella, y la salida es la entrada más la duración en la secuencia.
+ * Así recorta la API de mentira. A 2x, un clip del 6 al 14 de la fuente: `entrada: 7` lo deja en el 7 —pasada cruda
+ * fue el 14, y largo cero—, `salida: 12` termina en 3 s, `entrada: 14` rebota por largo cero, bajarla a 3 lo pasa al
+ * vecino —dividiendo el corrimiento por la velocidad no se veía— e invertido rebota.
  */
 {
   const fuentes = ["async function editar(", "async function ubicarClip(", "async function buscarVinculados(", "async function sociosDe(",
@@ -791,11 +838,13 @@ if (!cuerpoEditar) {
           it.apagado = false;
           it.isDisabled = async () => it.apagado;
           it.createSetDisabledAction = (b) => () => { it.apagado = b; };
-          /* AL TICK, sin pegarse al cuadro: es lo medido para recortar y mover. */
-          it.createSetOutPointAction = (k) => () => { it.e = it.s + Math.round((Number(k.ticks) - it.i) / it.vel); };
+          /* AL TICK, sin pegarse al cuadro: es lo medido para recortar y mover. Y en TIEMPO DE CLIP a cualquier
+             velocidad: la API da y toma fuente ÷ velocidad (medido el 2026-10-20). */
+          it.createSetOutPointAction = (k) => () => { it.e = it.s + (Number(k.ticks) - it.i); };
           it.createMoveAction = (k) => () => { const d = Number(k.ticks); it.s += d; it.e += d; };
-          /* Como arrastrar el borde izquierdo: el arranque se corre con la entrada (medido el 2026-10-18). */
-          it.createSetInPointAction = (k) => () => { const d = Number(k.ticks) - it.i; it.s += Math.round(d / it.vel); it.i = Number(k.ticks); };
+          /* Como arrastrar el borde izquierdo: el arranque se corre con la entrada (medido el 2026-10-18), lo mismo
+             que ella a cualquier velocidad (2026-10-20: al 50%, de 4 a 5 llevó el clip de 20 a 21 s). */
+          it.createSetInPointAction = (k) => () => { const d = Number(k.ticks) - it.i; it.s += d; it.i = Number(k.ticks); };
           return it;
         };
         const V = video.map((l) => l.map(hacer)), A = audio.map((l) => l.map(hacer));
@@ -815,6 +864,7 @@ if (!cuerpoEditar) {
           vm.runInNewContext(fuentes.join("\\n") + "\\nthis.editar = editar;", ctx);
           const r = await ctx.editar(params);
           return { cambio: r.cambio, cuadros: r.cuadros.despues, alCuadro: r.alCuadro.length, entre: r.entreCuadros, resumen: r.resumen,
+                   entrada: r.despues.entrada,
                    apagado: r.apagado, audioApagado: w.A.flat().map((x) => x.apagado),
                    iniV: w.V.flat().map((x) => x.s / TPF), finV: w.V.flat().map((x) => x.e / TPF), finA: w.A.flat().map((x) => x.e / TPF) };
         } catch (e) { return { error: String(e.message || e).slice(0, 200) }; }
@@ -837,13 +887,24 @@ if (!cuerpoEditar) {
         const dos = () => mundo([[{ nombre: "a.mp4", s: f(50), e: f(75), i: 0 }, { nombre: "b.mp4", s: f(75), e: f(175), i: f(150) }]], []);
         const entradaCruza = await correr(dos(), { pista: "V1", indice: 1, entrada: 3.5 });
         const entradaNoCruza = await correr(dos(), { pista: "V1", indice: 1, entrada: 4.5 });
-        console.log(JSON.stringify({ reporte, audio1, audio2, vinc, desde, lento, apagar, entradaCruza, entradaNoCruza }));
+        /* A 2x: del 6 al 14 de la fuente, con entrada 3 en la API, de 0 a 4 s; o de 2 a 6 s con un vecino de 1 a 2. */
+        const rapido = (vel) => mundo([[{ nombre: "cam.mp4", s: 0, e: f(120), i: 3 * TPS, vel: vel || 2 }]], []);
+        const conVecino = () => mundo([[{ nombre: "a.mp4", s: f(30), e: f(60), i: 0 }, { nombre: "cam.mp4", s: f(60), e: f(180), i: 3 * TPS, vel: 2 }]], []);
+        const r2entrada = await correr(rapido(), { pista: "V1", indice: 0, entrada: 7 });
+        const r2salida = await correr(rapido(), { pista: "V1", indice: 0, salida: 12 });
+        const r2cero = await correr(rapido(), { pista: "V1", indice: 0, entrada: 14 });
+        const r2cruza = await correr(conVecino(), { pista: "V1", indice: 1, entrada: 3 });
+        const r2invertido = await correr(rapido(-1), { pista: "V1", indice: 0, entrada: 7 });
+        console.log(JSON.stringify({ reporte, audio1, audio2, vinc, desde, lento, apagar, entradaCruza, entradaNoCruza,
+                                     r2entrada, r2salida, r2cero, r2cruza, r2invertido }));
       })();`;
     try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
     catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
   })();
   const err = casos.error || ["reporte", "audio1", "audio2", "vinc", "desde", "lento", "apagar", "entradaNoCruza"].map((k) => casos[k] && casos[k].error).find(Boolean);
   const { reporte: r, audio1: a1, audio2: a2, vinc: v, desde: d, lento: l, apagar: ap, entradaCruza: ec, entradaNoCruza: en } = casos;
+  const { r2entrada: v2e, r2salida: v2s, r2cero: v2c, r2cruza: v2x, r2invertido: v2i } = casos;
+  const err2 = !err && ["r2entrada", "r2salida"].map((k) => casos[k] && casos[k].error).find(Boolean);
   if (err) mal("el `editar` de mentira no se pudo ejecutar", err);
   else if (r.finV[0] !== 1364 || !r.cambio || r.alCuadro !== 1 || !r.cuadros || r.cuadros.dura !== 442) {
     mal("`editar salida` no lleva el FIN al cuadro más cercano",
@@ -866,8 +927,21 @@ if (!cuerpoEditar) {
   } else if (!ec || !/FUERA DE ORDEN/.test(ec.error || "") || !en || en.iniV[1] !== 60) {
     mal("`editar entrada` no mira el orden de la lista, o rebota una entrada que no cruza a nadie",
         "bajar la entrada corre el arranque: en vivo, de 6 a 4,5 s el clip pasó al de 2 s y quedó fuera de orden · " + JSON.stringify({ ec, en }));
+  } else if (err2 || v2e.iniV[0] !== 15 || v2e.finV[0] !== 120 || v2e.entrada !== 7 || !/segundos de FUENTE/.test(v2e.resumen)) {
+    mal("`editar entrada` a 2x no convierte la fuente a las unidades de la API, o no informa en fuente",
+        "medido el 2026-10-20: `entrada: 7` pasada cruda a un clip al 200% fue el 14 de la fuente, y lo dejó de largo cero · " + JSON.stringify(err2 || v2e));
+  } else if (v2s.finV[0] !== 90 || v2s.iniV[0] !== 0) {
+    mal("`editar salida` a 2x no convierte la fuente a las unidades de la API", "del 6 al 12 de la fuente a 2x son 3 s · " + JSON.stringify(v2s));
+  } else if (!/largo CERO/.test(v2c.error || "")) {
+    mal("`editar` deja un clip de largo cero sin rebotar", "Premiere lo acepta y el clip deja de verse · " + JSON.stringify(v2c));
+  } else if (!/FUERA DE ORDEN/.test(v2x.error || "")) {
+    mal("`editar entrada` a 2x no ve que el arranque pasa al vecino",
+        "el arranque se corre lo mismo que la entrada de la API, sin dividir por la velocidad · " + JSON.stringify(v2x));
+  } else if (!/invertido/.test(v2i.error || "")) {
+    mal("`editar` escribe la entrada de un clip INVERTIDO", "a esa velocidad no está medida · " + JSON.stringify(v2i));
   } else {
-    ok("`editar` lleva los bordes de video al cuadro más cercano, deja exacto el audio solo, juzga el cambio en ticks y cuenta el apagado");
+    ok("`editar` lleva los bordes de video al cuadro más cercano, deja exacto el audio solo, juzga el cambio en ticks, cuenta el apagado, " +
+       "y a 2x convierte entrada y salida de fuente, mira el orden y rebota el largo cero y el invertido");
   }
 }
 
@@ -3418,6 +3492,74 @@ titulo("recargar.js MIRA si hay un cartel de Premiere, y no lo da por ausente cu
   }
 }
 
+/* ---------- recargar.js: el macro "corrió" y el Cmd+Q no llegó ---------- */
+
+titulo("Con otra app al frente, `--reiniciar` prueba la otra vía, y si Premiere no recibió nada NO traba");
+
+/*
+ * 2026-10-22, un podcast: con WhatsApp al frente, Keyboard Maestro ejecutó «Cerrar Premiere» sin anotar falla, el
+ * Cmd+Q no llegó, y `--reiniciar` esperó 180 s y trabó el transporte. Las dos decisiones son funciones puras y se
+ * prueban CORRIÉNDOLAS: con la app al frente desconocida, o con una ventana que no es el proyecto —un cartel, un
+ * título que no se pudo leer—, NO se afirma nada y queda el camino de siempre. Y la rama sin traba tiene que estar
+ * ANTES de la espera de 180 s y no llamar a `ponerTraba`.
+ */
+{
+  const p = path.join(raiz, "herramientas/recargar.js");
+  const src = fs.readFileSync(p, "utf8");
+  const tomar = (n) => {
+    const i = src.indexOf("function " + n + "(");
+    if (i === -1) return "";
+    let d = 0;
+    for (let k = src.indexOf("{", i); k < src.length; k++) {
+      if (src[k] === "{") d++;
+      else if (src[k] === "}") { d--; if (!d) return src.slice(i, k + 1); }
+    }
+    return "";
+  };
+  const vm = require("vm"), ctx = {};
+  let f = null;
+  try {
+    vm.runInNewContext(tomar("macroNoLoActivo") + "\n" + tomar("sinCartelVisible") +
+      "\nthis.m = macroNoLoActivo; this.s = sinCartelVisible;", ctx);
+    f = ctx;
+  } catch (e) { f = null; }
+  const malos = [];
+  if (!f || typeof f.m !== "function" || typeof f.s !== "function") {
+    malos.push("no están `macroNoLoActivo` y `sinCartelVisible`");
+  } else {
+    const casosM = [[true, "WhatsApp", true], [true, "Adobe Premiere Pro 2026", false], [false, "WhatsApp", false],
+      [null, "WhatsApp", false], [true, null, false], [true, "", false]];
+    for (const [vivo, frente, quiere] of casosM)
+      if (f.m(vivo, frente) !== quiere) malos.push(`macroNoLoActivo(${vivo}, ${JSON.stringify(frente)}) no da ${quiere}`);
+    const proyecto = { titulo: "/Volumes/x/Prueba 2.prproj *", capa: 0 };
+    const casosS = [[[proyecto], true], [[proyecto, { titulo: "File Import Failure", capa: 8 }], false],
+      [[], false], [null, false], [[{ titulo: "", capa: 0 }], false]];
+    for (const [vs, quiere] of casosS)
+      if (f.s(vs) !== quiere) malos.push(`sinCartelVisible(${JSON.stringify(vs)}) no da ${quiere}`);
+  }
+  const limpio = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const iBloque = limpio.indexOf("if (macroNoLoActivo(premiereAbierto(), frente))");
+  const iEspera = limpio.search(/for\s*\(\s*let\s+i\s*=\s*0\s*;\s*i\s*<\s*TOPE_CIERRE_S\s*;/);
+  const iSin = limpio.indexOf("if (sinCartelVisible(vs)) {", iBloque);
+  /* Por BLOQUE BALANCEADO, no hasta la primera llave: los `${…}` del mensaje también cierran llaves. */
+  const balanceado = (txt, i) => {
+    if (i === -1) return "";
+    let d = 0;
+    for (let k = txt.indexOf("{", i); k < txt.length; k++) {
+      if (txt[k] === "{") d++;
+      else if (txt[k] === "}") { d--; if (!d) return txt.slice(i, k + 1); }
+    }
+    return "";
+  };
+  const rama = balanceado(limpio, iSin);
+  if (iBloque === -1) malos.push("`reiniciarPremiere` no mira si el macro activó a Premiere");
+  else if (iEspera !== -1 && iBloque > iEspera) malos.push("lo mira DESPUÉS de esperar los 180 s");
+  else if (!/cerrarConGuarda\(\)/.test(limpio.slice(iBloque, iSin === -1 ? undefined : iSin))) malos.push("no prueba la vía con guarda");
+  else if (!/return false/.test(rama) || /ponerTraba\(/.test(rama)) malos.push("la rama sin cartel no vuelve sin trabar");
+  if (malos.length) mal("`--reiniciar` con otra app al frente no se porta como debe", malos.join("\n         "));
+  else ok("`--reiniciar` ve que el Cmd+Q no llegó, prueba la otra vía y, sin cartel, no traba el transporte");
+}
+
 /* ---------- recargar.js: esperar el cierre NO es esperar a ciegas ---------- */
 
 titulo("La espera del cierre distingue «esta tardando» de «esta trabado», y solo traba el segundo");
@@ -4061,6 +4203,32 @@ titulo("estado informa el proyecto aunque no haya secuencia activa");
   } else {
     ok("informa el proyecto y avisa cuando no hay secuencia");
   }
+}
+
+titulo("transcripcion con `medio` no exige secuencia activa, y las otras dos formas sí");
+
+/*
+ * 2026-10-22, un podcast: `audio.js --motor premiere` en un proyecto recién creado importó, transcribió y al
+ * RELEER tiró "ninguna secuencia activa": `transcripcion` la exigía de entrada aunque su forma `medio` no la usa. El
+ * agujero de `estado` del 2026-08-29, en otro verbo. La llamada a `getProyectoYSecuencia` tiene que depender de que
+ * NO venga `medio`, y el proyecto salir de `getProyecto`. Y la lista de los que no la necesitan es UNA.
+ */
+{
+  const src = fs.readFileSync(path.join(raiz, "plugin/lib/comandos.js"), "utf8");
+  const i = src.indexOf("async function transcripcion(");
+  const sig = src.indexOf("\nasync function ", i + 10);
+  const cuerpo = i === -1 ? "" : src.slice(i, sig).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const llamadas = cuerpo.match(/[^;\n]*getProyectoYSecuencia\s*\(\)[^;\n]*/g) || [];
+  const listas = (src.match(/Los verbos que (NO )?(necesitan secuencia son|no la necesitan): secuencias/g) || []).length;
+  if (i === -1) mal("no se encontro `transcripcion` en comandos.js");
+  else if (!/const\s+project\s*=\s*await\s+getProyecto\s*\(\)/.test(cuerpo))
+    mal("`transcripcion` no toma el proyecto con `getProyecto`", "sin secuencia activa tira antes de mirar `medio`");
+  else if (!llamadas.length || llamadas.some((l) => !/params\.medio\s*\?\s*null\s*:/.test(l)))
+    mal("`transcripcion` exige secuencia también con `medio`",
+      "`audio.js --motor premiere` en un proyecto sin secuencias transcribe y tira al releer");
+  else if (!/VERBOS_SIN_SECUENCIA/.test(src) || listas)
+    mal("la lista de verbos sin secuencia volvió a estar escrita a mano", "eran dos, con seis y con ocho verbos");
+  else ok("`transcripcion` con `medio` no exige secuencia, y la lista de los que no la necesitan es una");
 }
 
 titulo("importar mira si el proyecto CRECIO antes de declarar que no entro nada");
@@ -5228,7 +5396,12 @@ titulo("El orden de la lista de cada pista: `revisar` lo detecta y `editar` no l
  * por `revisar` como "sin solapes": el timeline estaba limpio y la frase sonaba dos veces. Se EJECUTA sobre
  * una secuencia de mentira con el caso que tiene que marcar y los que tienen que callar —un cuadro de pisado,
  * que es redondeo; dos pedazos de una foto; dos cámaras con el mismo nombre de archivo; un salto atrás sin
- * pisar—, y un par a 0,5x que va como sin medir. El audio del mismo par es el mismo lugar, no otro.
+ * pisar—. El audio del mismo par es el mismo lugar, no otro.
+ *
+ * Y A OTRA VELOCIDAD SE MIDE (2026-10-20): `getInPoint` va en tiempo de clip —fuente ÷ velocidad, medido con el
+ * cuadro al 200% y al 50%—. El par de la prueba es uno a 1x del 10 al 20 de la fuente y otro a 0,5x con entrada 30
+ * de la API, que es el 15 al 20: se pisan 5 s, y con la entrada tomada como fuente no se pisaban. Sin repetir, el
+ * segundo arranca en el 20. Un par INVERTIDO va como sin medir.
  */
 titulo("`revisar` marca a los vecinos que REPITEN MATERIAL en la fuente, y nada más");
 {
@@ -5249,7 +5422,8 @@ titulo("`revisar` marca a los vecinos que REPITEN MATERIAL en la fuente, y nada 
         clip("M", 30, 40, 50, "/m/M.mp4"),
         clip("foto", 40, 45, 3600, "/m/foto.png"), clip("foto", 45, 50, 3600, "/m/foto.png"),
         clip("C0001", 50, 60, 0, "/camA/C0001.MP4"), clip("C0001", 60, 70, 5, "/camB/C0001.MP4"),
-        clip("L", 70, 80, 10, "/m/L.mp4", 0.5), clip("L", 80, 90, 15, "/m/L.mp4"),
+        clip("L", 70, 80, 10, "/m/L.mp4"), clip("L", 80, 90, repite ? 30 : 40, "/m/L.mp4", 0.5),
+        clip("R", 90, 100, 10, "/m/R.mp4", -1), clip("R", 100, 110, 5, "/m/R.mp4"),
       ];
       const secuencia = (repite) => ({ name: "S", getTimebase: async () => String(T / 25),
         getVideoTrackCount: async () => 1, getAudioTrackCount: async () => 1,
@@ -5270,17 +5444,67 @@ titulo("`revisar` marca a los vecinos que REPITEN MATERIAL en la fuente, y nada 
     catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
   })();
   if (r.error) mal("`revisar` no se pudo ejecutar contra una secuencia de mentira", r.error);
-  else if (JSON.stringify(r.con.pares) !== JSON.stringify([["0/1@2"], ["0/1@2"]]) || !/REPITEN MATERIAL/.test(r.con.resumen) ||
+  else if (JSON.stringify(r.con.pares.map((p) => p[0])) !== JSON.stringify(["0/1@2", "0/1@2"]) || !/REPITEN MATERIAL/.test(r.con.resumen) ||
            !/\[0\]\/\[1\]/.test(r.con.resumen)) {
     mal("`revisar` no marca el par que se pisa 2 s en la fuente, o marca otro",
         "el pisado de un cuadro es redondeo; una foto, un título o dos cámaras con el mismo nombre no repiten nada · " + JSON.stringify(r.con));
-  } else if (r.con.lugares !== 1) {
+  } else if (JSON.stringify(r.con.pares) !== JSON.stringify([["0/1@2", "8/9@5"], ["0/1@2", "8/9@5"]])) {
+    mal("`revisar` no mide el par a otra velocidad en FUENTE",
+        "a 0,5x la entrada de la API es fuente ÷ velocidad (medido el 2026-10-20): el par se pisa 5 s · " + JSON.stringify(r.con));
+  } else if (r.con.lugares !== 2) {
     mal("`revisar` cuenta el video y el audio de una repetición como dos lugares", JSON.stringify(r.con));
   } else if (r.con.sinMedir !== 2 || !/NO se midió/.test(r.con.resumen)) {
-    mal("`revisar` mide o calla el par a otra velocidad", "a 0,5x no está medido qué devuelve `getInPoint`: va como sin medir · " + JSON.stringify(r.con));
+    mal("`revisar` mide o calla el par INVERTIDO", "invertido no está medido qué devuelve `getInPoint`: va como sin medir · " + JSON.stringify(r.con));
   } else if (r.sin.lugares !== 0 || /REPITE/.test(r.sin.resumen)) {
     mal("`revisar` marca una repetición en una secuencia sin pisados", "rechazar lo correcto es el peor fallo de una guarda · " + JSON.stringify(r.sin));
-  } else ok("`revisar` marca el par que se pisa 2 s, en V y en A como UN lugar; calla el cuadro, la foto, las dos cámaras y el salto atrás, y el 0,5x va sin medir");
+  } else ok("`revisar` marca el par que se pisa 2 s y el de 0,5x que se pisa 5 en la fuente, en V y en A como UN lugar cada uno; calla el cuadro, la foto, las dos cámaras y el salto atrás, y el invertido va sin medir");
+}
+
+/*
+ * LA ENTRADA A OTRA VELOCIDAD SE INFORMA EN FUENTE (2026-10-20). `getInPoint` va en tiempo de clip —fuente ÷
+ * velocidad, medido con el cuadro y su timecode al 200% y al 50%—: `clips` listaba entrada 3 para un clip al 200%
+ * que mostraba el segundo 6, y `radiografia` le daba del 3 al 11 a uno que iba del 6 al 14. Se EJECUTA `clips` con
+ * un clip a 2x y otro a 1x; en `radiografia`, por posición y sin comentarios, la entrada y la salida van por la
+ * velocidad; y `transicion` no calcula el handle de un clip a otra velocidad, que mezclaba unidades.
+ */
+titulo("A otra velocidad, `clips` y `radiografia` dan la entrada en fuente, y `transicion` no inventa el handle");
+{
+  const sinCom = (x) => (x ? x.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "") : "");
+  const fuentes = ["async function clips(", "async function tiemposDe(", "async function ticksDe(", "async function velocidadDe(",
+    "function aNumero(", "function enCuadros(", "async function esCapaDeAjuste(", "async function ojito("].map((f) => cuerpoDeFuncion(srcComandos, f));
+  const r = (() => {
+    if (fuentes.some((f) => !f)) return { error: "falta una de: clips, tiemposDe, ticksDe, velocidadDe, aNumero, enCuadros, esCapaDeAjuste, ojito" };
+    const guion = `
+      const vm = require("vm"), T = 254016000000, fuentes = ${JSON.stringify(fuentes)};
+      const clip = (d, h, entradaApi, vel) => ({ getStartTime: async () => ({ ticks: String(d * T) }),
+        getEndTime: async () => ({ ticks: String(h * T) }), getInPoint: async () => ({ ticks: String(entradaApi * T) }),
+        getName: async () => "cam.mov", getSpeed: async () => vel, isDisabled: async () => false });
+      const items = [clip(0, 4, 3, 2), clip(4, 8, 6, 1)];
+      const sequence = { name: "S", getTimebase: async () => String(T / 25), getVideoTrackCount: async () => 1, getAudioTrackCount: async () => 0,
+        getVideoTrack: async () => ({ getTrackItems: async () => items.slice() }) };
+      const ctx = { TICKS_POR_SEGUNDO: T, ppro: { Constants: { TrackItemType: { CLIP: "CLIP" } } }, aSegundos: (k) => Number(k.ticks) / T,
+        getProyectoYSecuencia: async () => ({ sequence }), estadoDeSalida: async () => false, avisoDeSalida: () => "" };
+      vm.runInNewContext(fuentes.join("\\n") + "\\nthis.clips = clips;", ctx);
+      ctx.clips({}).then((x) => console.log(JSON.stringify(x.clips.map((c) => [c.entrada, c.desfase, c.velocidad]))));`;
+    try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
+    catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
+  })();
+  const cRadio = sinCom(cuerpoDeFuncion(srcComandos, "async function radiografia("));
+  const cTrans = sinCom(cuerpoDeFuncion(srcComandos, "async function transicion("));
+  const iHandle = cTrans.indexOf("const handleDe = async"), iIn = cTrans.indexOf("getInPoint()", iHandle);
+  const trozo = iHandle === -1 || iIn === -1 ? "" : cTrans.slice(iHandle, iIn);
+  const iVel = /const v = await velocidadDe\(c\);\s*if \(v !== 1\) return \{ error:/.test(trozo) ? 0 : -1;
+  if (r.error) mal("`clips` no se pudo ejecutar con un clip a 2x", r.error);
+  else if (JSON.stringify(r) !== JSON.stringify([[6, 6, 2], [6, 2, 1]])) {
+    mal("`clips` no da la entrada en FUENTE a otra velocidad",
+        "al 200%, la API lee 3 donde el cuadro muestra el 6 de la fuente (medido el 2026-10-20) · " + JSON.stringify(r));
+  } else if (!/entrada:\s*Number\(\(t\.entrada \* factor\)/.test(cRadio) ||
+             !/salida:\s*Number\(\(\(t\.entrada \+ \(t\.hasta - t\.desde\)\) \* factor\)/.test(cRadio)) {
+    mal("`radiografia` no lleva la entrada y la salida a FUENTE con la velocidad",
+        "un clip al 200% del 6 al 14 de la fuente salía de 3 a 11, y el rearmado pone ese material");
+  } else if (iHandle === -1 || iIn === -1 || iVel === -1) {
+    mal("`transicion` calcula el handle de un clip a otra velocidad", "resta el arranque del medio, en fuente, a una entrada en tiempo de clip");
+  } else ok("a 2x `clips` da la entrada 6 de la fuente —la API lee 3—, `radiografia` multiplica entrada y salida, y `transicion` no calcula ese handle");
 }
 
 /*
@@ -6732,6 +6956,39 @@ titulo("Secuencias por nombre, vinculados completos y en lotes, y un armado que 
   }
 }
 
+/* ---------- las capas `sinAudio` de `armarSecuencia` ---------- */
+
+titulo("Capas `sinAudio`: el audio va a pistas propias, sale en una transacción, y nada de afuera se toca");
+
+/*
+ * 2026-10-22, un podcast: las ISO de las capas sólo aportan imagen y traían 6 streams cada una —136 clips mudos
+ * por reel, imposibles de borrar por el bridge—. `sinAudio` las pega con su audio en un SUMIDERO después de todo lo
+ * demás —el overwrite PISA, y encima del switch dejaría un hueco al sacarlo— y lo saca al final. Se mira POR
+ * POSICIÓN, sin comentarios: el rebote con `pistaAudio` antes de crear la secuencia, el destino del audio, que no
+ * salga nada de afuera del sumidero, que se saque con UNA acción de audio y la selección quede vacía, y que se
+ * relea qué quedó y que el video siga entero.
+ */
+{
+  const limpiar = (t) => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const i = srcComandos.indexOf("async function armarSecuencia(");
+  const armar = i === -1 ? "" : limpiar(srcComandos.slice(i, srcComandos.indexOf("\n}\n", i)));
+  const malos = [];
+  const iRebote = armar.search(/c\.sinAudio\s*===\s*true\s*&&\s*typeof\s+c\.pistaAudio\s*===\s*"number"\)\s*\{\s*throw/);
+  const iCrear = armar.search(/createSequenceWithPresetPath\(|crearSecuenciaDesde\(/);
+  if (iRebote === -1 || (iCrear !== -1 && iRebote > iCrear)) malos.push("`sinAudio` con `pistaAudio` no rebota antes de crear la secuencia");
+  if ((armar.match(/bloque\s*\?\s*bloque\.inicio\s*:/g) || []).length < 2) malos.push("el audio de una capa `sinAudio` no va al sumidero (en el overwrite y en la relectura)");
+  if (!/const\s+libre\s*=\s*\(bl\)\s*=>\s*!bl\.ocupado\.some\(/.test(armar)) malos.push("dos capas `sinAudio` que se pisan en el tiempo comparten bloque");
+  if (!/idx\s*<\s*sumidero\.inicio\)\s*\{\s*audioSacado\.fuera\+\+;\s*continue;/.test(armar)) malos.push("se puede sacar audio de AFUERA del sumidero");
+  const iQuita = armar.search(/createRemoveItemsAction\(sel,\s*false,\s*ppro\.Constants\.MediaType\.AUDIO\)/);
+  const iVacia = armar.search(/audioSacado\.seleccionVaciada\s*=\s*await\s+vaciarSeleccion\(/);
+  if (iQuita === -1) malos.push("no se saca con UNA acción de AUDIO sobre la selección");
+  else if (iVacia === -1 || iVacia < iQuita) malos.push("la selección no se vacía después de sacar");
+  if (!/audioSacado\.quedan\+\+/.test(armar) || !/audioSacado\.videoRoto\.push\(/.test(armar)) malos.push("no se relee qué quedó en el sumidero ni que el video siga entero");
+  if (!/c\.apagado\s*===\s*true\s*&&\s*!lugar\.audio\s*&&\s*!bloque\)/.test(armar)) malos.push("una capa `sinAudio` y `apagado` también apaga el audio que ya sale");
+  if (malos.length) mal("las capas `sinAudio` de `armarSecuencia` no se portan como deben", malos.join("\n         "));
+  else ok("`sinAudio`: rebota con `pistaAudio`, va a un sumidero por bloques, sale en una acción y se relee");
+}
+
 /* ---------- los tres agujeros de `colocar_sincro.js` ---------- */
 
 /*
@@ -7166,6 +7423,36 @@ titulo("El tope del lote es una sola constante, no un literal por verbo");
   }
 }
 
+/* ---------- el lote POR DEFECTO de cada verbo de tanda ---------- */
+
+titulo("`aplicarEscalas` agrupa de a `TOPE_LOTE` sin que se lo pidan, y dice cuántos Cmd+Z; zooms y animaciones todavía no");
+
+/*
+ * 2026-10-24, decisión del editor: `aplicarEscalas` pasa de 1 a `TOPE_LOTE` por defecto. Todos los scripts que lo
+ * usaban ya pedían 8 o 10, y 10 es lo medido (53 clips, 6 transacciones, 53 de 53). Con lotes, un Cmd+Z deshace diez
+ * clips, así que el resumen dice cuántos hacen falta, contando sólo las transacciones en las que se ENTRÓ.
+ * `aplicarZooms` y `aplicarAnim` se quedan en 1: con 10 pueden colgar Premiere después de activar —o de LIMPIAR— los
+ * diez clips del lote (auditoría 2026-10-17, `tandas#16`), y eso no está medido. Subirlos es una medición, no una
+ * armonía.
+ */
+{
+  const cuerpo = (v) => {
+    const c = srcComandos.match(new RegExp("async function " + v + "\\([\\s\\S]*?\\n\\}"));
+    return c ? c[0].replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "") : "";
+  };
+  const defecto = (c) => { const m = c.match(/params\.porTransaccion\s*:\s*(\w+)\)\)/); return m ? m[1] : null; };
+  const esc = cuerpo("aplicarEscalas");
+  const malos = [];
+  if (defecto(esc) !== "TOPE_LOTE") malos.push("`aplicarEscalas` no agrupa de a `TOPE_LOTE` por defecto (" + defecto(esc) + ")");
+  for (const v of ["aplicarZooms", "aplicarAnim"]) if (defecto(cuerpo(v)) !== "1") malos.push("`" + v + "` cambió su lote por defecto sin medir `tandas#16` (" + defecto(cuerpo(v)) + ")");
+  const iEntro = esc.search(/entro\s*=\s*true;/), iCuenta = esc.search(/if\s*\(\s*entro\s*\)\s*transacciones\+\+/);
+  if (iEntro === -1 || iCuenta === -1 || /\n\s*transacciones\+\+;/.test(esc)) malos.push("`aplicarEscalas` no cuenta sólo las transacciones en las que entró");
+  if (!/Cmd\+Z lo deshace/.test(srcComandos.slice(srcComandos.indexOf("async function aplicarEscalas("), srcComandos.indexOf("async function aplicarZooms("))))
+    malos.push("el resumen de `aplicarEscalas` no dice cuántos Cmd+Z hacen falta");
+  if (malos.length) mal("el lote por defecto de los verbos de tanda no es el decidido", malos.join("\n         "));
+  else ok("`aplicarEscalas` agrupa de a `TOPE_LOTE` y dice sus Cmd+Z; `aplicarZooms` y `aplicarAnim` siguen en 1 hasta medir");
+}
+
 /* ---------- y las TRANSACCIONES de un lote tambien se espacian ---------- */
 
 /*
@@ -7341,6 +7628,47 @@ titulo("Cotejar transcripciones: ignora acentos y no inventa una tercera version
     } else {
       ok("ignora acentos y solo informa discrepancias");
     }
+
+    /*
+     * Y LEE LO QUE EL REPO PRODUCE (2026-10-24, S01E02): `--adobe` leía sólo la respuesta del verbo, y con el
+     * `.audio.json` o el `.premiere.json` de `audio.js` decía «vino vacía» sobre 10.726 palabras. Se corre con las
+     * tres formas, y con la MISMA transcripción en dos formatos —el `.premiere.json` que deja `audio.js` es del
+     * motor que corrió, y contra el de whisper daba 100 %—, que tiene que rebotar.
+     */
+    const tmpC = fs.mkdtempSync(path.join(os.tmpdir(), "cotejar-"));
+    try {
+      const pal = [["hola", 0.5], ["qué", 0.9], ["tal", 1.2], ["mírame", 1.6], ["bien", 2.1]];
+      const wJ = { motor: "whisper", palabras: pal.map(([t, d]) => ({ texto: t, desde: d, dura: 0.2 })) };
+      const otras = [["hola", 0.52], ["que", 0.91], ["tal", 1.25], ["mirame", 1.62], ["vos", 2.0], ["bien", 2.2]];
+      const formas = {
+        "respuesta del verbo": { segmentos: [{ texto: otras.map((x) => x[0]).join(" "), desdeFuente: 0.5 }] },
+        ".audio.json de premiere": { motor: "premiere", palabras: otras.map(([t, d]) => ({ texto: t, desde: d, dura: 0.2 })) },
+        ".premiere.json": { segments: [{ start: 0.52, words: otras.map(([t, d]) => ({ text: t, start: d })) }] },
+      };
+      const corre = (aj) => {
+        const fw = path.join(tmpC, "w.json"), fa = path.join(tmpC, "a.json");
+        fs.writeFileSync(fw, JSON.stringify(wJ)); fs.writeFileSync(fa, JSON.stringify(aj));
+        return require("child_process").spawnSync(process.execPath, [f, "--whisper", fw, "--adobe", fa], { encoding: "utf8", timeout: 30000 });
+      };
+      const malos = [];
+      for (const [q, aj] of Object.entries(formas)) {
+        const r = corre(aj);
+        if (r.status !== 0 || !/Premiere 6 palabras · Whisper 5 · coinciden 5/.test(r.stdout)) malos.push(`${q}: ${(r.stderr || r.stdout).trim().split("\n")[0]}`);
+      }
+      const misma = corre({ segments: [{ start: 0.5, words: pal.map(([t, d]) => ({ text: t, start: d })) }] });
+      if (misma.status === 0 || !/MISMA/.test(misma.stderr)) malos.push("la misma transcripción en dos formatos no rebota");
+      /* Dos motores que coinciden en TODAS las palabras —en un clip corto pasa— no son la misma: los tiempos difieren. */
+      const iguales = corre({ segments: [{ start: 0.55, words: pal.map(([t, d]) => ({ text: t, start: d + 0.05 })) }] });
+      if (iguales.status !== 0 || !/coinciden 5 = 100%/.test(iguales.stdout)) malos.push("dos motores con las mismas palabras y otros tiempos rebotan");
+      const mismoMotor = corre({ motor: "whisper", palabras: otras.map(([t, d]) => ({ texto: t, desde: d })) });
+      if (mismoMotor.status === 0 || !/del motor "whisper"/.test(mismoMotor.stderr)) malos.push("dos del mismo motor no rebota");
+      const ajeno = corre({ items: [1, 2] });
+      if (ajeno.status === 0 || !/\[items\]/.test(ajeno.stderr)) malos.push("un JSON ajeno no nombra sus claves");
+      if (malos.length) mal("`cotejar_transcripcion.js` no lee bien lo que produce el repo", malos.join("\n         "));
+      else ok("`cotejar_transcripcion.js` lee las tres formas, y rebota la misma transcripción en dos formatos");
+    } finally {
+      try { fs.rmSync(tmpC, { recursive: true, force: true }); } catch (e) { /* era temporal */ }
+    }
   }
 }
 
@@ -7388,12 +7716,101 @@ titulo("El prevuelo de rutas esta en el transporte y corre ANTES de mandar");
      * cuanto el archivo crece.
      */
     const region = cuerpo.slice(tabla, enviar < 0 ? cuerpo.length : enviar);
-    const faltan = ["crearProyecto", "relink"].filter((k) => !new RegExp("\\b" + k + "\\s*:").test(region));
+    const faltan = ["crearProyecto", "relink", "exportar", "importar"].filter((k) => !new RegExp("\\b" + k + "\\s*:").test(region));
     if (faltan.length) {
       mal("faltan entradas en la tabla del prevuelo: " + faltan.join(", "),
         "cada una comprueba en el DISCO algo que el panel no puede ver");
     } else {
-      ok("el prevuelo mira el disco y corre antes de mandar el comando", "crearProyecto, relink");
+      ok("el prevuelo mira el disco y corre antes de mandar el comando", "crearProyecto, relink, exportar, importar");
+    }
+  }
+
+  /*
+   * Y `exportar` a una carpeta que NO EXISTE rebota (2026-10-22): con `ya` Premiere contestaba "Invalid
+   * parameter" y se leyo como la «ñ» del nombre; con `ame` el verbo decia "encolado" y Media Encoder no
+   * escribia nada. Se prueba LLAMANDO a la entrada de la tabla, no a `enviar`: si la guarda se rompe,
+   * `enviar` le mandaria un export de verdad al Premiere que este abierto.
+   */
+  let PV = null;
+  try { PV = require(path.join(raiz, "server/bridge.js")).PREVUELO; } catch (e) { PV = null; }
+  if (!PV || typeof PV.exportar !== "function") {
+    mal("`server/bridge.js` no expone `PREVUELO.exportar`", "sin eso no se puede probar que rebote");
+  } else {
+    const tmpE = fs.mkdtempSync(path.join(os.tmpdir(), "prevuelo-exportar-"));
+    try {
+      const archivo = path.join(tmpE, "soy-un-archivo.txt");
+      fs.writeFileSync(archivo, "x");
+      const casos = [
+        ["carpeta inexistente", path.join(tmpE, "no-existe", "corte.mp4"), true],
+        ["carpeta que existe", path.join(tmpE, "corte.mp4"), false],
+        ["con «ñ» en el nombre", path.join(tmpE, "Señal corte.mp4"), false],
+        ["un ARCHIVO en el lugar de la carpeta", path.join(archivo, "corte.mp4"), true],
+      ];
+      const malos = casos.filter(([, salida, rebota]) => {
+        const r = PV.exportar({ salida, modo: "ya", preset: "/x.epr" });
+        return rebota ? !(typeof r === "string" && /NO EXISTE/.test(r)) : r !== null;
+      }).map(([q]) => q);
+      if (malos.length) mal("el prevuelo de `exportar` se equivoca con: " + malos.join(", "),
+        "con la carpeta que falta Premiere dice \"Invalid parameter\" y Media Encoder no escribe nada");
+      else ok("`exportar` rebota una carpeta de salida que no existe, y deja pasar una que existe, también con «ñ»");
+    } finally {
+      try { fs.rmSync(tmpE, { recursive: true, force: true }); } catch (e) { /* era temporal */ }
+    }
+  }
+
+  /*
+   * Y `importar` no manda un archivo que se esta ESCRIBIENDO (2026-10-19): uno a medias saco el modal «File
+   * Import Failure» y trabo el panel. La fecha SOLA no alcanza —medido el 2026-10-22, ffmpeg paso 7 s sin
+   * tocar un .mov que seguia escribiendo—, asi que tambien rebota uno QUIETO que un proceso tiene abierto
+   * para escribir. Aca el que lo tiene abierto es este mismo test. Y no rebota uno quieto y cerrado, uno
+   * abierto solo para leer ni uno que no existe: eso seria rechazar uso correcto.
+   */
+  if (!PV || typeof PV.importar !== "function") {
+    mal("`server/bridge.js` no expone `PREVUELO.importar`", "sin eso no se puede probar que rebote");
+  } else {
+    const tmpI = fs.mkdtempSync(path.join(os.tmpdir(), "prevuelo-importar-"));
+    const fds = [];
+    try {
+      /* `.bin`, fuera de la lista de ffprobe: estos casos miden la fecha y `lsof`, y un .mov de un byte esta roto */
+      const f = path.join(tmpI, "clip.bin"), viejo = (Date.now() - 60000) / 1000;
+      fs.writeFileSync(f, "x");
+      const malos = [];
+      if (typeof PV.importar({ archivos: [f] }) !== "string") malos.push("uno recien escrito pasa");
+      fs.utimesSync(f, viejo, viejo);
+      if (PV.importar({ archivos: f }) !== null) malos.push("uno quieto y cerrado rebota");
+      fds.push(fs.openSync(f, "r"));
+      if (PV.importar({ archivos: [f] }) !== null) malos.push("uno abierto solo para leer rebota");
+      fds.push(fs.openSync(f, "a"));
+      fs.utimesSync(f, viejo, viejo);
+      const r = PV.importar({ archivos: [f, path.join(tmpI, "no-existe.mov")] });
+      if (!(typeof r === "string" && /abierto para escribir/.test(r))) malos.push("uno QUIETO pero abierto para escribir pasa");
+      if (PV.importar({ archivos: [path.join(tmpI, "no-existe.mov")] }) !== null) malos.push("uno que no existe rebota");
+      /* Sin `lsof` que correr no se rebota: no poder mirar no autoriza a rechazar el import. */
+      const { escritoresDe } = require(path.join(raiz, "server/bridge.js"));
+      if (typeof escritoresDe !== "function") malos.push("`escritoresDe` no esta exportada");
+      else if (escritoresDe([f], path.join(tmpI, "no-hay-lsof")).length) malos.push("sin `lsof` inventa un escritor");
+      /* Uno ROTO ya cerrado saca el mismo modal (medido el 2026-10-22): rebota si ffprobe no lo abre, pero solo
+         en .mov, .mp4 y .wav, y sin ffprobe no se rebota. Fuera de la lista —BRAW, MXF— no se mira. */
+      const sano = path.join(tmpI, "sano.mov"), roto = path.join(tmpI, "roto.MOV");
+      execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc2=s=160x90:r=25:d=1", "-pix_fmt", "yuv420p", sano, "-y"],
+        { stdio: "pipe" });
+      fs.writeFileSync(roto, fs.readFileSync(sano).subarray(0, 4000));
+      const ajenos = ["clip.braw", "clip.mxf"].map((n) => path.join(tmpI, n));
+      for (const a of ajenos) fs.writeFileSync(a, "basura");
+      for (const x of [sano, roto, ...ajenos]) fs.utimesSync(x, viejo, viejo);
+      const { noSeAbre } = require(path.join(raiz, "server/bridge.js"));
+      if (PV.importar({ archivos: [sano] }) !== null) malos.push("un .mov sano rebota");
+      const rr = PV.importar({ archivos: [sano, roto] });
+      if (!(typeof rr === "string" && /ffprobe no puede abrir/.test(rr) && rr.includes(roto))) malos.push("un .MOV roto ya cerrado pasa");
+      for (const a of ajenos) if (PV.importar({ archivos: [a] }) !== null) malos.push(`un ${path.extname(a)} que ffprobe no lee rebota`);
+      if (typeof noSeAbre !== "function") malos.push("`noSeAbre` no esta exportada");
+      else if (noSeAbre(roto, path.join(tmpI, "no-hay-ffprobe")) !== null) malos.push("sin ffprobe inventa un roto");
+      if (malos.length) mal("el prevuelo de `importar` se equivoca: " + malos.join(", "),
+        "un archivo a medio escribir saca un modal que traba el panel; y rebotar uno sano es rechazar uso correcto");
+      else ok("`importar` rebota un archivo recién escrito, abierto para escribir o roto, y deja pasar uno sano, quieto y cerrado");
+    } finally {
+      for (const fd of fds) { try { fs.closeSync(fd); } catch (e) { /* ya cerrado */ } }
+      try { fs.rmSync(tmpI, { recursive: true, force: true }); } catch (e) { /* era temporal */ }
     }
   }
 }
@@ -7450,6 +7867,49 @@ titulo("Fusionar transcripciones: marca el origen, el tiempo y que es un borrado
         "un JSON que se ve igual que una transcripcion verificada se usa como si lo fuera");
     } else {
       ok("marca origen y exactitud del tiempo, guarda la alternativa y avisa que es borrador");
+    }
+
+    /*
+     * Y LEE LO QUE EL REPO PRODUCE (2026-10-24, S01E02): leía sólo la respuesta del verbo, y con el `.audio.json` o el
+     * `.premiere.json` de `audio.js` la parte de Premiere salía VACÍA sin aviso: el "borrador" era Whisper solo. Se
+     * corre con las tres formas, con una vacía, y con la misma transcripción en dos formatos.
+     */
+    const tmpF = fs.mkdtempSync(path.join(os.tmpdir(), "fusionar-"));
+    try {
+      const pal = [["hola", 0.5], ["que", 0.9], ["tal", 1.2], ["bien", 2.1]];
+      const wJ = { motor: "whisper", palabras: pal.map(([t, d]) => ({ texto: t, desde: d, hasta: d + 0.2 })) };
+      const otras = [["hola", 0.52], ["que", 0.91], ["tal", 1.25], ["vos", 1.7], ["bien", 2.2]];
+      const formas = {
+        "respuesta del verbo": { segmentos: [{ texto: otras.map((x) => x[0]).join(" "), desdeFuente: 0.5, hastaFuente: 2.4 }] },
+        ".audio.json de premiere": { motor: "premiere", palabras: otras.map(([t, d]) => ({ texto: t, desde: d, dura: 0.2 })) },
+        ".premiere.json": { segments: [{ start: 0.52, words: otras.map(([t, d]) => ({ text: t, start: d, duration: 0.2 })) }] },
+      };
+      const corre = (pj) => {
+        const fw = path.join(tmpF, "w.json"), fp = path.join(tmpF, "p.json");
+        fs.writeFileSync(fw, JSON.stringify(wJ)); fs.writeFileSync(fp, JSON.stringify(pj));
+        return require("child_process").spawnSync(process.execPath, [f, "--whisper", fw, "--premiere", fp, "--salida", path.join(tmpF, "s.json")],
+          { encoding: "utf8", timeout: 30000 });
+      };
+      const malos = [];
+      for (const [q, pj] of Object.entries(formas)) {
+        const r = corre(pj);
+        if (r.status !== 0 || !/5 palabras · 4 las dicen LOS DOS · 1 sólo Premiere/.test(r.stdout)) { malos.push(`${q}: ${(r.stderr || r.stdout).trim().split("\n")[0]}`); continue; }
+        /* Y lo de Premiere sale como tiempo APROXIMADO en las tres formas, no sólo en la del verbo. */
+        const sal = JSON.parse(fs.readFileSync(path.join(tmpF, "s.json"), "utf8"));
+        if (sal.palabras.some((x) => x.fuente === "premiere" && x.tiempoExacto !== false)) malos.push(`${q}: una palabra de Premiere sale con tiempo exacto`);
+      }
+      const vacia = corre({ items: [] });
+      if (vacia.status === 0 || !/\[items\]/.test(vacia.stderr)) malos.push("una de Premiere ilegible no rebota nombrando sus claves");
+      const misma = corre({ segments: [{ start: 0.5, words: pal.map(([t, d]) => ({ text: t, start: d })) }] });
+      if (misma.status === 0 || !/MISMA/.test(misma.stderr)) malos.push("la misma transcripción en dos formatos no rebota");
+      const otrosTiempos = corre({ segments: [{ start: 0.55, words: pal.map(([t, d]) => ({ text: t, start: d + 0.05 })) }] });
+      if (otrosTiempos.status !== 0) malos.push("dos motores con las mismas palabras y otros tiempos rebotan");
+      const mismoMotor = corre({ motor: "whisper", palabras: otras.map(([t, d]) => ({ texto: t, desde: d })) });
+      if (mismoMotor.status === 0 || !/del motor "whisper"/.test(mismoMotor.stderr)) malos.push("dos del mismo motor no rebota");
+      if (malos.length) mal("`fusionar_transcripcion.js` no lee bien lo que produce el repo", malos.join("\n         "));
+      else ok("`fusionar_transcripcion.js` lee las tres formas, y rebota una ilegible o la misma transcripción en dos formatos");
+    } finally {
+      try { fs.rmSync(tmpF, { recursive: true, force: true }); } catch (e) { /* era temporal */ }
     }
   }
 }
@@ -8117,6 +8577,115 @@ if (!cuerpoBorrar) {
     mal("`borrar` no dice si la selección quedó vacía", "sin eso, un vaciado que falló se ve igual que uno que anduvo");
   } else {
     ok("`borrar` vacía la selección después de borrar, y lo informa");
+  }
+}
+
+/*
+ * Y TAMBIÉN CUANDO REBOTA, con el CANDADO puesto (2026-10-20). Con la pista del clip bloqueada, la transacción saca
+ * lo de las pistas libres —su audio vinculado— y la del clip no baja: medido con el editor. Se EJECUTA el `borrar`
+ * real contra pistas de mentira que sacan todo menos lo de la pista bloqueada, como lo medido. Los casos: uno sin
+ * candado, que es un Cmd+Z; el video en V1 bloqueada, que rebota con el audio ya afuera, UNA transacción —el bucle
+ * de formas seguía con las de MediaType, que committean sin efecto— y la selección vacía; el audio pedido con el
+ * video en V1 bloqueada, que sale bien y tiene que nombrar a V1; y un clip sin audio bloqueado, del que no sale
+ * nada.
+ *
+ * Y LOS Cmd+Z SON LAS TRANSACCIONES EN LAS QUE SE ENTRÓ, también las que tiraron armando la acción: el bucle viejo
+ * entró en once —cinco committearon, seis tiraron— y reponer el audio pidió doce Cmd+Z, once suyos. Con una
+ * versión de mentira donde las primeras formas tiran, son siete pasos y una sola transacción que sacó algo.
+ */
+{
+  const fuentes = ["async function borrar(", "async function ubicarClip(", "async function buscarVinculados(", "async function sociosDe(",
+    "async function contarItems(", "async function enLotes("].map((f) => cuerpoDeFuncion(srcComandos, f));
+  const desnudoB = fuentes[0] ? fuentes[0].replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "")
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""').replace(/`(?:[^`\\]|\\.)*`/g, "``") : "";
+  const casos = (() => {
+    if (fuentes.some((f) => !f)) return { error: "falta una de: borrar, ubicarClip, buscarVinculados, sociosDe, contarItems, enLotes" };
+    const guion = `
+      const vm = require("vm"), fuentes = ${JSON.stringify(fuentes)};
+      const TPS = 254016000000;
+      const mundo = (video, audio, bloqueadas, rechaza) => {
+        let tx = 0;
+        const hacer = (tipo, p, x) => {
+          const it = { tipo, p, etq: tipo + (p + 1), nombre: x.nombre, s: x.desde * TPS, e: x.hasta * TPS, i: (x.entrada || 0) * TPS };
+          it.getStartTime = async () => ({ ticks: String(it.s) });
+          it.getEndTime = async () => ({ ticks: String(it.e) });
+          it.getInPoint = async () => ({ ticks: String(it.i) });
+          it.getName = async () => it.nombre;
+          it.getProjectItem = async () => ({ name: it.nombre });
+          return it;
+        };
+        const V = video.map((l, p) => l.map((x) => hacer("V", p, x)));
+        const A = audio.map((l, p) => l.map((x) => hacer("A", p, x)));
+        const pista = (l) => (l ? { getTrackItems: async () => l.slice() } : null);
+        const seleccion = { items: [], getTrackItems: async () => seleccion.items.slice(),
+          removeItem: (x) => { const k = seleccion.items.indexOf(x); if (k !== -1) seleccion.items.splice(k, 1); },
+          addItem: (x) => { if (!seleccion.items.includes(x)) seleccion.items.push(x); } };
+        /* Lo medido: saca lo de las pistas libres y deja lo de la bloqueada, y committea igual. Un booleano de tercero
+           tira como Premiere. */
+        const sacar = (sel, ripple, tipo) => {
+          if (typeof tipo === "boolean" || (rechaza || []).includes(tipo)) throw new Error("Illegal Parameter type");
+          return () => { for (const x of sel.items) {
+            if (bloqueadas.includes(x.etq)) continue;
+            const l = (x.tipo === "V" ? V : A)[x.p], k = l.indexOf(x); if (k !== -1) l.splice(k, 1);
+          } };
+        };
+        const sequence = { name: "PRUEBA", getVideoTrackCount: async () => V.length, getAudioTrackCount: async () => A.length,
+          getVideoTrack: async (i) => pista(V[i]), getAudioTrack: async (i) => pista(A[i]),
+          getSelection: async () => seleccion, setSelection: async () => {} };
+        const project = { lockedAccess: (f) => f(),
+          executeTransaction: (cb) => { const l = []; cb({ addAction: (x) => l.push(x) }); tx++; l.forEach((f) => f()); return true; } };
+        const ppro = { TickTime: { createWithTicks: (x) => ({ ticks: String(x) }) },
+          Constants: { TrackItemType: { CLIP: "CLIP" }, MediaType: { ANY: "ANY", AUDIO: "AUDIO", DATA: "DATA", VIDEO: "VIDEO" } },
+          SequenceEditor: { getEditor: () => ({ createRemoveItemsAction: (sel, ripple, tipo) => sacar(sel, ripple, tipo) }) } };
+        return { V, A, seleccion, sequence, project, ppro, tx: () => tx };
+      };
+      const correr = async (w, params) => {
+        const ctx = { ppro: w.ppro, getProyectoYSecuencia: async () => ({ project: w.project, sequence: w.sequence }),
+          TICKS_POR_SEGUNDO: TPS, TOPE_LOTE: 10, esperarEntreTx: async () => {}, contieneN: (a, b) => a.indexOf(b) !== -1,
+          norm: (x) => String(x == null ? "" : x).normalize("NFC"), BORRADOS_RECIENTES: [], BORRAR_TOPE: 5, BORRAR_VENTANA_MS: 60000,
+          transaccion: (p, f, n) => p.executeTransaction(f, n), aSegundos: (k) => Number(k.ticks) / TPS };
+        const quedan = () => w.V.concat(w.A).map((l) => l.length).join(",");
+        try {
+          vm.runInNewContext(fuentes.join("\\n") + "\\nthis.borrar = borrar;", ctx);
+          const r = await ctx.borrar(params);
+          return { resumen: r.resumen, cmdZ: r.cmdZ, tx: w.tx(), quedaron: r.pistasQueNoBajaron, sacados: r.vinculadosSacados,
+                   seleccion: w.seleccion.items.length, quedan: quedan() };
+        } catch (e) { return { error: String(e.message || e).slice(0, 700), tx: w.tx(), seleccion: w.seleccion.items.length, quedan: quedan() }; }
+      };
+      const plano = (d, h) => ({ nombre: "cam.mov", desde: d, hasta: h, entrada: d });
+      const dos = (bloq) => mundo([[plano(0, 4), plano(4, 8)]], [[plano(0, 4), plano(4, 8)], [plano(0, 4), plano(4, 8)]], bloq);
+      (async () => console.log(JSON.stringify({
+        normal: await correr(dos([]), { pista: "V1", indice: 1 }),
+        videoBloqueado: await correr(dos(["V1"]), { pista: "V1", indice: 0 }),
+        audioConVideoBloqueado: await correr(dos(["V1"]), { pista: "A1", indice: 0 }),
+        nadaSale: await correr(mundo([[{ nombre: "titulo.png", desde: 0, hasta: 4, entrada: 0 }]], [[]], ["V1"]), { pista: "V1", indice: 0 }),
+        otraVersion: await correr(mundo([[plano(0, 4), plano(4, 8)]], [[plano(0, 4), plano(4, 8)]], [], ["ANY", "AUDIO", "DATA"]), { pista: "V1", indice: 1 })
+      })))();`;
+    try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
+    catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
+  })();
+  const { normal: n, videoBloqueado: vb, audioConVideoBloqueado: ab, nadaSale: ns, otraVersion: ov } = casos;
+  const iFija = desnudoB.search(/await sequence\.setSelection\(seleccion\)/), iRebota = desnudoB.indexOf("if (despues >= antes)");
+  if (casos.error || [n, ab].some((x) => x && x.error)) {
+    mal("el `borrar` de mentira no se pudo ejecutar", casos.error || (n.error || ab.error));
+  } else if (n.tx !== 1 || n.cmdZ !== 1 || !/UN Cmd\+Z/.test(n.resumen) || /OJO/.test(n.resumen) || n.quedan !== "1,1,1") {
+    mal("`borrar` sin candado no saca el plano entero con UN Cmd+Z", JSON.stringify(n));
+  } else if (vb.tx !== 1 || !/PARTIDO/.test(vb.error || "") || !/UN Cmd\+Z/.test(vb.error || "") || vb.quedan !== "2,1,1") {
+    mal("`borrar` con la pista del clip bloqueada no para en la primera transacción, o no dice el plano partido y sus Cmd+Z",
+        "medido el 2026-10-20: once intentos y DOCE Cmd+Z para reponer el audio · " + JSON.stringify(vb));
+  } else if (vb.seleccion !== 0 || iFija === -1 || iRebota === -1 || iFija > iRebota) {
+    mal("`borrar` rebota con lo que salió adentro de la selección", "la edición siguiente lee un clip que ya no existe · " + JSON.stringify(vb));
+  } else if (ab.cmdZ !== 1 || !/V1 NO bajó/.test(ab.resumen) || !/UN Cmd\+Z/.test(ab.resumen) || ab.sacados !== 1 ||
+             JSON.stringify(ab.quedaron) !== '["V1"]') {
+    mal("`borrar` da por sacado un plano cuyo video quedó en una pista bloqueada",
+        "contestaba «con 6 vinculado(s) · UN Cmd+Z» y el video seguía en V1 · " + JSON.stringify(ab));
+  } else if (ns.tx !== 1 || !/No salió nada/.test(ns.error || "") || !/el primer Cmd\+Z no cambia/.test(ns.error || "")) {
+    mal("`borrar` sobre un clip bloqueado sin audio no dice que la transacción quedó en el historial", JSON.stringify(ns));
+  } else if (!ov || ov.error || ov.cmdZ !== 7 || !/7 Cmd\+Z/.test(ov.resumen) || ov.tx !== 1) {
+    mal("`borrar` no cuenta como Cmd+Z las transacciones que tiraron armando la acción",
+        "el bucle viejo entró en once y decía cinco: el editor apretó doce para reponer el audio · " + JSON.stringify(ov));
+  } else {
+    ok("`borrar` con candado: para en la primera transacción, vacía la selección al rebotar y nombra la pista que no bajó; y sus Cmd+Z cuentan también las transacciones que tiraron");
   }
 }
 

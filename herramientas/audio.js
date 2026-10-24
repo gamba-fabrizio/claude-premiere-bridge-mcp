@@ -657,21 +657,52 @@ async function main() {
    * `.audio.json`; se lee el campo `motor` del que esta, y se rebota ANTES de transcribir, que es
    * cuando pisar todavia no costo nada. Uno que no se puede leer tambien rebota: no saber de quien
    * es no autoriza a borrarlo. `--pisar` lo fuerza.
+   *
+   * El de un medio SIN AUDIO (`sinAudio: true`, abajo) se pisa sin pedirlo: no tiene palabras, asi que
+   * no hay nada que perder, y rebotarlo haria que correr otro motor sobre esa carpeta fallara por un
+   * archivo vacio.
    */
   const base = cfg.destino
     ? path.join(cfg.destino, path.basename(cfg.archivo).replace(/\.[^.]+$/, ""))
     : cfg.archivo.replace(/\.[^.]+$/, "");
   const destino = cfg.salida || base + ".audio.json";
   if (fs.existsSync(destino) && !cfg.pisar) {
-    let previo = null;
+    let previo = null, vacio = false;
     try { previo = JSON.parse(fs.readFileSync(destino, "utf8")).motor || null; } catch (e) { previo = null; }
-    if (previo !== cfg.motor) {
+    try {
+      const j = JSON.parse(fs.readFileSync(destino, "utf8"));
+      vacio = j.sinAudio === true && Array.isArray(j.palabras) && j.palabras.length === 0;
+    } catch (e) { vacio = false; }
+    if (previo !== cfg.motor && !vacio) {
       console.error(previo
         ? `Ya hay una transcripcion de \`${previo}\` en ${destino}, y pediste \`${cfg.motor}\`: la pisaria, con su .premiere.json y su .srt.`
         : `Ya hay un ${path.basename(destino)} en ${destino} y no puedo leer de que motor es: pisarlo podria borrar otra transcripcion.`);
       console.error("Usa otro --destino, uno por motor, o --pisar si queres reemplazarla.");
       process.exit(1);
     }
+  }
+
+  /*
+   * UN MEDIO SIN AUDIO NO ES UN FALLO (2026-10-19, un reporte de uso). Un video de WhatsApp sin stream de
+   * audio hacia caer al ffmpeg de abajo con "Invalid argument" sobre el wav temporal, que se leia como
+   * un problema del tmp, y una tanda lo contaba como FALLO. Se mira ANTES —y antes de tocar Premiere
+   * con `--motor premiere`— y se deja el .audio.json vacio, como el de un insert muto: quien recorre
+   * la carpeta lo saltea por cero palabras, y la tanda tiene un registro de que se miro.
+   */
+  let streamsAudio = null;
+  try {
+    streamsAudio = execFileSync("ffprobe", ["-v", "error", "-select_streams", "a", "-show_entries",
+      "stream=index", "-of", "csv=p=0", cfg.archivo], { encoding: "utf8" }).trim();
+  } catch (e) { streamsAudio = null; }   /* ffprobe no lo pudo leer: que lo diga el ffmpeg de abajo */
+  if (streamsAudio === "") {
+    if (cfg.destino) fs.mkdirSync(cfg.destino, { recursive: true });
+    fs.writeFileSync(destino, JSON.stringify({
+      archivo: path.resolve(cfg.archivo), motor: cfg.motor, idioma: cfg.idioma,
+      sinAudio: true, piso: null, umbral: null, palabras: [], tramos: []
+    }, null, 1));
+    console.log(`${path.basename(cfg.archivo)} · SIN AUDIO: el medio no tiene ningun stream de audio, no hay nada que transcribir.` +
+      `\n→ ${destino} (vacio, con \`sinAudio: true\`)`);
+    return;
   }
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "audio-"));

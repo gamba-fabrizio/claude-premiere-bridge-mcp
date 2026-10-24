@@ -20,8 +20,10 @@
   2026-10-18. → «Recorrer bins: un item nulo»
 - **Un nombre parcial que engancha más de uno rebota.** → «El match parcial del proyecto»
 - **`clips` y `revisar` leen la salida de cada pista.** → «Una pista con el OJO APAGADO»
-- **`revisar` marca a los vecinos que REPITEN MATERIAL en la fuente**, sólo a 1x y confirmados por la ruta;
-  a otra velocidad, sin medir. → «`revisar` no veía el material REPETIDO»
+- **`revisar` marca a los vecinos que REPITEN MATERIAL en la fuente**, a cualquier velocidad desde el
+  2026-10-20 y confirmados por la ruta; los invertidos, sin medir. → «`revisar` no veía el material REPETIDO»
+- **Cada transacción en la que se entró es UN Cmd+Z**, también la que tira armando su acción.
+  → «Cada transacción en la que se entró es un Cmd+Z»
 - **Un verificador que relee un clip lo busca por tiempo Y por medio**: por tiempo solo, uno ajeno que
   arranca en el mismo punto pasa por el puesto. → «El veredicto releía por TIEMPO»
 - **Un pendiente se cierra en la misma tanda que su trabajo.** → «Un pendiente que no se cierra»
@@ -316,6 +318,10 @@ repetición.
 uno escalado: `relojDelClip` supone lo segundo y `radiografia` lo primero. Esos pares se cuentan como "sin
 medir", para que un "sin problemas" no los incluya.
 
+**Medido el 2026-10-20:** va en tiempo de clip —fuente ÷ velocidad—, y desde ese día `revisar` mide las
+repeticiones a cualquier velocidad, con la de cada clip; sólo los invertidos siguen "sin medir". El caso, en
+`firmas-y-limites.md`.
+
 Medido:
 
 ```
@@ -466,7 +472,8 @@ el audio más largo y más corto que el video— que se borraron al terminar:
 
 **Y lo que sigue abierto**: el espaciado de `armarSecuencia` y `escalaFija` y las lecturas en volumen de
 `revisar` —medir antes de tocar un verbo estable—, y `borrar` con la pista del clip bloqueada: la API expone
-sólo el evento de cambio del bloqueo, así que no se puede armar por API.
+sólo el evento de cambio del bloqueo, así que no se puede armar por API. (Se midió con el editor el 2026-10-20:
+«Cada transacción en la que se entró es un Cmd+Z», abajo.)
 
 **Y la regla nueva, mecanizada.** `test.js` suma barridos POR MECANISMO, cada uno con su mutación o su
 control y probado contra el código viejo:
@@ -486,6 +493,27 @@ en las dos direcciones: un sitio nuevo sin anotar, y uno anotado que ya no está
 límite de 5 horas de la cuenta se agotó a mitad: un agente se cortó y se relanzó cuando se renovó el
 límite. Un barrido así no reemplaza al uso: lo que la API hace distinto de lo documentado sigue
 apareciendo usándola. Lo que sí encuentra es la regla que no se propagó.
+
+## Cada transacción en la que se entró es un Cmd+Z: el candado, medido con el editor (2026-10-20)
+
+`borrar` con la pista del clip BLOQUEADA no se podía armar por API —no hay `isLocked`—, así que se midió con el
+editor poniendo el candado. Con V1 bloqueada, `borrar` sobre el video sacó los seis audios del plano y dejó el
+video: el plano quedó PARTIDO. Y el bucle de formas siguió: once intentos —cinco committearon, seis tiraron
+«Illegal Parameter type» al armar la acción—. Apuntando a un audio, con el video bloqueado, salieron los seis
+streams, quedó el video, y el verbo contestó «UN Cmd+Z» como si nada.
+
+**Y los Cmd+Z, apretados por el editor de a uno**: reponer todo pidió DOCE, y el verbo había dicho cinco y uno.
+Doce es once intentos más el segundo borrado: cada `executeTransaction` en la que se entró deja UN paso, también la
+que tira armando su acción y la que committea sin efecto. Ahora `borrar` corta en la primera forma que committea
+—si committeó y no sacó, es el candado—, vacía la selección también al rebotar, cuenta pista por pista y nombra la
+que no bajó, y sus Cmd+Z cuentan también los intentos que tiraron. Con V1 y A1 bloqueadas: una transacción, y UN
+Cmd+Z repuso lo que salió.
+
+**Y lo mismo con lotes, el 2026-10-24.** `aplicarEscalas` agrupa de a `TOPE_LOTE` sin que se lo pidan, y un Cmd+Z
+deshace el lote ENTERO: sobre 12 clips, dos transacciones; un Cmd+Z mandado por teclado repuso sólo los dos del
+último lote, y el segundo los diez del primero. El resumen dice cuántos hacen falta, contando sólo las transacciones
+en las que se entró. Lo que no se generalizó todavía: los otros verbos que prueban formas adentro de una
+transacción.
 
 ## Cerrados: casos resueltos, acotados o desmentidos
 
