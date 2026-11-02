@@ -173,8 +173,8 @@ Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que
   fallo. → `verificacion.md`
 - **Antes de escribir un verificador, preguntate qué hace con un medio SIN VIDEO.** Tres verbos
   informaron "no entró" sobre un audio que sí había entrado, y el 2026-11-02 `in_out_medio`, por el lector de
-  abajo: `getInPoint(VIDEO)` da el centinela en un WAV con marcas, y `leerInOut` lo tomaba. → `verificacion.md`,
-  `cuadros-y-nombres.md`
+  abajo: `getInPoint(VIDEO)` da el centinela en un WAV con marcas, `leerInOut` lo tomaba, y `armarSecuencia` le
+  BORRABA las marcas al devolverlas —medido con un testigo de afuera—. → `verificacion.md`, `cuadros-y-nombres.md`
 - **Un verificador que relee un clip lo busca por tiempo Y por medio** (`clipDelMedio`): por tiempo solo,
   uno ajeno que arranca en el mismo punto pasa por el puesto —un MAL falso, y con el mismo largo un OK
   falso—, y lo que se le aplica después va a ese clip. → `verificacion.md`
@@ -245,7 +245,7 @@ no la tienen estén **declarados a propósito** en una lista. El default —no h
   adentro de Premiere. **Mover el repo obliga a editar la del panel**, y `test.js` compara
   las dos.
 
-## Pendientes abiertos (2026-10-24)
+## Pendientes abiertos (2026-11-02)
 
 - **El borde de ~200 ms del espaciado no se reproduce hoy.** Mató a un proyecto pesado en 26.3.2 y a un
   banco pesado en 26.5; el 2026-10-01 una copia pesada, con la secuencia y el material de aquel banco,
@@ -259,8 +259,8 @@ no la tienen estén **declarados a propósito** en una lista. El default —no h
 - **Lo que sigue abierto de la auditoría de reglas del 2026-10-17** —lo arreglable se cerró y se midió
   en el proyecto de prueba el 2026-10-18, también los casos borde, los bordes PENDIENTE y lo sin medir—:
   medir antes de tocar el espaciado de `armarSecuencia` y `escalaFija` y las lecturas en volumen de
-  `revisar`, y los Cmd+Z de los otros verbos que prueban formas adentro de una transacción. El candado y la
-  velocidad se midieron con el editor el 2026-10-20. → `verificacion.md`
+  `revisar`. El candado y la velocidad se midieron con el editor el 2026-10-20, y los Cmd+Z de los verbos
+  que prueban formas, el 2026-11-02. → `verificacion.md`
 - **Los crashes de la interfaz no tienen arreglo medido**: no se reproducen a pedido. Los del panel
   —marcados como PROPUESTA en `plugin/index.js`— no mueven lo acumulado: medido por tasa el 2026-10-01,
   Premiere cayó igual que antes. → `crashes.md`

@@ -515,8 +515,15 @@ Cmd+Z repuso lo que salió.
 **Y lo mismo con lotes, el 2026-10-24.** `aplicarEscalas` agrupa de a `TOPE_LOTE` sin que se lo pidan, y un Cmd+Z
 deshace el lote ENTERO: sobre 12 clips, dos transacciones; un Cmd+Z mandado por teclado repuso sólo los dos del
 último lote, y el segundo los diez del primero. El resumen dice cuántos hacen falta, contando sólo las transacciones
-en las que se entró. Lo que no se generalizó todavía: los otros verbos que prueban formas adentro de una
-transacción.
+en las que se entró.
+
+**Y los otros verbos que prueban formas, medidos el 2026-11-02.** El riesgo era el de `borrar`: una forma que
+TIRA deja igual su paso en el historial, y un verbo que cuenta sólo la que entró se queda corto. Se materializa
+únicamente si falla una forma anterior, y eso se lee en `intentos` y en `via`. En 26.x la PRIMERA forma entró en
+los seis candidatos —`escalaFija`, `marcar`, `duplicarSecuencia`, `subclip`, `ponerAjustes`; `insertar` no prueba
+formas—, así que los Cmd+Z que informan son los que hay, y no se tocó ninguno. Si una versión nueva rompe la
+primera forma, vuelve: el síntoma es un `intentos` no vacío. Ojo con el instrumento: el contador de la sesión
+suma sólo las transacciones que devuelven `true`, y no habría visto un fallo; lo que decide es el orden.
 
 ## `frame` devolvía el PNG tardío de otra llamada como el cuadro pedido (2026-11-02)
 

@@ -191,10 +191,26 @@ in/out que el editor puso. Y se reconoce por su FIRMA —el clip MENOS DE UN CUA
 cualquier diferencia: un PNG o un Transparent Video entran con in-point ~3600 con el medio en 0.
 
 Medido en el proyecto de prueba: 50p en 25 con 1,02–3,02 entró 1,00–3,00, entrada y salida, y el audio vinculado
-igual; en la grilla no avisó; un WAV con 0,517 entró con 0,48. Un SUBCLIP no se compara: su rango no se expone
-como in/out del item, y uno de 2 s que entró en 23,976 con 1,9603 —0,952 de cuadro menos— sigue sin aviso.
+igual; en la grilla no avisó; un WAV con 0,517 entró con 0,48. Un SUBCLIP no se compara, y no se puede: uno de
+2 s que entró en 23,976 con 1,9603 —0,952 de cuadro menos— sigue sin aviso porque **la API no expone su rango**.
+Medido: sus in/out dan el centinela en las cuatro formas, `getMedia()` devuelve el `Media` del ARCHIVO —20 s desde
+0 en un subclip 2–4, igual que en su original— y ni `ClipProjectItem` ni `ProjectItem` reflejan otro método de
+rango. El `.prproj` lo tiene, pero es el último guardado: no se construyó.
 
 **El WAV destapó un bug del lector.** `in_out_medio` sobre él contestó *«la transacción corrió y el medio NO
 quedó como se pidió»*, y el clip insertado salió de 2 s: SÍ había quedado. `leerInOut` prueba VIDEO, ANY, AUDIO
 y sin argumento, y se quedaba con la primera que devolviera ticks; en un medio sin video, `getInPoint(VIDEO)` da
 el centinela −400000 s aunque haya marcas. Ahora el centinela no gana mientras otra forma traiga marcas.
+
+Y eso alcanzaba a `armarSecuencia` y `colocarLote`, que leen y devuelven los in/out con `leerInOut`: a un audio
+solo con marcas se las BORRABAN. Medido con el plugin de antes del arreglo instalado a propósito, y con un
+testigo de afuera —insertar el WAV y mirar el clip, no releer con el lector que se prueba—:
+
+```
+                     WAV marcado 0,6–2,2, insertado ANTES del armado    insertado DESPUÉS de un armado que lo usa
+código viejo         entrada 0,6, 1,6 s: las marcas estaban             entrada 0, el archivo ENTERO
+código nuevo         entrada 0,6, 1,6 s                                 entrada 0,6, 1,6 s
+```
+
+Con el viejo, el armado informaba «in/out devueltos a como estaban»: un OK falso, porque lo devolvía al centinela.
+`colocarLote` pasa por las mismas dos funciones y no se midió aparte.
