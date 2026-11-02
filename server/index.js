@@ -874,7 +874,10 @@ server.registerTool(
       "insertar corriendo todo lo que está a la derecha es un cambio grande y difícil de ver " +
       "desde acá. Poné en una pista libre si no querés pisar nada — premiere_clips dice cuáles " +
       "están ocupadas.\n\n" +
-      "Devuelve cuántos clips tenía la pista antes y después, y dónde quedó el nuevo.",
+      "Devuelve cuántos clips tenía la pista antes y después, y dónde quedó el nuevo.\n\n" +
+      "Premiere lleva el in/out del medio a la grilla de la SECUENCIA al pegar: una entrada entre cuadros " +
+      "entra BAJADA, hasta un cuadro antes. Lo dice `entradaBajada`, con el cuadro más cercano para pedirle " +
+      "al medio, y `largoCambiado` si el largo quedó distinto. Un subclip no se compara: se lee sin marca.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       proyecto: z
@@ -898,7 +901,8 @@ server.registerTool(
        * video, un .wav que SI entro se mostraba como "1 → 1, puesto: []". */
       return texto(r.resumen, { entro: r.entro, clipsAntes: r.clipsAntes, clipsDespues: r.clipsDespues, puesto: r.puesto,
                                 pistaAudio: r.pistaAudio, pistaAudioReal: r.pistaAudioReal, clipsAudioAntes: r.clipsAudioAntes,
-                                clipsAudioDespues: r.clipsAudioDespues, puestoAudio: r.puestoAudio, otrasPistasAudio: r.otrasPistasAudio });
+                                clipsAudioDespues: r.clipsAudioDespues, puestoAudio: r.puestoAudio, otrasPistasAudio: r.otrasPistasAudio,
+                                entradaBajada: r.entradaBajada, largoCambiado: r.largoCambiado });
     } catch (e) {
       return fallo(e);
     }

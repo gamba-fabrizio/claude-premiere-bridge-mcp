@@ -42,10 +42,12 @@ en `CLAUDE.md`.
 ## Cómo leer lo que contesta
 
 - **`insertar` se juzga por `entro`.** Con `entro !== true` no edites el clip que haya en ese
-  punto: puede ser uno viejo del mismo medio.
+  punto: puede ser uno viejo del mismo medio. Y un in/out del medio entre cuadros entra BAJADO a la grilla
+  de la secuencia, también en un audio: lo dice `entradaBajada`, con la entrada exacta. Un subclip, no.
 - **`frame` es la mejor verificación: mirá en vez de deducir.** Y cuando importa, MEDÍ el cuadro
   (la media): un negro y un vacío se ven iguales, y el visor muestra un PNG transparente como
-  blanco. Una opacidad se mide en el ALFA del PNG: la luminancia no la ve.
+  blanco. Una opacidad se mide en el ALFA del PNG: la luminancia no la ve. Con un efecto pesado
+  (S_Beauty) un cuadro nuevo tarda hasta ~11 s, y `playhead` puede VENCER a los 30 s habiéndose movido.
 - **`revisar` después de cada tanda**: ceros, solapes, huecos en cuadros, juntas, pistas con la
   salida apagada, y vecinos del mismo medio que REPITEN MATERIAL —se pisan en la fuente y ese tramo
   sale dos veces, con el timeline limpio—, también a otra velocidad: los invertidos los cuenta como sin

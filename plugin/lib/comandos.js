@@ -1773,6 +1773,40 @@ function tickAlCuadro(segundos, tpf) {
 function enCuadros(ticks, tpf) {
   return isFinite(tpf) && tpf > 0 ? Number((ticks / tpf).toFixed(3)) : null;
 }
+/*
+ * LA ENTRADA QUE PREMIERE BAJÓ AL PEGAR (2026-10-29, un reporte de uso). `insertar` pega con el in/out que el medio
+ * ya tenía —del editor, de `in_out_medio`, de un subclip—, y Premiere lo BAJA a la grilla de la SECUENCIA: un
+ * ProRes de 59,94 con entrada 0,5976 entró en una de 30 con 0,567 (17/30), y el verbo decía `entro: true` sin
+ * más. Se reconoce por su FIRMA y por nada más: el clip quedó MENOS DE UN CUADRO de secuencia por debajo del
+ * medio. Una diferencia cualquiera no alcanza: un PNG o un Transparent Video entran con in-point ~3600 con el
+ * medio en 0, y eso es otra cosa. Un medio SIN MARCA cae solo: el centinela es −400000 s, y la diferencia da
+ * negativa. Sin `tpf`, null. `cercana` es lo que hay que pedirle al medio para que entre exacto: el cuadro MÁS
+ * CERCANO de la grilla.
+ */
+function entradaBajadaDe(kMedio, kClip, tpf) {
+  if (!(isFinite(tpf) && tpf > 0) || !isFinite(kMedio) || !isFinite(kClip)) return null;
+  const bajo = kMedio - kClip;
+  if (!(bajo > 0 && bajo < tpf)) return null;
+  const s = (k) => Number((k / TICKS_POR_SEGUNDO).toFixed(4));
+  return { delMedio: s(kMedio), quedo: s(kClip), cuadros: enCuadros(bajo, tpf), cercana: s(ticksAlCuadro(kMedio, tpf)) };
+}
+/* Y el LARGO, que sirve también donde la entrada no se puede comparar: la de un SUBCLIP se lee relativa a él
+   —0—, y uno de 2 s de un 25p entró en una de 23,976 con 1,9603, 47 cuadros: 0,952 de cuadro menos, callado.
+   Mismo criterio: distinto en MENOS DE UN CUADRO, para arriba o para abajo; `cuadros` lleva el signo. */
+function largoCambiadoDe(kMedio, kClip, tpf) {
+  if (!(isFinite(tpf) && tpf > 0) || !isFinite(kMedio) || !isFinite(kClip)) return null;
+  const d = kClip - kMedio;
+  if (d === 0 || Math.abs(d) >= tpf) return null;
+  const s = (k) => Number((k / TICKS_POR_SEGUNDO).toFixed(4));
+  return { delMedio: s(kMedio), quedo: s(kClip), cuadros: enCuadros(d, tpf) };
+}
+/* Lo mismo ANTES de pegar, para `in_out_medio`: una entrada fuera de la grilla de la secuencia activa va a
+   entrar BAJADA. null si cae en un cuadro. */
+function fueraDeGrillaDe(k, tpf) {
+  if (!(isFinite(tpf) && tpf > 0) || !isFinite(k) || k % tpf === 0) return null;
+  const s = (x) => Number((x / TICKS_POR_SEGUNDO).toFixed(4));
+  return { alInsertar: s(Math.floor(k / tpf) * tpf), cercana: s(ticksAlCuadro(k, tpf)) };
+}
 /* Los tres tiempos de un clip en TICKS, sin redondear: para comparar antes y después, y para hacer cuentas. */
 async function ticksDe(clip) {
   return {
@@ -2911,16 +2945,28 @@ async function leerInOut(clipItem) {
   /* SIN ARGUMENTO NO LEE (medido el 2026-09-24, en vivo): los dos medios de un armado dieron null y se
    * limpiaron, y el still volvió a las doce horas. La aridad dice 1, así que se enumeran los tipos de
    * medio reales y se usa el primero que devuelva ticks; `via` dice cuál fue. */
+  /* Y el CENTINELA no cuenta como lectura mientras quede otra forma (2026-11-02): en un medio SIN VIDEO,
+   * `getInPoint(VIDEO)` devuelve −400000 s aunque el medio tenga marcas, y ganaba la primera forma que
+   * devolviera ticks. Un WAV con 0,517–2,517 puestos —el clip insertado salió de 2 s, no de los 3 del archivo—
+   * se leía SIN MARCA: `in_out_medio` decía que no había entrado, e `insertar` no veía que Premiere le había
+   * bajado la entrada. Se sigue hasta una lectura con marca; si todas son el centinela, va la primera, que es
+   * lo que se leía antes. */
   const M = (ppro.Constants && ppro.Constants.MediaType) || {};
   const formas = [["VIDEO", M.VIDEO], ["ANY", M.ANY], ["AUDIO", M.AUDIO], ["sin argumento", undefined]];
+  const centinela = (t) => Math.abs(Number(t.ticks) / TICKS_POR_SEGUNDO) > 1e5;
+  let primera = null;
   for (const [via, tipo] of formas) {
     try {
       const i = tipo === undefined ? await clipItem.getInPoint() : await clipItem.getInPoint(tipo);
       const o = tipo === undefined ? await clipItem.getOutPoint() : await clipItem.getOutPoint(tipo);
-      if (i && o && i.ticks !== undefined && o.ticks !== undefined) return { entrada: i, salida: o, via: via };
+      if (i && o && i.ticks !== undefined && o.ticks !== undefined) {
+        const r = { entrada: i, salida: o, via: via };
+        if (!centinela(i) && !centinela(o)) return r;
+        if (!primera) primera = r;
+      }
     } catch (e) { /* la forma siguiente */ }
   }
-  return null;
+  return primera;
 }
 
 /* Devuelve los in/out en UNA transacción y RELEE cada medio: que la transacción diga true no
@@ -3029,12 +3075,23 @@ async function inOutMedio(params) {
   });
   const despues = ver(await leerInOut(clipItem));
   const entro = !!despues && Math.abs(despues.entrada - params.entrada) < 0.001 && Math.abs(despues.salida - params.salida) < 0.001;
+  /* Y SE AVISA si la entrada no cae en un cuadro de la secuencia ACTIVA (2026-10-29, un reporte de uso): `insertar`
+     la va a BAJAR al pegar. No se cuantiza acá: el medio vale para todas las secuencias, y la grilla es la de
+     la que lo reciba. Sin secuencia activa no se dice nada. */
+  let fueraDeGrilla = null;
+  try {
+    const sq = await project.getActiveSequence();
+    const g = sq ? fueraDeGrillaDe(Math.round(params.entrada * TICKS_POR_SEGUNDO), Number(await sq.getTimebase())) : null;
+    if (g) fueraDeGrilla = Object.assign({ secuencia: String(sq.name) }, g);
+  } catch (e) { fueraDeGrilla = null; }
   return {
     resumen: `"${params.medio}": ${decir(antes)} → ${decir(despues)}` +
       (entro ? " · se deshace con Cmd+Z"
         : corrio ? " · OJO: la transacción corrió y el medio NO quedó como se pidió"
-        : " · LA TRANSACCIÓN NO CORRIÓ"),
-    medio: params.medio, antes: antes, despues: despues, entro: entro
+        : " · LA TRANSACCIÓN NO CORRIÓ") +
+      (fueraDeGrilla ? ` · OJO: la entrada no cae en un cuadro de "${fueraDeGrilla.secuencia}": insertado ahí, ` +
+        `entra con ${fueraDeGrilla.alInsertar} —también un audio solo—; el cuadro más cercano es ${fueraDeGrilla.cercana}` : ""),
+    medio: params.medio, antes: antes, despues: despues, entro: entro, fueraDeGrilla: fueraDeGrilla
   };
 }
 
@@ -4544,6 +4601,16 @@ async function insertar(params) {
     }
   }
 
+  /*
+   * LA ENTRADA DEL MEDIO, para releerla en el clip puesto (2026-10-29, un reporte de uso): Premiere la BAJA a la
+   * grilla de la secuencia al pegar, y `entro` no lo ve. Es la trampa de `ticksAlCuadro`, que `armarSecuencia`
+   * y `colocarLote` esquivan redondeando; acá el in/out lo puso otro, así que no se toca: se relee y se dice.
+   * Lecturas, ninguna transacción.
+   */
+  let inMedio = null, tpfIns = null;
+  try { const ci = ppro.ClipProjectItem.cast(item); inMedio = ci ? await leerInOut(ci) : null; } catch (e) { inMedio = null; }
+  try { tpfIns = Number(await sequence.getTimebase()); } catch (e) { tpfIns = null; }
+
   const editor = ppro.SequenceEditor.getEditor(sequence);
   let ok = false;
   let excepcion = null;
@@ -4573,10 +4640,14 @@ async function insertar(params) {
   const track2 = await sequence.getVideoTrack(pista);
   const items = await track2.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
   const puesto = [];
+  let clipPuesto = null;   // el objeto de la API, para releer su entrada; no va en la respuesta
   for (let i = 0; i < items.length; i++) {
     if (!items[i]) continue;
     const s = aSegundos(await items[i].getStartTime());
-    if (Math.abs(s - segundos) < 0.05 && await delMedio(items[i])) puesto.push({ nombre: String(await items[i].getName()), desde: Number(s.toFixed(3)) });
+    if (Math.abs(s - segundos) < 0.05 && await delMedio(items[i])) {
+      puesto.push({ nombre: String(await items[i].getName()), desde: Number(s.toFixed(3)) });
+      if (!clipPuesto) clipPuesto = items[i];
+    }
   }
 
   /*
@@ -4600,7 +4671,10 @@ async function insertar(params) {
     for (let i = 0; i < itemsA.length; i++) {
       if (!itemsA[i]) continue;
       const s2 = aSegundos(await itemsA[i].getStartTime());
-      if (Math.abs(s2 - segundos) < 0.05 && await delMedio(itemsA[i])) puestoA.push({ nombre: String(await itemsA[i].getName()), desde: Number(s2.toFixed(3)) });
+      if (Math.abs(s2 - segundos) < 0.05 && await delMedio(itemsA[i])) {
+        puestoA.push({ nombre: String(await itemsA[i].getName()), desde: Number(s2.toFixed(3)) });
+        if (!clipPuesto) clipPuesto = itemsA[i];   // un medio sin video: su clip es el de audio
+      }
     }
   }
   /*
@@ -4674,6 +4748,15 @@ async function insertar(params) {
   const cambioEnPuntoA = puestoA.length > 0 && puestoA[0].nombre !== nombreAntesEnPuntoA;
   const entro = crecioV || crecioA || audioPuesto > 0 || cambioEnPunto || cambioEnPuntoA;
   const nadaEnNingunLado = !entro;
+  /* En TICKS. A 1x, que es como entra todo overwrite, la entrada del clip es de fuente. */
+  let entradaBajada = null, largoCambiado = null;
+  if (entro && inMedio && clipPuesto) {
+    try {
+      const t = await ticksDe(clipPuesto);
+      entradaBajada = entradaBajadaDe(Number(inMedio.entrada.ticks), t.i, tpfIns);
+      largoCambiado = largoCambiadoDe(Number(inMedio.salida.ticks) - Number(inMedio.entrada.ticks), t.e - t.s, tpfIns);
+    } catch (e) { entradaBajada = null; largoCambiado = null; }
+  }
   /* Fantasma: hay un clip en ese segundo, pero es EL MISMO que ya estaba y nada crecio. */
   const fantasma = puesto.length > 0 && !crecioV && !cambioEnPunto;
   /* El fantasma de AUDIO sólo se avisa cuando no hay video en juego: con video, el aviso de
@@ -4722,6 +4805,16 @@ async function insertar(params) {
           `que no entro, asi que se da por NO puesta. NO lo edites creyendo que es el nuevo`
         : "") +
       (nadaEnNingunLado ? " · NO SE PUSO NADA, ni en video ni en audio" : "") +
+      (entradaBajada
+        ? ` · OJO: la entrada del medio es ${entradaBajada.delMedio} s y el clip quedó en ${entradaBajada.quedo}: ` +
+          `Premiere la BAJÓ ${entradaBajada.cuadros} de cuadro, a la grilla de la secuencia. Para que entre exacto, ` +
+          `la entrada del medio en ${entradaBajada.cercana} (el cuadro más cercano)`
+        : "") +
+      (largoCambiado
+        ? ` · OJO: el clip dura ${largoCambiado.quedo} s y el medio ${largoCambiado.delMedio}: ` +
+          `${Math.abs(largoCambiado.cuadros)} de cuadro ${largoCambiado.cuadros < 0 ? "menos" : "más"}, ` +
+          `porque Premiere llevó los bordes a la grilla de la secuencia`
+        : "") +
       (otrasPistasA.length
         ? ` · y el medio trae más streams: cayeron también en ${otrasPistasA.join(", ")}, donde el overwrite PISA lo que hubiera`
         : audioPuesto > 0 && !puestoA.length
@@ -4745,6 +4838,8 @@ async function insertar(params) {
     puesto: puesto,
     puestoAudio: puestoA,
     entro: entro,
+    entradaBajada: entradaBajada,
+    largoCambiado: largoCambiado,
     crecioVideo: crecioV,
     crecioAudio: crecioA,
     fantasma: fantasma,
@@ -6477,13 +6572,6 @@ function dirname(p) {
   return i > 0 ? s.slice(0, i) : s;
 }
 
-/*
- * Dónde puede escribir Premiere el frame exportado. Se prueban varias porque
- * exportSequenceFrame devuelve éxito aunque no deje el archivo en ningún lado:
- * el único juez es si el archivo APARECE.
- */
-
-
 /**
  * Los keyframes que EXISTEN, en el reloj de la SECUENCIA.
  *
@@ -6936,6 +7024,11 @@ async function curvaKeyframe(params) {
   };
 }
 
+/*
+ * Dónde puede escribir Premiere el frame exportado. Se prueban varias porque
+ * exportSequenceFrame devuelve éxito aunque no deje el archivo en ningún lado:
+ * el único juez es si el archivo APARECE.
+ */
 async function carpetasCandidatas() {
   const salida = [];
   try {
@@ -6947,7 +7040,7 @@ async function carpetasCandidatas() {
   } catch (e) { /* seguimos */ }
   try {
     const { project } = await getProyectoYSecuencia();
-    if (project.path) salida.push({ via: "carpeta del proyecto", dir: dirname(project.path) });
+    if (project.path) salida.push({ via: "carpeta del proyecto", dir: dirname(project.path), delEditor: true });
   } catch (e) { /* seguimos */ }
   return salida;
 }
@@ -6964,17 +7057,65 @@ async function buscarArchivo(rutas) {
 }
 
 /*
- * exportSequenceFrame devuelve true enseguida, pero el archivo puede tardar en
- * estar en disco. Buscarlo en el acto daba siempre "sin archivo".
+ * Cuánto se espera el PNG de `frame` (2026-10-31, un reporte de uso). exportSequenceFrame devuelve true
+ * enseguida y el archivo llega después: buscarlo en el acto daba siempre "sin archivo". Se le daban 5 s
+ * a cada carpeta y, sin nada, se pedía el cuadro a la siguiente MIRANDO SÓLO ESA. En un caso real —Luminary y
+ * un light leak encima— las tres dijeron "sin archivo", cada intento encoló otro render del mismo
+ * cuadro, y los tres PNG llegaron igual, tarde, cuando ya nadie los miraba: uno quedó al lado del .prproj.
+ *
+ * Ahora se siguen mirando TODAS las pedidas: gana el primer PNG que cierre, venga del pedido que venga.
+ * El plazo, más el del cierre, da los mismos 45 s que el peor caso de antes —3 × (5 + 10)—, y entra en
+ * los 60 s con que el servidor llama a `frame`. Subirlo sin subir ese timeout deja al panel trabajando
+ * para nadie.
+ *
+ * Y se VUELVE A PEDIR a los FRAME_OTRA_CARPETA_MS, porque un pedido se puede perder: medido el
+ * 2026-11-02 con un S_Beauty sobre un 4K, de doce primeros renders, diez escribieron (de 1,7 a
+ * 11,1 s) y DOS no escribieron nunca, con `true` y el vigía mirando cada 0,1 s durante 90 s. El
+ * pedido siguiente llegó en 0,5–1,3 s: el cuadro ya estaba en caché. Con 8 s, uno perdido sale en ~9 s;
+ * uno lento deja un render de más en el temp del plugin, que barre el reloj. Con 15 s se probó y el
+ * perdido tardaba 16.
+ *
+ * La carpeta del proyecto es del EDITOR: se pide sólo si ningún temporal ACEPTÓ el pedido —tiraron, o
+ * no dijeron true—. Por lentitud o por un pedido perdido no se toca: en el caso reportado, lo que quedó al lado del
+ * .prproj salió de ahí, y en lo medido nunca fue la que entregó.
  */
-async function esperarArchivo(rutas, msMax) {
-  const inicio = Date.now();
-  while (Date.now() - inicio < msMax) {
-    const a = await buscarArchivo(rutas);
-    if (a) return a;
-    await new Promise((r) => setTimeout(r, 150));
+const FRAME_ESPERA_MS = 35000;
+const FRAME_OTRA_CARPETA_MS = 8000;
+const FRAME_CIERRE_MS = 10000;
+
+/*
+ * Los PNG pedidos que `frame` no usó: los de una carpeta que perdió, o todos si no llegó ninguno a
+ * tiempo. Premiere los escribe igual, hasta minutos después, y nadie los borraba (2026-10-31: cuatro en la
+ * carpeta del proyecto del editor y tres en el temp del sistema). Se anotan acá y se barren al empezar
+ * cada `frame` y con un reloj. Lo que llegue pasados los diez minutos queda, pero con el sello de su
+ * llamada en el nombre ya no lo confunde ningún pedido.
+ */
+const FRAMES_SUELTOS = [];
+const FRAME_SUELTO_VIDA_MS = 10 * 60 * 1000;
+
+async function barrerFramesSueltos() {
+  const ahora = Date.now();
+  // Sobre una copia: el reloj puede disparar un barrido mientras corre el de un `frame`.
+  for (const s of FRAMES_SUELTOS.slice()) {
+    let listo = ahora - s.desde > FRAME_SUELTO_VIDA_MS;
+    const a = await buscarArchivo([s.ruta]);
+    if (a && typeof a.delete === "function") {
+      try { await a.delete(); listo = true; }
+      catch (e) { /* lo reintenta el barrido siguiente */ }
+    }
+    if (listo) {
+      const i = FRAMES_SUELTOS.indexOf(s);
+      if (i !== -1) FRAMES_SUELTOS.splice(i, 1);
+    }
   }
-  return null;
+}
+
+function anotarFramesSueltos(rutas) {
+  if (!rutas.length) return;
+  const desde = Date.now();
+  for (const r of rutas) FRAMES_SUELTOS.push({ ruta: r, desde: desde });
+  // En el caso reportado llegaron de segundos a minutos tarde: se mira a los 20 s, al minuto y a los cinco.
+  for (const ms of [20000, 60000, 300000]) setTimeout(() => { barrerFramesSueltos().catch(() => {}); }, ms);
 }
 
 /*
@@ -7031,38 +7172,58 @@ async function frame(params) {
 
   const playhead = await sequence.getPlayerPosition();
   /*
-   * Dos cosas en este nombre, las dos pagadas:
+   * Tres cosas en este nombre, las tres pagadas:
    *
    *  - Termina en .png A PROPÓSITO. Premiere deduce el formato de la extensión;
    *    sin ella exportSequenceFrame tira "File Format is not supported" en todas
    *    las carpetas, que parece un problema de permisos y no lo es.
    *  - Lleva el tick del playhead. Sin eso, un archivo de una corrida anterior
    *    da un falso positivo y se devuelve el frame equivocado sin que nada avise.
+   *  - Y un sello de ESTA llamada (2026-10-31, un reporte de uso). El tick solo no alcanzaba: un PNG que
+   *    llegó tarde quedaba con el nombre del tick, y otra llamada en el mismo punto —de otra
+   *    secuencia, o de otra temporal de `analizar`, que arrancan todas en 0— lo encontraba entero al
+   *    instante y devolvía el cuadro de otro lado, sin aviso.
    */
-  const nombre = "bridge-" + String(playhead.ticks) + ".png";
+  const nombre = "bridge-" + String(playhead.ticks) + "-" + Date.now().toString(36) + ".png";
 
+  await barrerFramesSueltos();
   const carpetas = await carpetasCandidatas();
   const intentos = [];
+  const pedidos = [];
+  const inicio = Date.now();
+  let siguiente = 0, ultimoPedido = 0, pedirYa = true;
 
-  for (let i = 0; i < carpetas.length; i++) {
-    const dir = carpetas[i].dir;
-    const candidatos = [dir + "/" + nombre, dir + "/" + nombre + ".png"];
-
-    let devolvio = null;
-    try {
-      devolvio = await ppro.Exporter.exportSequenceFrame(
-        sequence, playhead, nombre, dir + "/", ancho, alto
-      );
-    } catch (e) {
-      intentos.push(`${carpetas[i].via}: excepción ${e}`);
-      continue;
+  while (Date.now() - inicio < FRAME_ESPERA_MS) {
+    if (siguiente < carpetas.length && carpetas[siguiente].delEditor && pedidos.some((p) => p.devolvio === true)) {
+      siguiente = carpetas.length;
     }
-
-    const archivo = await esperarArchivo(candidatos, 5000);
-    if (!archivo) {
-      intentos.push(`${carpetas[i].via}: devolvió ${devolvio} sin archivo tras 5s`);
-      continue;
+    if (siguiente < carpetas.length && (pedirYa || Date.now() - ultimoPedido >= FRAME_OTRA_CARPETA_MS)) {
+      const c = carpetas[siguiente++];
+      try {
+        const devolvio = await ppro.Exporter.exportSequenceFrame(
+          sequence, playhead, nombre, c.dir + "/", ancho, alto
+        );
+        pedidos.push({ via: c.via, rutas: [c.dir + "/" + nombre, c.dir + "/" + nombre + ".png"],
+                       devolvio: devolvio, desde: Date.now(), descartado: false });
+        // Sólo un true promete un archivo: con otra cosa, la carpeta siguiente se pide ya.
+        pedirYa = devolvio !== true;
+        ultimoPedido = Date.now();
+      } catch (e) {
+        intentos.push(`${c.via}: excepción ${e}`);
+        pedirYa = true;
+      }
     }
+    const vivos = pedidos.filter((p) => !p.descartado);
+    if (!vivos.length && siguiente >= carpetas.length) break;
+
+    let archivo = null, pedido = null;
+    for (const p of vivos) {
+      archivo = await buscarArchivo(p.rutas);
+      if (archivo) { pedido = p; break; }
+    }
+    if (!archivo) { await new Promise((r) => setTimeout(r, 150)); continue; }
+    const tardo = (Date.now() - pedido.desde) / 1000;
+
     /*
      * Y se espera a que TERMINE de escribirse, no a que exista. Premiere crea el archivo y lo sigue
      * volcando: la espera vieja lo encontraba en la primera vuelta, lo leia a medias y lo borraba.
@@ -7071,7 +7232,7 @@ async function frame(params) {
      */
     let buffer = null, completo = false, lecturas = 0;
     const t0 = Date.now();
-    while (Date.now() - t0 < 10000) {
+    while (Date.now() - t0 < FRAME_CIERRE_MS) {
       buffer = await archivo.read({ format: uxp.storage.formats.binary });
       lecturas++;
       if (pngCompleto(buffer)) { completo = true; break; }
@@ -7086,22 +7247,34 @@ async function frame(params) {
     try { if (typeof archivo.delete === "function") await archivo.delete(); }
     catch (e) { /* si no se puede, no es motivo para fallar */ }
     if (!completo) {
-      intentos.push(`${carpetas[i].via}: devolvió ${devolvio}, y el PNG quedó A MEDIAS tras 10s ` +
-        `(${buffer ? buffer.byteLength : 0} bytes, sin el cierre IEND)`);
+      intentos.push(`${pedido.via}: devolvió ${pedido.devolvio}, y el PNG quedó A MEDIAS tras ` +
+        `${FRAME_CIERRE_MS / 1000}s (${buffer ? buffer.byteLength : 0} bytes, sin el cierre IEND)`);
+      pedido.descartado = true;
       continue;
     }
-    intentos.push(`${carpetas[i].via}: devolvió ${devolvio} OK`);
+    // Las otras carpetas pedidas pueden recibir su PNG todavía: se barren después.
+    anotarFramesSueltos(vivos.filter((p) => p !== pedido).reduce((a, p) => a.concat(p.rutas), []));
     return {
-      resumen: `Frame de "${sequence.name}" en el playhead, ${ancho}x${alto} (vía ${carpetas[i].via}), ` +
+      resumen: `Frame de "${sequence.name}" en el playhead, ${ancho}x${alto} (vía ${pedido.via}), ` +
         `PNG completo de ${Math.round(buffer.byteLength / 1024)} KB` +
+        (tardo >= 5 ? ` —Premiere tardó ${tardo.toFixed(1)}s en escribirlo—` : "") +
         (lecturas > 1 ? ` —estaba a medio escribir: cerró en la lectura ${lecturas}—` : "") + ".",
       pngBase64: aBase64(buffer),
       bytes: buffer.byteLength,
-      lecturas: lecturas
+      lecturas: lecturas,
+      tardo: Number(tardo.toFixed(1)),
+      carpetasPedidas: pedidos.length
     };
   }
 
-  throw new Error("No se pudo exportar el frame. Intentos: " + intentos.join(" | "));
+  const sueltos = pedidos.filter((p) => !p.descartado);
+  for (const p of sueltos) {
+    intentos.push(`${p.via}: devolvió ${p.devolvio}, sin archivo a los ` +
+      `${Math.round((Date.now() - p.desde) / 1000)}s de pedirlo`);
+  }
+  anotarFramesSueltos(sueltos.reduce((a, p) => a.concat(p.rutas), []));
+  throw new Error("No se pudo exportar el frame. Intentos: " + intentos.join(" | ") +
+    (sueltos.length ? ". Si alguno llega tarde, se borra solo en los próximos minutos." : ""));
 }
 
 /**

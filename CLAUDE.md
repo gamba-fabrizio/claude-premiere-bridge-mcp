@@ -172,7 +172,9 @@ Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que
   Una rama "no pude comprobar" que informa ok no es una guarda, y rechazar uso correcto es su peor
   fallo. → `verificacion.md`
 - **Antes de escribir un verificador, preguntate qué hace con un medio SIN VIDEO.** Tres verbos
-  informaron "no entró" sobre un audio que sí había entrado. → `verificacion.md`
+  informaron "no entró" sobre un audio que sí había entrado, y el 2026-11-02 `in_out_medio`, por el lector de
+  abajo: `getInPoint(VIDEO)` da el centinela en un WAV con marcas, y `leerInOut` lo tomaba. → `verificacion.md`,
+  `cuadros-y-nombres.md`
 - **Un verificador que relee un clip lo busca por tiempo Y por medio** (`clipDelMedio`): por tiempo solo,
   uno ajeno que arranca en el mismo punto pasa por el puesto —un MAL falso, y con el mismo largo un OK
   falso—, y lo que se le aplica después va a ese clip. → `verificacion.md`
@@ -180,6 +182,10 @@ Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que
   lo BAJA y lo que recorta o mueve lo deja donde cae, y con seis decimales es un cuadro de menos o uno de más. Las
   cuentas y los veredictos van en TICKS, no con los segundos redondeados al milisegundo: a 30 fps un cuadro no
   cae en uno justo. Un audio solo queda exacto. → `cuadros-y-nombres.md`
+- **Una espera que vence no cancela el pedido, y un `true` no promete archivo**: Premiere escribe tarde, o
+  nunca (2 de 12 cuadros con un S_Beauty). El temporal que un verbo espera lleva el sello de la LLAMADA —con
+  el tick solo, `frame` devolvía el PNG tardío de otra secuencia como el cuadro pedido—, lo pedido y no usado
+  se barre, y lo perdido se vuelve a pedir. → `verificacion.md`
 - **Un lector nuevo no informa "no hay" sin un control positivo**: un vacío es "no lo encontré".
   → `verificacion.md`, `firmas-y-limites.md`
 - **Un parámetro con el mismo nombre significa lo mismo en todos los verbos**: `pistaAudio` es

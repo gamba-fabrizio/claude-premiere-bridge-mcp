@@ -4,8 +4,11 @@
 
 - **Los nombres llegan en NFC y las rutas en NFD**: se compara normalizando, y una ruta de la API
   se pasa tal cual. → «Los nombres vienen en DOS normalizaciones», «Y las RUTAS vienen al revés»
-- **Premiere recuantiza el in-point a la grilla de la SECUENCIA, y el del audio no.** → «Premiere
-  recuantiza el in-point»
+- **Premiere recuantiza el in-point a la grilla de la SECUENCIA.** Al ARRASTRAR, el del audio no; al PEGAR
+  por API, sí, y hacia ABAJO: el audio vinculado y un audio solo (2026-11-02). → «Premiere recuantiza el
+  in-point», «`insertar` no decía que Premiere BAJÓ la entrada»
+- **`insertar` dice la entrada que Premiere bajó y el largo que cambió**; `in_out_medio` lo anticipa. Un
+  subclip no se compara: se lee sin marca. → «`insertar` no decía que Premiere BAJÓ la entrada»
 - **Mover no se pega al cuadro; insertar sí.** → «Sub-frame: mover NO se pega»
 - **Cortar entre cuadros deja un hueco de uno**: se cuantiza con aritmética entera sobre ticks.
   → «Cortar entre frames deja huecos»
@@ -170,3 +173,28 @@ Ahora:
 A 25 fps nada de esto se veía: cada cuadro son 40 ms justos. Medido en vivo en un proyecto de prueba a
 30 fps, y en `test.js`, que ejecuta `editar` contra una API de mentira que recorta y mueve al tick, con
 mutación.
+
+## `insertar` no decía que Premiere BAJÓ la entrada del medio a la grilla de la secuencia (2026-11-02)
+
+Lo reportó una sesión de uso: `in_out_medio` en un ProRes de 59,94 con entradas fraccionales —0,5976, 3,2642 y
+0,005 s— y después `insertar` en una secuencia de 30, para reemplazar un plano al cuadro. Los dos contestaron
+bien, y el clip quedó con la entrada en 0,567, 3,233 y 0: un cuadro de secuencia antes que el original.
+
+Ningún verbo mentía sobre lo que miraba: `in_out_medio` relee el MEDIO, que guarda 0,5976 tal cual, e
+`insertar` juzgaba `entro` por conteo y nombre. Quien baja es Premiere al PEGAR, a la grilla de la SECUENCIA:
+0,5976 · 30 = 17,93 → 17/30. Es la regla de «Los bordes van al cuadro MÁS CERCANO»: lo que pega lo BAJA.
+
+El arreglo es DECIRLO, sin transacciones nuevas: `insertar` relee el clip puesto y avisa `entradaBajada` —con el
+cuadro más cercano, que es lo que hay que pedirle al medio— y `largoCambiado`; `in_out_medio` avisa
+`fueraDeGrilla` si la entrada no cae en un cuadro de la secuencia activa. No se corrige solo: sería tocar un
+in/out que el editor puso. Y se reconoce por su FIRMA —el clip MENOS DE UN CUADRO por debajo del medio—, no por
+cualquier diferencia: un PNG o un Transparent Video entran con in-point ~3600 con el medio en 0.
+
+Medido en el proyecto de prueba: 50p en 25 con 1,02–3,02 entró 1,00–3,00, entrada y salida, y el audio vinculado
+igual; en la grilla no avisó; un WAV con 0,517 entró con 0,48. Un SUBCLIP no se compara: su rango no se expone
+como in/out del item, y uno de 2 s que entró en 23,976 con 1,9603 —0,952 de cuadro menos— sigue sin aviso.
+
+**El WAV destapó un bug del lector.** `in_out_medio` sobre él contestó *«la transacción corrió y el medio NO
+quedó como se pidió»*, y el clip insertado salió de 2 s: SÍ había quedado. `leerInOut` prueba VIDEO, ANY, AUDIO
+y sin argumento, y se quedaba con la primera que devolviera ticks; en un medio sin video, `getInPoint(VIDEO)` da
+el centinela −400000 s aunque haya marcas. Ahora el centinela no gana mientras otra forma traiga marcas.

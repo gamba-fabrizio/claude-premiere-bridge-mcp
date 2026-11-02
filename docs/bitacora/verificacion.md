@@ -33,6 +33,9 @@
 - **Una regla pagada se chequea en todo su mecanismo, no en el verbo donde se pagó**: un barrido de
   `test.js` por mecanismo, con las excepciones anotadas, que falla en las dos direcciones. Lo que encontró
   se arregló y se midió con Premiere el 2026-10-18. → «Una regla pagada se chequea en todo su mecanismo»
+- **`frame` no devuelve un PNG que no pidió**: el nombre lleva el sello de la LLAMADA —con el tick solo, uno
+  tardío de otra secuencia pasaba por el cuadro pedido—, se espera en todas las carpetas pedidas con un plazo
+  único, el pedido perdido se repite a los 8 s y lo no usado se barre (2026-11-02). → «`frame` devolvía el PNG tardío»
 
 # Método de verificación
 
@@ -514,6 +517,38 @@ deshace el lote ENTERO: sobre 12 clips, dos transacciones; un Cmd+Z mandado por 
 último lote, y el segundo los diez del primero. El resumen dice cuántos hacen falta, contando sólo las transacciones
 en las que se entró. Lo que no se generalizó todavía: los otros verbos que prueban formas adentro de una
 transacción.
+
+## `frame` devolvía el PNG tardío de otra llamada como el cuadro pedido (2026-11-02)
+
+Lo reportó una sesión de uso con efectos pesados encima de un clip —un S_Beauty de Sapphire, un light leak—:
+`frame` contestaba a veces *"temp del sistema: devolvió true sin archivo tras 5s | temp del plugin: … |
+carpeta del proyecto: devolvió true sin archivo tras 5s"*, y al lado del `.prproj` del editor quedaban
+`bridge-<ticks>.png` que nadie había pedido ver.
+
+**El "sin archivo" era falso: el PNG llegaba, tarde.** `frame` le daba 5 s a cada carpeta y, sin nada, le pedía
+el cuadro a la siguiente MIRANDO SÓLO ESA. Con un cuadro pesado las tres vencían, cada intento encolaba otro
+render, y los archivos llegaban cuando ya nadie los miraba. El borrado corría sólo sobre el encontrado.
+
+**Y lo peor no estaba en el reporte.** El nombre era sólo el tick del playhead —el comentario decía que eso
+evitaba el falso positivo—, así que un tardío lo encontraba ENTERO cualquier `frame` posterior en el mismo
+punto, de otra secuencia o de otra temporal de `analizar`, y lo devolvía como el cuadro pedido. `frame` es la
+verificación de último recurso: el día que miente, todo lo que se dio por bueno mirándolo queda en duda.
+
+El arreglo: el nombre lleva un sello de la llamada; un plazo único de 35 s mira TODAS las carpetas pedidas y
+gana el primer PNG que cierre; a los 8 s sin nada se vuelve a pedir en el temporal siguiente; la carpeta del
+proyecto, que es del editor, sólo si los temporales no aceptan el pedido; y lo pedido y no usado se barre, al
+empezar cada `frame` y con un reloj. El peor caso sigue en 45 s, dentro de los 60 con que el servidor llama.
+
+Medido en el proyecto de prueba con un S_Beauty sobre un 4K: de doce primeros renders, diez escribieron —de
+1,7 a 11,1 s— y DOS no escribieron nunca, con `true` y un vigía mirando las carpetas cada 0,1 s. El pedido
+siguiente llegó en 0,5–1,3 s, porque el cuadro ya estaba en caché: lo que salva el caso es volver a pedir, no
+otra carpeta. Con el escalón en 15 s el perdido tardaba 16; en 8, ~9. El PNG del pedido que pierde llegó
+segundos después de la respuesta y lo borró el barrido. Ojo al medir: el temp del plugin está a nueve niveles
+del temp del sistema, y un `find` con `-maxdepth 6` mira a ciegas.
+
+`test.js` EJECUTA `frame` contra un Premiere de mentira con un reloj de mentira y un disco que guarda TODAS
+las escrituras de cada ruta —con una por ruta, el pedido nuevo pisaba al viejo y un nombre sin sello pasaba
+la prueba—. Agarra por mutación nueve de nueve.
 
 ## Cerrados: casos resueltos, acotados o desmentidos
 

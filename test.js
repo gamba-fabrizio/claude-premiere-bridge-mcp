@@ -1963,6 +1963,137 @@ for (const fn of ["asegurarBin", "moverABin"]) {
 }
 
 /*
+ * LA ENTRADA QUE PREMIERE BAJA AL PEGAR (2026-10-29, un reporte de uso). Un ProRes de 59,94 con la entrada del medio
+ * en 0,5976, 3,2642 y 0,005 entró en una secuencia de 30 con 0,567, 3,233 y 0 —el piso de la grilla de la
+ * SECUENCIA—, y `insertar` decía `entro: true` sin más. Las dos funciones se EJECUTAN con esos números y con
+ * los que NO son esto: un PNG entra con 3600 con el medio en 0, sin marca es el centinela, y bajar un cuadro
+ * entero o subir no es la firma del piso. Y `insertar` e `inOutMedio` las usan, por posición y sin comentarios:
+ * sobre el clip PUESTO —el de audio si el medio no tiene video— y con la grilla de la secuencia.
+ */
+titulo("`insertar` dice cuándo Premiere bajó la entrada del medio a la grilla de la secuencia");
+{
+  const sinCom = (x) => (x ? x.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "") : "");
+  const fuentes = ["function entradaBajadaDe(", "function fueraDeGrillaDe(", "function largoCambiadoDe(", "function ticksAlCuadro(",
+    "function enCuadros("].map((f) => cuerpoDeFuncion(srcComandos, f));
+  const T = 254016000000, Q30 = T / 30, Q2997 = 8475667200, Q25 = T / 25, Q23976 = 10594584000;
+  const k = (s) => Math.round(s * T), piso = (x, q) => Math.floor(x / q) * q;
+  let r = null;
+  if (!fuentes.some((f) => !f)) {
+    try {
+      const ctx = { TICKS_POR_SEGUNDO: T };
+      require("vm").runInNewContext(fuentes.join("\n") + "\nthis.b = entradaBajadaDe; this.g = fueraDeGrillaDe; this.l = largoCambiadoDe;", ctx);
+      r = {
+        a: ctx.b(k(0.5976), piso(k(0.5976), Q30), Q30), b: ctx.b(k(3.2642), piso(k(3.2642), Q30), Q30),
+        c: ctx.b(k(0.005), 0, Q30), png: ctx.b(0, k(3600), Q30), igual: ctx.b(k(0.6), k(0.6), Q30),
+        sinMarca: ctx.b(-400000 * T, 0, Q30), unCuadro: ctx.b(k(1), k(1) - Q30, Q30), subio: ctx.b(k(1), k(1) + 1000, Q30),
+        sinTpf: ctx.b(k(0.5976), piso(k(0.5976), Q30), null),
+        g30: ctx.g(k(0.5976), Q30), gEnGrilla: ctx.g(k(0.6), Q30), g2997: ctx.g(k(0.6), Q2997),
+        // El subclip medido: 2 s de un 25p en una de 23,976 quedaron en 47 cuadros.
+        lSub: ctx.l(k(2), 47 * Q23976, Q23976), lIgual: ctx.l(k(2), k(2), Q25),
+        lMas: ctx.l(k(2), k(2) + Q25 / 2, Q25), lUnCuadro: ctx.l(k(2), k(2) - Q25, Q25)
+      };
+    } catch (e) { r = { error: String(e.message || e) }; }
+  }
+  const ins = sinCom(cuerpoDeFuncion(srcComandos, "async function insertar("));
+  const io = sinCom(cuerpoDeFuncion(srcComandos, "async function inOutMedio("));
+  const iOver = ins.indexOf("createOverwriteItemAction(");
+  const iBaj = ins.indexOf("entradaBajadaDe(");
+  if (!r) {
+    mal("faltan `entradaBajadaDe`, `fueraDeGrillaDe`, `ticksAlCuadro` o `enCuadros`");
+  } else if (r.error) {
+    mal("no se pudieron ejecutar `entradaBajadaDe` y `fueraDeGrillaDe`", r.error);
+  } else if (!r.a || r.a.quedo !== 0.5667 || r.a.cercana !== 0.6 || r.a.cuadros !== 0.928 ||
+             !r.b || r.b.quedo !== 3.2333 || r.b.cercana !== 3.2667 || !r.c || r.c.quedo !== 0 || r.c.cercana !== 0) {
+    mal("`entradaBajadaDe` no reconoce los tres casos del reporte, o sugiere otro cuadro que el más cercano",
+      JSON.stringify({ a: r.a, b: r.b, c: r.c }) + " · se esperaba 0,5667 → 0,6, 3,2333 → 3,2667 y 0 → 0");
+  } else if (r.png || r.igual || r.sinMarca || r.unCuadro || r.subio || r.sinTpf) {
+    mal("`entradaBajadaDe` avisa algo que no es el piso de la grilla",
+      JSON.stringify({ png: r.png, igual: r.igual, sinMarca: r.sinMarca, unCuadro: r.unCuadro, subio: r.subio, sinTpf: r.sinTpf }) +
+      " · un PNG entra con 3600 con el medio en 0: avisarlo es un OJO falso en cada still");
+  } else if (!r.g30 || r.g30.alInsertar !== 0.5667 || r.g30.cercana !== 0.6 || r.gEnGrilla ||
+             !r.g2997 || r.g2997.alInsertar !== 0.5672 || r.g2997.cercana !== 0.6006) {
+    mal("`fueraDeGrillaDe` no predice bien dónde entra una entrada fuera de la grilla",
+      JSON.stringify({ g30: r.g30, gEnGrilla: r.gEnGrilla, g2997: r.g2997 }));
+  } else if (!r.lSub || r.lSub.quedo !== 1.9603 || r.lSub.cuadros !== -0.952 || r.lIgual || r.lUnCuadro ||
+             !r.lMas || r.lMas.cuadros !== 0.5) {
+    mal("`largoCambiadoDe` no reconoce un largo distinto en menos de un cuadro, o avisa uno que no",
+      JSON.stringify({ lSub: r.lSub, lIgual: r.lIgual, lMas: r.lMas, lUnCuadro: r.lUnCuadro }) +
+      " · el subclip de 2 s quedó en 1,9603: 0,952 de cuadro menos");
+  } else if (!ins || iOver === -1 || !/leerInOut\(\s*ci\s*\)/.test(ins) || !/tpfIns\s*=\s*Number\(await sequence\.getTimebase\(\)\)/.test(ins)) {
+    mal("`insertar` no lee la entrada del MEDIO y la grilla de la secuencia", "sin eso no hay con qué comparar el clip puesto");
+  } else if (iBaj === -1 || iBaj < iOver || !/ticksDe\(clipPuesto\)/.test(ins) || !/entradaBajadaDe\([^;]*\bt\.i,\s*tpfIns\)/.test(ins) ||
+             !/largoCambiadoDe\([^;]*t\.e - t\.s,\s*tpfIns\)/.test(ins)) {
+    mal("`insertar` no compara la entrada y el largo del clip PUESTO, después de pegar", "la del medio sola dice lo que se pidió, no lo que quedó");
+  } else if (!/clipPuesto = items\[i\]/.test(ins) || !/clipPuesto = itemsA\[i\]/.test(ins)) {
+    mal("`insertar` no toma el clip puesto en video Y en audio", "un medio sin video no pone nada en V: su clip es el de la pista de audio");
+  } else if (!/\(entradaBajada\s*\?/.test(ins) || !/entradaBajada: entradaBajada/.test(ins) ||
+             !/\(largoCambiado\s*\?/.test(ins) || !/largoCambiado: largoCambiado/.test(ins)) {
+    mal("`insertar` calcula la entrada bajada o el largo cambiado y no lo dice", "un dato que está en una variable y no en la respuesta no está");
+  } else if (!/fueraDeGrillaDe\(/.test(io) || !/\(fueraDeGrilla \?/.test(io)) {
+    mal("`inOutMedio` no avisa una entrada fuera de la grilla de la secuencia activa");
+  } else {
+    ok("`insertar` dice la entrada que Premiere bajó a la grilla y el largo que cambió, sin avisar un PNG ni un sin marca; `inOutMedio` lo anticipa");
+  }
+}
+
+/*
+ * `leerInOut` NO SE QUEDA CON EL CENTINELA si otra forma trae marcas (2026-11-02). En un WAV, `getInPoint(VIDEO)`
+ * da −400000 s aunque el medio tenga 0,517–2,517 puestos, y ganaba la primera forma con ticks: `in_out_medio` decía
+ * «NO quedó como se pidió» sobre uno que había quedado. Se EJECUTA contra medios de mentira: un WAV con marcas
+ * (VIDEO da el centinela, AUDIO las marcas), un video con marcas —se lee con VIDEO y no se pregunta más—, uno sin
+ * marca —vuelve el centinela de VIDEO, lo de siempre— y uno donde VIDEO tira.
+ */
+titulo("`leerInOut` lee las marcas de un medio sin video, no el centinela de VIDEO");
+{
+  const fuente = cuerpoDeFuncion(srcComandos, "async function leerInOut(");
+  let c = null, error = null;
+  if (fuente) {
+    try {
+      c = JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", `
+    const vm = require("vm"), T = 254016000000, SENT = -400000 * T;
+    const M = { VIDEO: { n: "VIDEO" }, ANY: { n: "ANY" }, AUDIO: { n: "AUDIO" } };
+    const medio = (porTipo) => {
+      const llamadas = [];
+      const leer = (cual) => async (tipo) => {
+        const n = tipo ? tipo.n : "sin";
+        llamadas.push(n);
+        const v = porTipo[n];
+        if (v === "tira") throw new Error("Illegal Parameter type");
+        return v === undefined ? undefined : { ticks: String(v[cual]) };
+      };
+      return { item: { getInPoint: leer(0), getOutPoint: leer(1) }, llamadas };
+    };
+    const ctx = { ppro: { Constants: { MediaType: M } }, TICKS_POR_SEGUNDO: T };
+    vm.runInNewContext(${JSON.stringify(fuente || "")} + "\\nthis.f = leerInOut;", ctx);
+    const marcas = [0.517 * T, 2.517 * T], sent = [SENT, SENT];
+    const p = async (m) => { const x = await ctx.f(m.item); return x && { e: Number(x.entrada.ticks) / T, via: x.via, llamadas: m.llamadas.length }; };
+    (async () => console.log(JSON.stringify({
+      wav: await p(medio({ VIDEO: sent, ANY: sent, AUDIO: marcas, sin: sent })),
+      video: await p(medio({ VIDEO: [1.02 * T, 3.02 * T], ANY: [1.02 * T, 3.02 * T], AUDIO: [1.02 * T, 3.02 * T] })),
+      sinMarca: await p(medio({ VIDEO: sent, ANY: sent, AUDIO: sent, sin: sent })),
+      tira: await p(medio({ VIDEO: "tira", ANY: marcas }))
+    })))();`], { encoding: "utf8" }));
+    } catch (e) { error = String(e.message || e).slice(0, 300); }
+  }
+  if (!fuente) {
+    mal("no está `leerInOut`");
+  } else if (!c) {
+    mal("no se pudo ejecutar `leerInOut` contra los medios de mentira", error);
+  } else if (!c.wav || c.wav.via !== "AUDIO" || Math.abs(c.wav.e - 0.517) > 1e-9) {
+    mal("`leerInOut` lee un WAV con marcas como SIN MARCA", JSON.stringify(c.wav) +
+      " · `getInPoint(VIDEO)` da el centinela en un medio sin video: `in_out_medio` decía que no había entrado");
+  } else if (!c.video || c.video.via !== "VIDEO" || c.video.llamadas !== 2) {
+    mal("`leerInOut` no lee un video con marcas por VIDEO y de una", JSON.stringify(c.video));
+  } else if (!c.sinMarca || c.sinMarca.via !== "VIDEO" || c.sinMarca.e !== -400000) {
+    mal("`leerInOut` con un medio sin marca no devuelve el centinela de VIDEO, como siempre", JSON.stringify(c.sinMarca));
+  } else if (!c.tira || c.tira.via !== "ANY") {
+    mal("`leerInOut` no sigue con la forma siguiente cuando VIDEO tira", JSON.stringify(c.tira));
+  } else {
+    ok("`leerInOut` lee las marcas de un WAV por AUDIO, un video por VIDEO y de una, y sin marca devuelve el centinela de siempre");
+  }
+}
+
+/*
  * Las capas se releen AL FINAL, no sólo al ponerlas.
  *
  * `createOverwriteItemAction` PISA: dos capas en la misma pista y la misma
@@ -9634,7 +9765,7 @@ titulo("`frame` entero, el reloj con los fps y el nombre releído");
   };
 
   const fr = cuerpoDe("frame");
-  const iEspera = fr.search(/esperarArchivo\s*\(/);
+  const iEspera = fr.search(/buscarArchivo\s*\(/);
   const iLee = fr.search(/archivo\.read\s*\(/);
   const iBucle = fr.lastIndexOf("while (", iLee);
   const iCompletoAntesDeDevolver = fr.search(/if\s*\(\s*!\s*completo\s*\)/);
@@ -9670,6 +9801,195 @@ titulo("`frame` entero, el reloj con los fps y el nombre releído");
     mal("`armarSecuencia` devuelve el nombre PEDIDO en `secuencia`", "buscarla después por ese nombre no la encuentra");
   } else {
     ok("`armarSecuencia` informa el nombre que quedó, no el pedido");
+  }
+}
+
+/*
+ * `frame` CON CUADROS LENTOS (2026-10-31, un reporte de uso). Con Luminary y un light leak encima el PNG
+ * tardaba más que los 5 s que se le daban a cada carpeta: las tres decían "sin archivo", cada intento
+ * encolaba otro render, y los PNG llegaban igual, tarde, a la carpeta del proyecto del editor y al temp.
+ * Y el nombre era sólo el tick: un tardío lo encontraba entero cualquier `frame` posterior en el mismo
+ * punto, de otra secuencia, y lo devolvía como el cuadro pedido. `frame` se EJECUTA contra un Premiere de
+ * mentira que escribe cada PNG cuando el escenario dice, con un reloj de mentira —cada setTimeout corre
+ * cuando le toca— y un disco que dice qué quedó. Cada PNG lleva en el primer byte la llamada que lo pidió:
+ * así se ve de quién es el cuadro devuelto, no sólo que hubo uno.
+ */
+titulo("`frame`: un PNG tardío no pasa por el cuadro pedido, y no queda tirado");
+{
+  const fuentes = ["async function frame(", "async function carpetasCandidatas(", "async function buscarArchivo(",
+    "function pngCompleto(", "function aBase64(", "async function barrerFramesSueltos(", "function anotarFramesSueltos(",
+    "function dirname("].map((f) => cuerpoDeFuncion(srcComandos, f));
+  const consts = (srcComandos.match(/^const FRAMES?_[A-Z_]+ = [^\n]*$/gm) || []).join("\n");
+  const casos = (() => {
+    if (fuentes.some((f) => !f) || !/FRAME_ESPERA_MS/.test(consts) || !/FRAMES_SUELTOS/.test(consts)) {
+      return { error: "falta `frame`, uno de sus auxiliares, `FRAME_ESPERA_MS` o `FRAMES_SUELTOS`" };
+    }
+    const guion = `
+      const vm = require("vm"), fuentes = ${JSON.stringify(fuentes)}, consts = ${JSON.stringify(consts)};
+      const SIS = "/var/T", PLUG = "/var/T/Adobe/UXP/x", PROY = "/Proy";
+      const IEND = [0, 0, 0, 0, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82];
+      const mundo = () => {
+        const reloj = { ahora: 1.8e12, cola: [] }, disco = new Map(), llamadas = [];
+        let escenario = {}, marca = 0;
+        // Lo que hay en una ruta ahora: la última escritura que ya llegó y que nadie borró después.
+        const visible = (f) => f.escrituras.filter((e) => e.aparece <= reloj.ahora && e.aparece > f.borrado)
+          .sort((a, b) => b.aparece - a.aparece)[0];
+        const ctx = {
+          ppro: { Exporter: { exportSequenceFrame: async (seq, ph, nombre, dirBarra) => {
+            const dir = dirBarra.replace(/\\/$/, "");
+            llamadas.push(dir);
+            if (escenario.tira === true || (escenario.tira || []).includes(dir)) throw new Error("Illegal Parameter type");
+            /*
+             * Cada ruta guarda TODAS sus escrituras, no la última pedida: dos pedidos al mismo nombre son
+             * dos renders, y el que termina primero es el que está en disco. Con un registro por ruta, el
+             * pedido nuevo pisaba al viejo antes de que existiera, y un nombre sin sello pasaba la prueba.
+             */
+            const d = escenario.demora[dir];
+            if (d != null) {
+              const r = dir + "/" + nombre, f = disco.get(r) || { escrituras: [], borrado: -Infinity };
+              f.escrituras.push({ marca, aparece: reloj.ahora + d,
+                cierra: escenario.nuncaCierra === dir ? Infinity : reloj.ahora + d });
+              disco.set(r, f);
+            }
+            return true;
+          } } },
+          uxp: { storage: { formats: { binary: "bin" }, localFileSystem: {
+            getTemporaryFolder: async () => ({ nativePath: PLUG + "/" }),
+            getEntryWithUrl: async (url) => {
+              const ruta = url.replace(/^file:/, ""), f = disco.get(ruta), e = f && visible(f);
+              if (!e) throw new Error("no existe");
+              return { nativePath: ruta,
+                read: async () => new Uint8Array([e.marca, 1, 2, 3].concat(reloj.ahora >= e.cierra ? IEND : [])).buffer,
+                delete: async () => { f.borrado = reloj.ahora; } };
+            } } } },
+          getProyectoYSecuencia: async () => ({ project: { path: PROY + "/P.prproj" }, sequence: { name: "S",
+            getSettings: async () => ({ getVideoFrameRect: async () => ({ width: 1920, height: 1080 }) }),
+            getPlayerPosition: async () => ({ ticks: "46611936000000" }) } }),
+          Date: { now: () => reloj.ahora },
+          setTimeout: (f, ms) => { reloj.cola.push({ en: reloj.ahora + (ms || 0), f }); }
+        };
+        vm.runInNewContext(consts + "\\n" + fuentes.join("\\n") + "\\nthis.f = frame;", ctx);
+        // Corre los relojes hasta que la llamada termine, o, sin llamada, hasta \`hasta\`.
+        const correr = async (promesa, hasta) => {
+          let fin = false;
+          if (promesa) promesa.then(() => { fin = true; }, () => { fin = true; });
+          for (let v = 0; v < 200000; v++) {
+            await new Promise((r) => setImmediate(r));
+            if (promesa && fin) return;
+            reloj.cola.sort((a, b) => a.en - b.en);
+            const t = reloj.cola[0];
+            if (!t || (!promesa && t.en > hasta)) break;
+            reloj.cola.shift(); reloj.ahora = Math.max(reloj.ahora, t.en); t.f();
+          }
+          if (!promesa) reloj.ahora = Math.max(reloj.ahora, hasta);
+        };
+        const pedir = async (esc) => {
+          escenario = esc; marca++;
+          const t0 = reloj.ahora, desde = llamadas.length, out = {};
+          const p = ctx.f({ ancho: 270 });
+          p.then((r) => { out.resumen = r.resumen; out.marca = Buffer.from(r.pngBase64, "base64")[0]; },
+                 (e) => { out.error = String(e.message || e); });
+          await correr(p);
+          await new Promise((r) => setImmediate(r));
+          out.duracion = reloj.ahora - t0;
+          out.carpetas = llamadas.slice(desde);
+          return out;
+        };
+        // Diez minutos después, ¿qué quedó en disco que nadie borró?
+        const quedan = async () => {
+          await correr(null, reloj.ahora + 10 * 60 * 1000);
+          return [...disco.entries()].filter(([, f]) => visible(f)).map(([r]) => r);
+        };
+        return { pedir, quedan };
+      };
+      (async () => {
+        const out = {};
+        let m = mundo();
+        out.rapido = await m.pedir({ demora: { [SIS]: 2000 } });
+        out.rapido.quedan = await m.quedan();
+        // Lo medido el 2026-11-02 con un S_Beauty sobre un 4K: el primer render, 9,4 y 11,1 s...
+        m = mundo();
+        out.beauty = await m.pedir({ demora: { [SIS]: 11100, [PLUG]: 11100, [PROY]: 11100 } });
+        out.beauty.quedan = await m.quedan();
+        // ...y dos de doce que no escribieron NUNCA, con el pedido siguiente llegando en 0,5 s.
+        m = mundo();
+        out.perdido = await m.pedir({ demora: { [PLUG]: 500, [PROY]: 500 } });
+        // Los dos temporales no aceptan el pedido: ahí sí va la carpeta del proyecto.
+        m = mundo();
+        out.sinPermiso = await m.pedir({ demora: { [PROY]: 1000 }, tira: [SIS, PLUG] });
+        out.sinPermiso.quedan = await m.quedan();
+        // Más lento que el escalón, como en el caso reportado: 18 s por carpeta. La segunda se pide y pierde.
+        m = mundo();
+        out.lento = await m.pedir({ demora: { [SIS]: 18000, [PLUG]: 18000, [PROY]: 18000 } });
+        out.lento.quedan = await m.quedan();
+        // No llega nada a tiempo, y la llamada siguiente es en el MISMO tick: el tardío de la primera
+        // aparece a los 40 s, mientras la segunda espera el suyo, que llega a los 41.
+        m = mundo();
+        out.tarde = await m.pedir({ demora: { [SIS]: 40000, [PLUG]: 40000, [PROY]: 40000 } });
+        out.despues = await m.pedir({ demora: { [SIS]: 6000 } });
+        out.despues.quedan = await m.quedan();
+        // Uno que aparece y no cierra nunca: se descarta y gana otra carpeta.
+        m = mundo();
+        out.aMedias = await m.pedir({ demora: { [SIS]: 1000, [PLUG]: 1000 }, nuncaCierra: SIS });
+        out.aMedias.quedan = await m.quedan();
+        m = mundo();
+        out.tiran = await m.pedir({ demora: {}, tira: true });
+        console.log(JSON.stringify(out));
+      })();`;
+    try { return JSON.parse(require("child_process").execFileSync(process.execPath, ["-e", guion], { encoding: "utf8" })); }
+    catch (e) { return { error: String(e.message || e).slice(0, 400) }; }
+  })();
+  const SIS = "/var/T", PLUG = "/var/T/Adobe/UXP/x", PROY = "/Proy";
+  const via = (r) => ((/\(vía ([^)]+)\)/.exec((r && r.resumen) || "") || [])[1]);
+  const { rapido, beauty, perdido, sinPermiso, lento, tarde, despues, aMedias, tiran } = casos;
+  if (casos.error) {
+    mal("no se pudo ejecutar `frame` contra la API de mentira", casos.error);
+  } else if (via(rapido) !== "temp del sistema" || rapido.carpetas.length !== 1 || rapido.quedan.length) {
+    mal("`frame` con un cuadro que llega a los 2 s no sale limpio de la primera carpeta",
+      `vía ${via(rapido)}, pidió a ${JSON.stringify(rapido.carpetas)}, quedaron ${JSON.stringify(rapido.quedan)}` +
+      (rapido.error ? ` · ${rapido.error}` : ""));
+  } else if (via(beauty) !== "temp del sistema" || beauty.carpetas.includes(PROY) || beauty.quedan.length) {
+    mal("`frame` con un cuadro de 11,1 s —un S_Beauty, medido— no sale limpio de la primera carpeta",
+      `vía ${via(beauty)}, pidió a ${JSON.stringify(beauty.carpetas)}, quedaron ${JSON.stringify(beauty.quedan)}: ` +
+      "la carpeta del proyecto es del editor, y por lentitud no se toca" + (beauty.error ? ` · ${beauty.error}` : ""));
+  } else if (via(perdido) !== "temp del plugin" || perdido.duracion > 10000 || perdido.carpetas.includes(PROY)) {
+    mal("`frame` con el primer pedido PERDIDO —dos de doce, medido— no vuelve a pedir a tiempo",
+      `vía ${via(perdido)} en ${perdido.duracion / 1000}s, pidió a ${JSON.stringify(perdido.carpetas)}: el pedido ` +
+      "siguiente llega en 0,5 s porque el cuadro ya está en caché" + (perdido.error ? ` · ${perdido.error}` : ""));
+  } else if (via(sinPermiso) !== "carpeta del proyecto" || sinPermiso.quedan.length) {
+    mal("`frame` con los dos temporales tirando no usa la carpeta del proyecto, o deja el PNG ahí",
+      (sinPermiso.error || `vía ${via(sinPermiso)}`) + `, quedaron ${JSON.stringify(sinPermiso.quedan)}`);
+  } else if (via(lento) !== "temp del sistema" || lento.marca !== 1) {
+    mal("`frame` no espera el PNG de la carpeta que ya pidió: un cuadro de 18 s falla", "es el caso reportado: " +
+      (lento.error || `salió vía ${via(lento)}`));
+  } else if (lento.carpetas.includes(PROY)) {
+    mal("`frame` pide el cuadro a la carpeta del proyecto con un PNG de 18 s en camino",
+      `pidió a ${JSON.stringify(lento.carpetas)}: cada pedido encola otro render y ése cae al lado del .prproj`);
+  } else if (lento.carpetas.length < 2) {
+    mal("el escenario de 18 s ya no le pide el cuadro a una segunda carpeta",
+      "sin una carpeta que pierda, la prueba no ve si se barre: la demora tiene que pasar el escalón " +
+      "(con 12 s y el escalón en 15, dos mutaciones pasaban en verde)");
+  } else if (lento.quedan.length) {
+    mal("`frame` deja tirado el PNG de la carpeta que perdió", JSON.stringify(lento.quedan));
+  } else if (!tarde.error || tarde.duracion > 45000) {
+    mal("`frame` sin PNG a tiempo no falla dentro de los 45 s", `tardó ${tarde.duracion / 1000}s, y el servidor ` +
+      "lo llama con 60: lo que pase de ahí corre en el panel para nadie" + (tarde.error ? "" : " · no falló"));
+  } else if (despues.marca !== 2) {
+    mal("`frame` devuelve el PNG TARDÍO de una llamada anterior en el mismo tick como el cuadro pedido",
+      `el cuadro devuelto es de la llamada ${despues.marca}, no de la 2: el nombre no distingue la llamada` +
+      (despues.error ? ` · ${despues.error}` : ""));
+  } else if (despues.quedan.length) {
+    mal("los PNG que llegan después de que `frame` se rindió quedan en disco",
+      `${JSON.stringify(despues.quedan)}: en el caso reportado, cuatro al lado del .prproj del editor`);
+  } else if (via(aMedias) !== "temp del plugin" || aMedias.quedan.length) {
+    mal("`frame` no sigue con otra carpeta cuando un PNG no cierra nunca",
+      (aMedias.error || `vía ${via(aMedias)}`) + `, quedaron ${JSON.stringify(aMedias.quedan)}`);
+  } else if (!tiran.error || !/excepción/.test(tiran.error) || tiran.duracion > 1000) {
+    mal("`frame` con las tres carpetas tirando no falla enseguida diciendo por qué",
+      `${tiran.error || "no falló"} · ${tiran.duracion / 1000}s`);
+  } else {
+    ok("un pedido perdido se repite a tiempo, la carpeta del proyecto sólo va sin permiso, el tardío no pasa por el pedido, y no queda nada en disco",
+      `lento ${lento.duracion / 1000}s con ${lento.carpetas.length} pedidos; sin nada, falla a los ${tarde.duracion / 1000}s`);
   }
 }
 
