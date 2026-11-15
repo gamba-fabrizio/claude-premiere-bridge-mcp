@@ -36,6 +36,12 @@
 - **`frame` no devuelve un PNG que no pidió**: el nombre lleva el sello de la LLAMADA —con el tick solo, uno
   tardío de otra secuencia pasaba por el cuadro pedido—, se espera en todas las carpetas pedidas con un plazo
   único, el pedido perdido se repite a los 8 s y lo no usado se barre (2026-11-02). → «`frame` devolvía el PNG tardío»
+- **Un veredicto decide por lo que se PIDIÓ, no por el nombre de lo que se escribe**: `fijar` leía un punto sólo
+  si el param se llamaba Position, y el Corner Pin y el Anchor Point daban NO QUEDÓ sobre escrituras buenas
+  (2026-11-07). → «`fijar` y los puntos que no son Position»
+- **`transicion` mide el handle sólo de un clip PEGADO al corte**: con un hueco del otro lado, Premiere ignora la
+  alineación y pone el fundido entero sobre el propio clip; y si el handle no da, se queda con lo posible de cada
+  lado, no la achica pareja (2026-11-07). → «Un fundido sobre un hueco»
 
 # Método de verificación
 
@@ -556,6 +562,60 @@ del temp del sistema, y un `find` con `-maxdepth 6` mira a ciegas.
 `test.js` EJECUTA `frame` contra un Premiere de mentira con un reloj de mentira y un disco que guarda TODAS
 las escrituras de cada ruta —con una por ruta, el pedido nuevo pisaba al viejo y un nombre sin sello pasaba
 la prueba—. Agarra por mutación nueve de nueve.
+
+## `fijar` y los puntos que no son Position (2026-11-07)
+
+Lo reportó una sesión de uso: `fijar` sobre las cuatro esquinas de un Corner Pin contestó «null → null · NO QUEDÓ
+COMO SE PIDIÓ», y había quedado —`param` releía los puntos exactos y el `frame` coincidía a 0,2 px con la
+deformación calculada—. Reproducido en el proyecto de prueba con el panel de antes del arreglo, en el mismo clip:
+Corner Pin > Upper Left y Motion > Anchor Point, «null → null · NO QUEDÓ» con `param` leyendo lo pedido; Motion >
+Position, bien.
+
+La causa: el veredicto leía un punto sólo si el param se llamaba "Position", y lo demás pasaba por `aNumero`, que
+a un punto le da null. Era el único lugar: `keyframe`, `param` y `leerParam` deciden por la forma del valor. Ahora
+`pidePunto` sale de `x` e `y`, que es lo que se escribe, y con eso se lee, se espera y se compara. Medido con el
+plugin reinstalado: Corner Pin, Anchor Point y Position dieron «antes → después» sin «NO QUEDÓ», `param` releyó lo
+mismo, y sobre el Upper Left ANIMADO de otro clip sigue diciendo «NO QUEDÓ», que es lo correcto. `test.js` lo mira
+por posición, sin comentarios; probado por mutación, 3 de 3.
+
+**Visto de paso, sin tocar**: sobre un param animado, el «antes → después» de `fijar` mostró el valor del ÚLTIMO
+keyframe, no el del arranque del clip —lee con `getStartTime` del clip, tiempo de secuencia, donde el param espera
+el del material—. El veredicto no cambia: estático es exacto y animado dice «NO QUEDÓ» igual.
+
+## Un fundido sobre un hueco, y cuánto queda cuando el handle no da (2026-11-07)
+
+Lo reportó una sesión de uso: un Cross Dissolve en la COLA de un clip con alfa que tenía un HUECO después,
+alineación 1. `transicion` avisó «PEDISTE 0.367s Y EL HANDLE NO DA. el clip que ENTRA tiene 0.000s», y en el
+`.prproj` la transición estaba entera y bien, igual a la que el editor puso a mano. La causa: sin clip pegado al
+corte, el vecino caía al de LISTA —un respaldo que la auditoría del 2026-10-17 había dejado a propósito— y se medía
+el handle de un clip que arrancaba 3,5 s después. Con el panel de antes del arreglo se vio igual en el proyecto de
+prueba: seis de seis medían el clip siguiente o anterior de la lista.
+
+**Lo que arma Premiere sobre un hueco, medido** en el proyecto de prueba, 0,4 s pedidos, leído del `.prproj`:
+
+```
+cola  · alineación 0, 0,5 y 1    0,4 s que TERMINAN en el corte · HasOutgoingClip true, HasIncomingClip false
+cabeza · alineación 0, 0,5 y 1   0,4 s que ARRANCAN en el corte · al revés
+```
+
+Seis de seis: ignora la alineación y pone el fundido ENTERO, de un lado, sobre el propio clip. No pide material
+de ningún lado. Ahora, sin clip pegado al corte —con tolerancia de medio cuadro, de `getTimebase`: los bordes de
+la API pueden caer entre cuadros— no hay vecino ni se mide handle, y el resumen dice qué arma Premiere y, si la
+alineación pedida era otra, que no se aplica. Medido con el plugin reinstalado: los tres casos nuevos lo dijeron,
+el lado del hueco dio `null` y el `.prproj` coincidió.
+
+**Y al medir la regresión con vecino pegado salió otra cosa.** El aviso de «HANDLE NO DA» predecía el largo
+escalando el fundido con su alineación —`hay / frac`— y Premiere no hace eso: **se queda con lo posible de cada
+lado del corte**. 0,4 s centrados contra un clip que entra sin nada antes de su in-point quedaron de 0,2 s, todos
+DESPUÉS del corte (la cuenta vieja decía ~0); con 0,12 s antes, de 0,32 s, de 2,88 a 3,20 (decía ~0,24). Es lo
+mismo que se había visto con una secuencia anidada el 2026-10-01 —centrada de 1 s, ~0,5—: tres casos con la misma
+regla. Ahora el aviso suma lo que alcanza de cada lado y dice que queda corrida hacia el que tiene; medido después
+de reinstalar: predijo 0,200 y 0,320, y el `.prproj` dio 3,0–3,2 y 8,88–9,2. Con material de los dos lados, sin
+aviso, como antes.
+
+`test.js` mira el cuerpo de `transicion` sin comentarios: ningún `clips[clipIdx ± 1]`, el vecino sólo de
+`pegadoAlCorte`, la tolerancia de `getTimebase`, el caso sin vecino antes de los topes y la suma por lado.
+Probado por mutación, 4 de 4.
 
 ## Cerrados: casos resueltos, acotados o desmentidos
 

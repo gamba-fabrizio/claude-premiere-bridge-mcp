@@ -1286,6 +1286,60 @@ if (!cuerpoEditar) {
 }
 
 /*
+ * `fijar` LEE EL PUNTO QUE SE PIDIÓ COMO PUNTO, no el param que se llama "Position" (2026-11-07, un reporte de uso del 5/11).
+ * Las esquinas de un Corner Pin y el Anchor Point pasaban por `aNumero`, daban null y el veredicto decía «NO QUEDÓ»
+ * sobre una escritura buena: medido en Prueba 2, con `param` leyendo lo pedido. El veredicto —lo leído, lo esperado
+ * y la comparación— va por `pidePunto`, que sale de `x` e `y`, y en el cuerpo sin comentarios no queda ningún
+ * `=== "Position"`. Por posición: la definición antes de las tres.
+ */
+{
+  const sinCom = (x) => (x ? x.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "") : "");
+  const c = sinCom(cuerpoDeFuncion(srcComandos, "async function fijar("));
+  const def = c.search(/const pidePunto = typeof params\.x === "number" && typeof params\.y === "number"/);
+  const usos = [/const leido = pidePunto \? aPunto\(despues\)/, /const esperado = pidePunto \?/, /const quedo = pidePunto\s*\?/]
+    .map((re) => c.search(re));
+  if (!c) {
+    mal("no se encontró `fijar`", "el chequeo del veredicto de puntos no tiene qué mirar");
+  } else if (/===?\s*"Position"/.test(c)) {
+    mal("`fijar` decide si el valor es un punto por el NOMBRE del param", "Corner Pin y Anchor Point se leían como número: «null → null · NO QUEDÓ» sobre una escritura buena");
+  } else if (def === -1 || usos.some((u) => u === -1 || u < def)) {
+    mal("el veredicto de `fijar` no lee, espera y compara el punto por `pidePunto`", "posiciones: definición " + def + ", usos " + usos.join(", "));
+  } else {
+    ok("`fijar` lee y compara como punto lo que se pidió con `x` e `y`, sea cual sea el nombre del param");
+  }
+}
+
+/*
+ * `transicion` SIN CLIP PEGADO AL CORTE NO MIDE A NADIE (2026-11-07, un reporte de uso del 4/11). El respaldo «el de lista»
+ * medía el handle de un clip que arrancaba después de un hueco y avisaba «HANDLE NO DA» sobre un fundido que entró
+ * entero. Medido en el `.prproj`: con hueco, Premiere ignora la alineación y pone el fundido entero sobre el propio
+ * clip. En el cuerpo sin comentarios: ningún `clips[clipIdx ± 1]`, el vecino sale SOLO de `pegadoAlCorte`, la
+ * tolerancia de pegado sale de `getTimebase` y no es un milisegundo fijo, y el caso sin vecino se resuelve ANTES de
+ * mirar los topes de handle.
+ */
+{
+  const sinCom = (x) => (x ? x.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "") : "");
+  const c = sinCom(cuerpoDeFuncion(srcComandos, "async function transicion("));
+  const sinVecino = c.search(/if \(!vecino\)/);
+  const topes = c.search(/const topes = \[\]/);
+  if (!c) {
+    mal("no se encontró `transicion`", "el chequeo del vecino no tiene qué mirar");
+  } else if (/clips\[clipIdx\s*[-+]\s*1\]/.test(c)) {
+    mal("`transicion` vuelve a tomar el vecino de LISTA", "con un hueco después, mide un clip que no toca el corte y avisa «HANDLE NO DA» en falso");
+  } else if (!/const vecino = alInicio \? pegadoAlCorte\("hasta"\) : pegadoAlCorte\("desde"\);/.test(c)) {
+    mal("el vecino de `transicion` no sale sólo de `pegadoAlCorte`", "sin clip pegado, no hay vecino que medir");
+  } else if (!/getTimebase\(\)/.test(c) || /Math\.abs\(y\[campo\] - corteEn\) < 0\.001/.test(c)) {
+    mal("la tolerancia de «pegado» de `transicion` es un milisegundo fijo", "los bordes pueden caer entre cuadros: medio cuadro, de `getTimebase`");
+  } else if (sinVecino === -1 || topes === -1 || sinVecino > topes) {
+    mal("`transicion` mira los topes de handle sin resolver antes el caso SIN vecino", "posiciones: sin vecino " + sinVecino + ", topes " + topes);
+  } else if (/topes\.map\(\(x\) => x\.max\)/.test(c) || !/Math\.min\(x\.hay, x\.necesita\)/.test(c)) {
+    mal("`transicion` predice el largo achicando el fundido parejo", "Premiere se queda con lo posible de cada lado: 0,4 centrados con 0,12 s quedaron de 0,32 s, y la cuenta vieja decía 0,24");
+  } else {
+    ok("`transicion` sólo mide el handle de un clip PEGADO al corte, con tolerancia de medio cuadro; con hueco dice lo que arma Premiere");
+  }
+}
+
+/*
  * LO QUE BORRA POR DENTRO VACÍA LA SELECCIÓN (2026-09-25). `createRemoveItemsAction` deja los clips
  * borrados adentro de la selección viva, y la edición siguiente tiró Premiere en `borrar`. Cada
  * llamada fuera de `borrar` —que tiene su propia guarda, más abajo— tiene que ir seguida, en la misma

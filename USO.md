@@ -140,8 +140,8 @@ en `CLAUDE.md`.
   y el resumen dice cuántos Cmd+Z: como todo verbo que escribe en varias, cuenta las que corrieron.
 - **`subclip` de un medio SIN VIDEO no entra**: con un WAV committea y no aparece nada (medido el
   2026-10-18), y el verbo lo dice como fallo. El de un video entra.
-- **`transicion` es solo video** —el crossfade de audio va a mano— y no se puede releer: el conteo
-  prueba que apareció, no que esté bien puesta.
+- **`transicion` es solo video** —el crossfade de audio va a mano— y no se relee: el conteo prueba que
+  apareció. Con HUECO del otro lado ignora la alineación; si el handle no da, queda lo posible de cada lado.
 - **Con dos efectos del mismo nombre** —dos Lumetri—, pasá `indiceEfecto`: 0 el primero, y `efectos` los
   marca #0, #1. Sin él, las escrituras rebotan y las lecturas leen el primero y lo avisan.
 - **`copiarEfecto` NO copia: COMPARTE la instancia.** Tocar el destino cambia el origen, en otra

@@ -9120,7 +9120,17 @@ async function fijar(params) {
   const pedido = nivel ? nivelPedido(params, `${efecto} > ${cual}`) : params.valor;
   let valor;
   const esTexto = typeof pedido === "string";
-  if (typeof params.x === "number" && typeof params.y === "number") valor = new ppro.PointF(params.x, params.y);
+  /*
+   * UN PUNTO ES LO QUE SE PIDIÓ COMO PUNTO, NO UN PARAM QUE SE LLAMA "Position" (2026-11-07, un reporte de uso del 5/11).
+   * El veredicto leía el punto sólo si el param era Position: las cuatro esquinas de un Corner Pin pasaban por
+   * `aNumero`, daban null y `fijar` contestaba «null → null · NO QUEDÓ» sobre una escritura buena —`param` la
+   * releía exacta y el `frame` coincidía a 0,2 px—. Medido en Prueba 2 antes del arreglo, en el mismo clip: Corner
+   * Pin > Upper Left y Motion > Anchor Point, «null → null · NO QUEDÓ» con `param` leyendo lo pedido; Motion >
+   * Position, bien. Se decide por el pedido, que es lo que se escribe: `keyframe`, `param` y `leerParam` ya miran
+   * la forma del valor.
+   */
+  const pidePunto = typeof params.x === "number" && typeof params.y === "number";
+  if (pidePunto) valor = new ppro.PointF(params.x, params.y);
   else if (typeof pedido === "number" || typeof pedido === "boolean" || esTexto) valor = pedido;
   else throw new Error(`Falta "valor" o el par x/y para ${cual}.`);
 
@@ -9143,14 +9153,14 @@ async function fijar(params) {
   });
 
   const despues = await valorEnTiempo(project, p, await encontrado.clip.getStartTime());
-  const leido = cual === "Position" ? aPunto(despues)
+  const leido = pidePunto ? aPunto(despues)
     : esTexto ? (despues && despues.value !== undefined ? despues.value : despues)
     : aNumero(despues);
-  const esperado = cual === "Position" ? { x: params.x, y: params.y } : pedido;
+  const esperado = pidePunto ? { x: params.x, y: params.y } : pedido;
   /* La tolerancia es RELATIVA. Era 0,5 absoluto, y en Level —que va de 0 a 1— eso daba por quedado
      cualquier cosa: pedir 0,02 y que siguiera en 0,1778 se informaba bien. En Level se compara en dB. */
-  const quedo = cual === "Position"
-    ? leido && Math.abs(leido.x - params.x) < 0.002 && Math.abs(leido.y - params.y) < 0.002
+  const quedo = pidePunto
+    ? !!leido && Math.abs(leido.x - params.x) < 0.002 && Math.abs(leido.y - params.y) < 0.002
     : esTexto ? String(leido) === String(pedido)
     : leido === null ? false
     : nivel ? (pedido === 0 ? leido === 0 : Math.abs(crudoADb(leido) - crudoADb(pedido)) < 0.05)
@@ -9160,7 +9170,7 @@ async function fijar(params) {
   return {
     resumen:
       `${efecto} > ${cual} en "${nombreClip}" (${encontrado.pista}[${encontrado.indice}]): ` +
-      `${cual === "Position" ? JSON.stringify(aPunto(antes)) : esTexto ? JSON.stringify(antes) : conDb(aNumero(antes))} → ${conDb(leido)}` +
+      `${pidePunto ? JSON.stringify(aPunto(antes)) : esTexto ? JSON.stringify(antes) : conDb(aNumero(antes))} → ${conDb(leido)}` +
       (quedo ? "" : ` · NO QUEDÓ COMO SE PIDIÓ (${nivel && params.db !== undefined ? params.db + " dB" : JSON.stringify(esperado)}), transacción ${ok}`) +
       (nivel && params.db === undefined ? ` · ${ESCALA_NIVEL}` : "") +
       (avisoAmbiguo ? ` · ${avisoAmbiguo}` : "") + avisoDeAparicion(ef, efecto),
@@ -14176,32 +14186,57 @@ async function transicion(params) {
   /* Una transicion es la COLA de un clip y la CABEZA del siguiente. Cual es cual sale de
      `alInicio`, que ya esta resuelto arriba por tiempo o explicito. Y el VECINO se busca por TIEMPO,
      no por lista: con la pista fuera de orden, el de al lado en la lista es otro plano, y el aviso de
-     handle hablaba de él (auditoría 2026-10-17, `orden#7`). Sin ninguno pegado al corte, el de lista. */
+     handle hablaba de él (auditoría 2026-10-17, `orden#7`).
+   *
+   * SIN CLIP PEGADO AL CORTE NO HAY VECINO (2026-11-07, un reporte de uso del 4/11). Había un respaldo, «el de lista», y era
+   * justo el caso en que mide un clip que no participa: en un caso real, un fundido en la cola de un clip con un HUECO después
+   * midió el handle del clip que arrancaba 3,5 s más tarde y avisó «HANDLE NO DA» sobre un fundido que entró entero.
+   * Y lo que arma Premiere sobre un hueco se MIDIÓ en el `.prproj` de Prueba 2, 0,4 s pedidos: con hueco del otro lado
+   * IGNORA la alineación —cola con 0, 0,5 y 1, cabeza con 0, 0,5 y 1, seis de seis— y pone el fundido ENTERO, de UN
+   * lado, sobre el propio clip: en la cola termina en el corte y en la cabeza arranca en él. No pide material de
+   * ningún lado, así que ahí no se mide handle. La tolerancia de «pegado» es medio cuadro y no un milisegundo: los
+   * bordes de la API pueden caer entre cuadros, y con 0,001 un vecino de verdad podía no encontrarse. */
+  let medioCuadro = 0.001;
+  try { const tpf = Number(await sequence.getTimebase()); if (tpf > 0) medioCuadro = tpf / TICKS_POR_SEGUNDO / 2; } catch (e) { /* queda 0,001 */ }
   const pegadoAlCorte = (campo) => {
     const x = bordes.find((y) => y.i !== clipIdx && y[campo] !== null && y[campo] !== undefined &&
-      Math.abs(y[campo] - corteEn) < 0.001);
+      Math.abs(y[campo] - corteEn) < medioCuadro);
     return x ? clips[x.i] : null;
   };
-  const vecino = alInicio ? (pegadoAlCorte("hasta") || clips[clipIdx - 1]) : (pegadoAlCorte("desde") || clips[clipIdx + 1]);
-  const hSale  = await handleDe(alInicio ? vecino : clips[clipIdx]);
-  const hEntra = await handleDe(alInicio ? clips[clipIdx] : vecino);
+  const vecino = alInicio ? pegadoAlCorte("hasta") : pegadoAlCorte("desde");
+  const hSale  = alInicio ? (vecino ? await handleDe(vecino) : null) : await handleDe(clips[clipIdx]);
+  const hEntra = alInicio ? await handleDe(clips[clipIdx]) : (vecino ? await handleDe(vecino) : null);
 
   const pedidaSeg = aSegundos(dur);
   let avisoHandle = "";
-  {
+  if (!vecino) {
+    const comoLoArma = alInicio ? frac <= 0.001 : frac >= 0.999;
+    avisoHandle = ` · del otro lado del corte NO hay clip pegado (hueco): Premiere arma un fundido de UN lado, ENTERO ` +
+      `y sobre este clip, ${alInicio ? "ARRANCANDO" : "TERMINANDO"} en el corte` +
+      (comoLoArma ? "" : `: la alineación pedida (${frac}) NO se aplica`) + " (medido en el .prproj)";
+  } else {
     const ok = (h) => h && !h.error && Number.isFinite(h.antes) && Number.isFinite(h.despues);
     const necesitaAntes = pedidaSeg * frac;          // del que ENTRA, antes de su in-point
     const necesitaDespues = pedidaSeg * (1 - frac);  // del que SALE, despues de su out-point
     const topes = [];
-    if (ok(hEntra) && frac > 0.001) topes.push({ lado: "el clip que ENTRA", hay: hEntra.antes, necesita: necesitaAntes, max: hEntra.antes / frac });
-    if (ok(hSale) && frac < 0.999) topes.push({ lado: "el clip que SALE", hay: hSale.despues, necesita: necesitaDespues, max: hSale.despues / (1 - frac) });
+    if (ok(hEntra) && frac > 0.001) topes.push({ lado: "el clip que ENTRA", hay: hEntra.antes, necesita: necesitaAntes });
+    if (ok(hSale) && frac < 0.999) topes.push({ lado: "el clip que SALE", hay: hSale.despues, necesita: necesitaDespues });
     const cortos = topes.filter((x) => x.hay < x.necesita - 0.001);
     if (cortos.length) {
-      const maxPosible = Math.min.apply(null, topes.map((x) => x.max));
+      /* PREMIERE SE QUEDA CON LO POSIBLE DE CADA LADO, no la achica pareja (2026-11-07). La cuenta vieja escalaba el
+         fundido manteniendo la alineación —`hay / frac`— y predecía mal. Medido en el `.prproj` de Prueba 2, 0,4 s
+         centrados: con 0 s antes del in-point del que entra quedó de 0,2 s, toda DESPUÉS del corte (la cuenta vieja
+         decía ~0); con 0,12 s quedó de 0,32 s, de 2,88 a 3,20 (decía ~0,24). Y es lo del nest del 2026-10-01: centrada
+         de 1 s, ~0,5. Lo que queda es la suma de lo que alcanza de cada lado, y queda corrida hacia el que tiene. */
+      const queda = topes.reduce((s, x) => s + Math.max(0, Math.min(x.hay, x.necesita)), 0);
+      const todoMedido = (frac <= 0.001 || ok(hEntra)) && (frac >= 0.999 || ok(hSale));
       avisoHandle =
         ` · OJO: PEDISTE ${pedidaSeg.toFixed(3)}s Y EL HANDLE NO DA. ` +
         cortos.map((x) => `${x.lado} tiene ${x.hay.toFixed(3)}s y necesita ${x.necesita.toFixed(3)}s`).join("; ") +
-        `. Premiere la va a ACORTAR a ~${Math.max(0, maxPosible).toFixed(3)}s sin avisar, y no se puede releer para comprobarlo`;
+        `. Premiere se queda con lo que hay de cada lado del corte (medido): ` +
+        (todoMedido ? `va a quedar de ~${queda.toFixed(3)}s, corrida hacia el lado con material,`
+                    : `del lado medido quedan ~${queda.toFixed(3)}s,`) +
+        ` sin avisar, y no se puede releer para comprobarlo`;
     } else if (!topes.length) {
       avisoHandle = " · el handle NO se pudo medir" +
         (hSale && hSale.error ? ` (sale: ${hSale.error})` : "") +
