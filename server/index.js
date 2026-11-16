@@ -18,6 +18,7 @@ const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio
 const { z } = require("zod");
 const { enviar } = require("./bridge.js");
 const { instrucciones } = require("./instrucciones.js");
+const { sinUsoDe } = require("./sin_uso.js");
 
 /*
  * SOLO LAS CLAVES DECLARADAS, Y LAS DEMAS REBOTAN.
@@ -626,7 +627,7 @@ server.registerTool(
           + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
           + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
         ),
-      medio: z.string().optional().describe("Medio por defecto, si todos los fragmentos salen del mismo."),
+      medio: z.string().optional().describe("Medio por defecto, si todos los fragmentos salen del mismo. El nombre EXACTO gana; sin exacto vale un parcial, y si engancha más de un medio REBOTA nombrándolos. Todos los medios, también los de las capas, se resuelven antes de crear la secuencia."),
       nombre: z.string().optional().describe("Nombre de la secuencia nueva. Por defecto \"Corte\"."),
       preset: z.string().optional().describe("Ruta absoluta a un .sqpreset. Es la forma confiable de fijar los fps; la secuencia nace con los ajustes del preset en vez de heredar los del material."),
       ancho: z.number().int().min(16).optional().describe("Ancho del cuadro en píxeles, si no se quiere el del material. Va con `alto`."),
@@ -784,6 +785,41 @@ server.registerTool(
 );
 
 server.registerTool(
+  "premiere_sin_uso",
+  {
+    title: "Qué medios del proyecto no usa ninguna secuencia",
+    description:
+      "Lista los medios del panel que no aparecen en NINGUNA secuencia. Sólo LEE: no saca ni mueve nada. " +
+      "Recorre las secuencias por tandas, así que en un proyecto grande tarda. Es lo que hay en Premiere AHORA, " +
+      "guardado o no.\n\n" +
+      "NO ve lo que sólo es FUENTE de un subclip, de un multicámara o de un clip fusionado: figura sin uso y no lo " +
+      "está. Antes de sacar algo de la lista, miralo. Para sacarlos: moverlos a un bin con premiere_bins —por " +
+      "nombre EXACTO—, releer, y borrar el bin.\n\n" +
+      "No necesita secuencia activa.",
+    inputSchema: soloEstas({
+      secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
+      proyecto: z
+        .string()
+        .optional()
+        .describe(
+          "GUARDA: nombre (o parte) del proyecto sobre el que se quiere operar. Si el que tiene "
+          + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
+          + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
+        )
+    })
+  },
+  async ({ proyecto, secuencia }) => {
+    try {
+      const pedir = async (params) => await enviar("usoDeMedios", { ...params, proyecto, secuencia }, 120000);
+      const r = await sinUsoDe(pedir);
+      return texto(r.resumen, r);
+    } catch (e) {
+      return fallo(e);
+    }
+  }
+);
+
+server.registerTool(
   "premiere_secuencias",
   {
     title: "Listar secuencias o cambiar la activa",
@@ -888,10 +924,11 @@ server.registerTool(
           + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
           + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
         ),
-      medio: z.string().describe("Nombre del medio, de premiere_medios. Coincidencia parcial."),
+      medio: z.string().describe("Nombre del medio, de premiere_medios. El nombre EXACTO gana; sin exacto vale un parcial, y si engancha más de un medio REBOTA nombrándolos."),
       pista: z.number().int().min(1).optional().describe("Pista como en el timeline: 1 es V1. Por defecto V1."),
       pistaAudio: z.number().int().min(1).optional().describe("Pista de audio. Por defecto espeja la de video: insertar en V3 manda el audio a A3. Con A1 fijo, el audio PISA lo que haya ahí. Si no existe, Premiere crea UNA al final y el audio cae ahí —pidiendo A9 con seis, en A7—: `pistaAudioReal` dice dónde quedó. Un multicanal pone un stream por pista desde ésa, y crea las que falten; `otrasPistasAudio` dice dónde cayeron los otros streams, que PISAN lo que haya."),
-      segundos: z.number().min(0).optional().describe("Dónde arranca, en segundos. Por defecto el playhead.")
+      segundos: z.number().min(0).optional().describe("Dónde arranca, en segundos. Por defecto el playhead."),
+      sinAudio: z.boolean().optional().describe("Pone sólo el VIDEO: el audio se pega en una pista propia, después de la última con algo, y se saca. Esa pista queda vacía. Rebota con `pistaAudio`, y si `borrar` está en su tope. Son 2 Cmd+Z.")
     })
   },
   async (args) => {
@@ -1506,7 +1543,7 @@ server.registerTool(
           + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
           + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
         ),
-      medio: z.string().describe("Nombre del medio en el panel de proyecto. Coincidencia parcial."),
+      medio: z.string().describe("Nombre del medio en el panel de proyecto. El nombre EXACTO gana; sin exacto vale un parcial, y si engancha más de un medio REBOTA nombrándolos."),
       fps: z.number().optional().describe("Fotogramas por segundo a imponer. Sin esto solo lee.")
     })
   },
@@ -1547,7 +1584,7 @@ server.registerTool(
           + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
           + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
         ),
-      medio: z.string().describe("Nombre del medio en el panel de proyecto. Coincidencia parcial."),
+      medio: z.string().describe("Nombre del medio en el panel de proyecto. El nombre EXACTO gana; sin exacto vale un parcial, y si engancha más de un medio REBOTA nombrándolos."),
       archivo: z.string().optional().describe("Ruta absoluta del proxy a adjuntar. Sin esto solo lee.")
     })
   },
@@ -1588,7 +1625,7 @@ server.registerTool(
           "GUARDA: nombre (o parte) del proyecto sobre el que se quiere operar. Si el que tiene "
           + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada."
         ),
-      medio: z.string().describe("Nombre del medio en el panel de proyecto. Coincidencia parcial."),
+      medio: z.string().describe("Nombre del medio en el panel de proyecto. El nombre EXACTO gana; sin exacto vale un parcial, y si engancha más de un medio REBOTA nombrándolos."),
       ruta: z.string().describe("Ruta absoluta del archivo al que hay que repuntarlo. Tiene que existir.")
     })
   },
@@ -1739,7 +1776,7 @@ server.registerTool(
           + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
           + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
         ),
-      medio: z.string().describe("Nombre del medio a recortar. Coincidencia parcial."),
+      medio: z.string().describe("Nombre del medio a recortar. El nombre EXACTO gana; sin exacto vale un parcial, y si engancha más de un medio REBOTA nombrándolos."),
       nombre: z.string().describe("Como se va a llamar el subclip."),
       desde: z.number().min(0).describe("Segundo de FUENTE donde empieza."),
       hasta: z.number().min(0).describe("Segundo de FUENTE donde termina."),
@@ -2508,8 +2545,9 @@ server.registerTool(
     description:
       "Sin argumentos LISTA el árbol de bins con cuántos medios tiene cada uno, y cuántos quedaron " +
       "sueltos en la raíz. Con `bin` lo crea si no está —anidado con \"/\"— y con `medios` mueve " +
-      "adentro los que coincidan por nombre parcial, buscándolos en TODO el proyecto y no sólo en la " +
-      "raíz.\n\n" +
+      "adentro los que se llamen EXACTAMENTE así; si ninguno, todos los que contengan el texto, y el " +
+      "resumen los nombra. Los busca en TODO el proyecto. `bin: \"/\"` es la RAÍZ: sirve para " +
+      "devolver algo que se movió de más.\n\n" +
       "Devuelve cuántos medios tenía el bin antes y después, y cuáles NO se pudieron mover. " +
       "`createMoveItemAction` es una transacción como cualquier otra de esta API: puede pasar sin " +
       "aplicar, así que el verbo relee el bin en vez de confiar en que la llamada no tiró.\n\n" +
@@ -2524,13 +2562,13 @@ server.registerTool(
           + "foco en Premiere es otro, la llamada REBOTA sin ejecutar nada. Va en TODAS las "
           + "herramientas a proposito: una guarda que hay que acordarse de tener no esta cuando hace falta."
         ),
-      bin: z.string().optional().describe("Ruta del bin, anidada con \"/\". Sin esto, sólo lista."),
+      bin: z.string().optional().describe("Ruta del bin, anidada con \"/\"; \"/\" sola es la raíz del proyecto. Sin esto, sólo lista."),
       borrar: z.boolean().optional().describe("Borra el bin. Se niega si tiene cosas adentro: borrarlo se las lleva y deja sin medio a las secuencias que las usen."),
       aunqueTengaCosas: z.boolean().optional().describe("Insiste en borrar un bin con contenido. Destructivo."),
       medios: z
         .union([z.string(), z.array(z.string())])
         .optional()
-        .describe("Nombre o nombres parciales de los medios a mover adentro.")
+        .describe("Nombre o nombres de los medios a mover. El exacto gana; sin exacto, se mueven TODOS los que lo contienen: mirá `movidos`.")
     })
   },
   async (args) => {

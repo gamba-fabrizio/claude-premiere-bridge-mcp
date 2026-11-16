@@ -25,6 +25,12 @@
   positivo. → «Lo que el `.prproj` tiene», «Tres falsos negativos»
 - **A otra velocidad, la entrada de la API va en tiempo de clip**: fuente ÷ velocidad, al leer y al
   escribir (2026-10-20). → «A otra velocidad, la entrada de la API va en TIEMPO DE CLIP»
+- **El tamaño de la secuencia se fija con UNA forma, `RectF(0,0,w,h)`, y se reintenta**: las otras la dejan en
+  0x0, y la buena a veces no aplica la primera vez tras abrir Premiere (2026-11-16). → «`resolucion` dejaba la
+  secuencia en 0x0»
+- **Time Interpolation y Scale to Frame Size por clip no se leen ni se fijan por API**; el uso de un medio tampoco,
+  pero el uso se arma con `getProjectItem` y `getId`. → «`resolucion` dejaba», «Medios sin uso»
+- **`insertar` con `sinAudio` saca el audio con la misma función que las capas.** → «`insertar` con `sinAudio`»
 
 # Firmas de la API, medidas y no deducidas
 
@@ -414,3 +420,34 @@ material repetido, que es lo cierto. `test.js` ejecuta `editar` con una API de m
 Lo que queda sin medir: la SALIDA de la API a otra velocidad —se supone igual, y la salida de `editar` verificada con
 el cuadro lo respalda, pero `getOutPoint` no se leyó—, los clips invertidos y la velocidad variable, que la API no
 expone.
+
+## `resolucion` dejaba la secuencia en 0x0, y lo que el cambio de tamaño no decía (2026-11-16)
+
+El cambio de tamaño probaba cuatro formas del rectángulo en fila. Con Premiere recién abierto, la primera —la
+única que anda— devolvió true y la relectura dio el tamaño viejo; siguió con las otras tres, y las tres dejaron
+la secuencia en **0x0**, con un error. Ahora hay una sola forma, se relee hasta tres veces, espaciado, y si no
+quedó se repite UNA vez la misma. Medido tras dos reinicios: el fallo se repitió —tres relecturas con el tamaño
+viejo— y el segundo intento entró. No era una lectura adelantada: es una escritura que Premiere acepta y no
+aplica, 2 de 3 veces en esa condición.
+
+Y `resolucion`, cuando el tamaño cambia, cuenta y nombra las capas de ajuste, que quedan del tamaño viejo y
+corrigen sólo esa franja, y avisa de los clips con «Scale to Frame Size», que Premiere reajusta al cuadro nuevo.
+Esa casilla y la interpolación de tiempo (Optical Flow) no se leen ni se fijan por clip: reflejados los 71
+objetos del módulo, lo único con «interpolation» es lo de los keyframes, y de la casilla sólo hay una acción del
+MEDIO que la prende. En el `.prproj`, `<TimeInterpolationType>2</…>` adentro del `<VideoClip>` es Optical Flow.
+
+## `insertar` con `sinAudio`: la misma función que las capas (2026-11-16)
+
+Un video con audio puesto encima de un plano dejaba su audio en la pista espejo, y había que sacarlo con `borrar`
+contra su tope. El sacado de las capas de `armarSecuencia` pasó tal cual a `sacarAudioDelSumidero`, y lo llaman
+los dos. En `insertar`, `sinAudio: true` rebota con `pistaAudio`, mira el tope de borrados ANTES de pegar, pega el
+audio en la pista después de la última con algo, y lo saca sólo si el video entró: dos Cmd+Z. Medido con un video
+con audio, uno sin, un multicanal de seis streams, los dos rebotes y un audio solo, que queda sin sacar y lo dice.
+
+## Medios sin uso: se leen de Premiere, por tandas (2026-11-16)
+
+La API no expone el uso de un medio, pero sí `getProjectItem()` en cada clip y `getId()` en cada ítem, y los ids
+coinciden —medido, 36 de 36—. `usoDeMedios` sólo lee y contesta por tandas; `premiere_sin_uso` une las tandas y
+resta, y rebota si no puede comparar los ids: un falso «sin uso» termina en un medio borrado. No ve lo que sólo
+es fuente de un subclip, de un multicámara o de un clip fusionado, y lo avisa siempre. No se midió en un proyecto
+pesado, y el verbo que SACA medios no se construyó: es destructivo y falta medir qué hace con uno en uso.

@@ -1,7 +1,7 @@
 # Bridge Claude ↔ Premiere Pro — lo que costó medir
 
 Le da a un agente control de Premiere Pro: leer la secuencia, **mirar el frame**, navegar,
-animar, editar y armar timeline. **60 herramientas MCP sobre 76 verbos del panel** — la
+animar, editar y armar timeline. **61 herramientas MCP sobre 77 verbos del panel** — la
 diferencia importa, ver *Al escribir un verbo nuevo*.
 
 Esos dos números los chequea `test.js` contra el código. Escritos a mano envejecen: decían
@@ -188,6 +188,9 @@ Una línea cada una. Donde hay caso, está en el archivo de `docs/bitacora/` que
   se barre, y lo perdido se vuelve a pedir. → `verificacion.md`
 - **Un lector nuevo no informa "no hay" sin un control positivo**: un vacío es "no lo encontré".
   → `verificacion.md`, `firmas-y-limites.md`
+- **`coincidenDe` es el ÚNICO emparejador de medios por nombre** (2026-11-16): el exacto gana y un parcial que
+  engancha más de uno rebota. Cada buscador tomaba el primero que contenía el texto, y pedir «X» ponía «X v2».
+  → `cuadros-y-nombres.md`
 - **Un parámetro con el mismo nombre significa lo mismo en todos los verbos**: `pistaAudio` es
   1-based en todos (A1 es 1).
 - **Premiere devuelve los nombres en NFC y las rutas en NFD.** Se compara normalizando, y una ruta

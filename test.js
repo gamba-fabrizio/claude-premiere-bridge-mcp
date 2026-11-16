@@ -2167,7 +2167,11 @@ if (cuerpoArmar) {
    * porque un clip truncado es legal: no es hueco, ni solape, ni duracion cero.
    */
   const usaRotas = /capasPuestas\.length - capasRotas\.length/.test(cuerpoArmar[0]);
-  const avisaRotas = /SE PISARON/.test(cuerpoArmar[0]);
+  /* Desde el 2026-11-16 el aviso dice QUÉ encontró en lugar de suponer que se pisaron, y una capa que perdió
+     cuadros por la de al lado —la tolerancia de 0,15 s la dejaba pasar— se cuenta y se nombra. */
+  const avisaRotas = /NO SE ENCONTRARON ENTERAS/.test(cuerpoArmar[0]) && /cerca hay: /.test(cuerpoArmar[0]) &&
+    /cuadros !== c\.cuadros\) \{\s*capasRecortadas\.push\(/.test(cuerpoArmar[0]) &&
+    /capasPuestas\.length - capasRotas\.length - capasRecortadas\.length/.test(cuerpoArmar[0]) && /RECORTADA\(S\)/.test(cuerpoArmar[0]);
   if (!/capasRotas/.test(cuerpoArmar[0])) {
     mal("`armarSecuencia` no relee las capas después de ponerlas todas",
         "dos capas en la misma pista y posición se pisan, y cada una se verifica sola");
@@ -2337,12 +2341,13 @@ if (!cuerpoEjec) {
  */
 {
   const faltan = [];
-  for (const [fn, quien] of [["buscarMedio", "buscarMedio"], ["insertar", "insertar"],
-                             ["ubicarClip", "ubicarClip"]]) {
-    const desde = srcComandos.indexOf("async function " + fn + "(");
-    if (desde === -1) { faltan.push(quien + " (no existe)"); continue; }
-    const cuerpo = srcComandos.slice(desde, srcComandos.indexOf("\nasync function ", desde + 10));
-    const usaHelper = /\b(igualN|contieneN)\s*\(/.test(cuerpo);
+  /* Desde el 2026-11-16 los MEDIOS se comparan en un solo lugar, `coincidenDe`: `buscarMedio` e `insertar`
+     ya no tienen búsqueda propia (lo mira el chequeo de abajo). */
+  for (const [firma, quien] of [["function coincidenDe(", "coincidenDe"],
+                                ["async function ubicarClip(", "ubicarClip"]]) {
+    const cuerpo = cuerpoDeFuncion(srcComandos, firma);
+    if (!cuerpo) { faltan.push(quien + " (no existe)"); continue; }
+    const usaHelper = /\b(igualN|igualSinMayus|contieneN)\s*\(/.test(cuerpo);
     // comparación cruda de nombres: indexOf sobre toLowerCase, o === contra un nombre
     const cruda = /toLowerCase\(\)\.indexOf\(/.test(cuerpo) ||
                   /\bn === nombre\b/.test(cuerpo);
@@ -2355,7 +2360,98 @@ if (!cuerpoEjec) {
     mal("hay buscadores por nombre que comparan sin normalizar: " + faltan.join(", "),
       "macOS da NFD y Premiere NFC; un archivo con tilde no se encuentra y se duplica");
   } else {
-    ok("los tres buscadores por nombre normalizan Unicode antes de comparar");
+    ok("los buscadores por nombre —de medios y de clips— normalizan Unicode antes de comparar");
+  }
+}
+
+/*
+ * UN MEDIO POR NOMBRE: EL EXACTO GANA, Y UN PARCIAL QUE ENGANCHA MÁS DE UNO REBOTA (2026-11-16, dos reportes de uso
+ * del 10/11). `bins` movió «REEL 11 - corte v2» junto con la versión vieja, y `buscarMedio` e `insertar` se
+ * quedaban con el PRIMERO del panel que contenía el texto: con la v2 antes, pedir el nombre viejo ponía la nueva.
+ * `coincidenDe` y `elegirMedio` se EJECUTAN con ese panel —la v2 PRIMERO, que es el orden que lo rompía—, y por
+ * posición y sin comentarios se mira que nadie busque por su cuenta: `insertar` sin lazo propio, `bins` con el
+ * mismo emparejador, y `armarSecuencia` y `colocarLote` con UNA pasada por el proyecto y antes de crear nada.
+ */
+titulo("Un medio por nombre: el exacto gana y el parcial ambiguo rebota, en todos los verbos");
+{
+  const sinCom = (x) => (x ? x.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "") : "");
+  const fuentes = ["function coincidenDe(", "function elegirMedio("].map((f) => cuerpoDeFuncion(srcComandos, f));
+  let r = null;
+  if (!fuentes.some((f) => !f)) {
+    try {
+      const norm = (x) => String(x == null ? "" : x).normalize("NFC");
+      const ctx = { norm: norm, igualN: (a, b) => norm(a) === norm(b),
+        igualSinMayus: (a, b) => norm(a).toLowerCase() === norm(b).toLowerCase(),
+        contieneN: (h, a) => norm(h).toLowerCase().indexOf(norm(a).toLowerCase()) !== -1 };
+      require("vm").runInNewContext(fuentes.join("\n") + "\nthis.c = coincidenDe; this.e = elegirMedio;", ctx);
+      const h = (n) => ({ nombre: n, item: n });
+      // La v2 va ANTES que la vieja, y el archivo con tilde llega del panel en NFC.
+      const panel = { hojas: ["REEL 11 - corte v2", "REEL 11 - corte", "CAPA 11 v2.mov", "CAPA 11.mov",
+        "TELON.mov", "Copia.mov", "Copia.mov", "Música.wav"].map(h), saltados: 0 };
+      panel.hojas[5].item = "copia-1"; panel.hojas[6].item = "copia-2";
+      const tira = (f) => { try { f(); return null; } catch (e) { return String(e.message || e); } };
+      // Lo que NO tiene que tirar se evalúa de a uno: si tira, el fallo dice cuál y con qué mensaje.
+      const val = (f) => { try { return f(); } catch (e) { return "TIRÓ: " + String(e.message || e); } };
+      r = {
+        exacto: val(() => ctx.e(panel, "REEL 11 - corte")), exactoMayus: val(() => ctx.e(panel, "reel 11 - CORTE")),
+        exactoArchivo: val(() => ctx.e(panel, "CAPA 11.mov")), parcialUnico: val(() => ctx.e(panel, "TELON")),
+        nfd: val(() => ctx.e(panel, "Música.wav".normalize("NFD"))), homonimos: val(() => ctx.e(panel, "Copia.mov")),
+        homonimosParcial: val(() => ctx.e(panel, "Copia")),
+        ambiguo: tira(() => ctx.e(panel, "CAPA 11")), noHay: tira(() => ctx.e(panel, "no está")),
+        vacio: tira(() => ctx.e(panel, "  ")), sinNombre: tira(() => ctx.e(panel, undefined)),
+        // Con UN solo medio en el proyecto, un nombre vacío no es ambiguo: sin su guarda, lo devolvía.
+        vacioUnoSolo: tira(() => ctx.e({ hojas: [h("solo.mov")], saltados: 0 }, "")),
+        binExacto: ctx.c(panel.hojas, "REEL 11 - corte"), binParcial: ctx.c(panel.hojas, "CAPA 1"),
+        binCopias: ctx.c(panel.hojas, "Copia.mov")
+      };
+    } catch (e) { r = { error: String(e.message || e) }; }
+  }
+  const cuerpo = (f) => sinCom(cuerpoDeFuncion(srcComandos, f));
+  const ins = cuerpo("async function insertar("), bus = cuerpo("async function buscarMedio("), bin = cuerpo("async function bins(");
+  const arm = cuerpo("async function armarSecuencia("), lote = cuerpo("async function colocarLote(");
+  /* Con `params.capas` y no con la constante `capas`, que se declara más abajo: usarla acá es un ReferenceError en
+     CADA llamada, y este archivo no ejecuta `armarSecuencia` (pasó al escribirlo, el 2026-11-16). */
+  const iCapas = arm.search(/for \(const c of \(Array\.isArray\(params\.capas\) \? params\.capas : \[\]\)\) if \(c && c\.medio\) await resolver\(c\.medio\);/), iCrea = arm.search(/createSequenceWithPresetPath\(|crearSecuenciaDesde\(/);
+  if (!r) {
+    mal("faltan `coincidenDe` o `elegirMedio`", "son el único emparejador de medios por nombre");
+  } else if (r.error) {
+    mal("no se pudieron ejecutar `coincidenDe` y `elegirMedio`", r.error);
+  } else if (r.exacto !== "REEL 11 - corte" || r.exactoMayus !== "REEL 11 - corte" || r.exactoArchivo !== "CAPA 11.mov") {
+    mal("`elegirMedio` no se queda con el nombre EXACTO cuando otro lo contiene",
+      JSON.stringify({ exacto: r.exacto, exactoMayus: r.exactoMayus, exactoArchivo: r.exactoArchivo }) + " · con la v2 antes en el panel, pedir el nombre viejo ponía la nueva");
+  } else if (r.parcialUnico !== "TELON.mov" || r.nfd !== "Música.wav") {
+    mal("`elegirMedio` rechaza un uso correcto: un parcial que engancha a uno solo, o un nombre en la otra forma Unicode",
+      JSON.stringify({ parcialUnico: r.parcialUnico, nfd: r.nfd }));
+  } else if (!r.ambiguo || r.ambiguo.indexOf('"CAPA 11 v2.mov"') === -1 || r.ambiguo.indexOf('"CAPA 11.mov"') === -1) {
+    mal("un parcial que engancha más de un medio NO rebota nombrándolos", "salió: " + r.ambiguo + " · adivinar es poner el que no era, callado");
+  } else if (r.homonimos !== "copia-1" || r.homonimosParcial !== "copia-1") {
+    mal("`elegirMedio` cambió lo que hace con copias del MISMO nombre", JSON.stringify({ homonimos: r.homonimos, homonimosParcial: r.homonimosParcial }) +
+      " · va la primera del panel: rebotar ahí deja sin poder usar un medio importado dos veces");
+  } else if (!r.noHay || r.noHay.indexOf("Hay: ") === -1 || !r.vacio || !r.sinNombre || !r.vacioUnoSolo) {
+    mal("`elegirMedio` no rebota con un nombre que no está, vacío o ausente", JSON.stringify({ noHay: r.noHay, vacio: r.vacio, sinNombre: r.sinNombre, vacioUnoSolo: r.vacioUnoSolo }) +
+      " · un nombre vacío lo CONTIENE todo: antes devolvía el primer medio del proyecto");
+  } else if (!r.binExacto.exacto || r.binExacto.hits.length !== 1 || r.binParcial.exacto || r.binParcial.hits.length !== 2 ||
+             !r.binCopias.exacto || r.binCopias.hits.length !== 2) {
+    mal("`coincidenDe` no da el exacto solo, todas las copias homónimas, o todo lo que contiene un parcial",
+      JSON.stringify({ exacto: r.binExacto.hits.length, parcial: r.binParcial.hits.length, copias: r.binCopias.hits.length }) + " · se esperaba 1, 2 y 2");
+  } else if (!/return elegirMedio\(indice \|\| \(await hojasDelProyecto\(project\)\), nombre\);/.test(bus)) {
+    mal("`buscarMedio` no elige con `elegirMedio` sobre las hojas del proyecto");
+  } else if (!/const item = await buscarMedio\(project, nombre\);/.test(ins) || /contieneN\(n, nombre\)/.test(ins)) {
+    mal("`insertar` busca el medio por su cuenta", "su lazo se quedaba con el primero que contenía el texto, en el orden del panel");
+  } else if (!/coincidenDe\(indice\.hojas, p\)/.test(bin) || /contieneN\(/.test(bin)) {
+    mal("`bins` no empareja con `coincidenDe`", "por parcial solo, pedir un nombre se llevaba también a su v2");
+  } else if (!/esRaiz \? raiz : await asegurarBin\(/.test(bin) || !/if \(!partes\.length\) throw/.test(bin) ||
+             !/patrones\.some\(\(p\) => !norm\(p\)\.trim\(\)\)/.test(bin)) {
+    mal("`bins` no acepta la raíz como destino, deja borrarla, o acepta un nombre vacío en `medios`",
+      "sin destino raíz, lo movido de más no tiene vuelta; un nombre vacío engancha todo el proyecto");
+  } else if (!/buscarMedio\(project, nombre, hojas\)/.test(arm) || !/buscarMedio\(project, nombre, hojas\)/.test(lote) ||
+             (arm.match(/hojasDelProyecto\(/g) || []).length !== 1 || (lote.match(/hojasDelProyecto\(/g) || []).length !== 1) {
+    mal("`armarSecuencia` o `colocarLote` recorren el proyecto una vez por NOMBRE", "es la ráfaga de lecturas que ya tiró Premiere: la lista de hojas se pide una vez y se pasa");
+  } else if (iCapas === -1 || iCrea === -1 || iCapas > iCrea) {
+    mal("`armarSecuencia` no resuelve los medios de las CAPAS antes de crear la secuencia", "posiciones: capas " + iCapas + ", crear " + iCrea +
+      " · un nombre ambiguo o mal escrito la dejaba a medio armar");
+  } else {
+    ok("un medio se elige en un solo lugar: exacto primero, parcial si es uno solo, y si no rebota nombrándolos; `bins` mueve por el mismo emparejador y acepta la raíz");
   }
 }
 
@@ -7163,12 +7259,26 @@ titulo("Capas `sinAudio`: el audio va a pistas propias, sale en una transacción
   if (iRebote === -1 || (iCrear !== -1 && iRebote > iCrear)) malos.push("`sinAudio` con `pistaAudio` no rebota antes de crear la secuencia");
   if ((armar.match(/bloque\s*\?\s*bloque\.inicio\s*:/g) || []).length < 2) malos.push("el audio de una capa `sinAudio` no va al sumidero (en el overwrite y en la relectura)");
   if (!/const\s+libre\s*=\s*\(bl\)\s*=>\s*!bl\.ocupado\.some\(/.test(armar)) malos.push("dos capas `sinAudio` que se pisan en el tiempo comparten bloque");
-  if (!/idx\s*<\s*sumidero\.inicio\)\s*\{\s*audioSacado\.fuera\+\+;\s*continue;/.test(armar)) malos.push("se puede sacar audio de AFUERA del sumidero");
-  const iQuita = armar.search(/createRemoveItemsAction\(sel,\s*false,\s*ppro\.Constants\.MediaType\.AUDIO\)/);
-  const iVacia = armar.search(/audioSacado\.seleccionVaciada\s*=\s*await\s+vaciarSeleccion\(/);
+  /* El sacado vive en `sacarAudioDelSumidero` desde el 2026-11-16, para que `insertar` con `sinAudio` use lo
+     mismo: `armarSecuencia` lo llama, y lo que se exigía de su cuerpo se exige de esa función. */
+  const sacar = limpiar(cuerpoDeFuncion(srcComandos, "async function sacarAudioDelSumidero(") || "");
+  if (!/await sacarAudioDelSumidero\(project, nueva, editor, sinAudioV, sumidero\)/.test(armar)) malos.push("`armarSecuencia` no saca el audio con `sacarAudioDelSumidero`");
+  if (!/idx\s*<\s*sumidero\.inicio\)\s*\{\s*audioSacado\.fuera\+\+;\s*continue;/.test(sacar)) malos.push("se puede sacar audio de AFUERA del sumidero");
+  const iQuita = sacar.search(/createRemoveItemsAction\(sel,\s*false,\s*ppro\.Constants\.MediaType\.AUDIO\)/);
+  const iVacia = sacar.search(/audioSacado\.seleccionVaciada\s*=\s*await\s+vaciarSeleccion\(/);
+  /* `insertar` con `sinAudio` (un reporte de uso del 6/11): rebota con `pistaAudio`, mira el tope de borrados ANTES
+     de pegar —con el video adentro y el sacado rebotado quedaría peor que sin hacer nada—, pega el audio en el
+     sumidero y lo saca con la misma función, después de saber que el video entró. */
+  const ins = limpiar(cuerpoDeFuncion(srcComandos, "async function insertar(") || "");
+  const iTope = ins.indexOf("borradoPermitido()"), iPega = ins.indexOf("createOverwriteItemAction("), iSaca = ins.indexOf("await sacarAudioDelSumidero(");
+  if (!/if \(sinAudio && typeof params\.pistaAudio === "number"\) \{\s*throw/.test(ins)) malos.push("`insertar` no rebota `sinAudio` con `pistaAudio`");
+  if (iTope === -1 || iPega === -1 || iTope > iPega || !/if \(!pb\.ok\) \{\s*throw/.test(ins)) malos.push("`insertar` con `sinAudio` no mira el tope de borrados ANTES de pegar");
+  if (!/const pistaAudio = sinAudio \? sumideroIns\.inicio : /.test(ins)) malos.push("el audio de `insertar` con `sinAudio` no va al sumidero: en la pista espejo PISA lo que haya");
+  if (iSaca === -1 || iSaca < iPega || !/if \(sinAudio && entro\) \{\s*if \(!puesto\.length \|\| !clipPuesto\)/.test(ins) || ins.indexOf("await esperarEntreTx();") === -1)
+    malos.push("`insertar` no saca el audio con `sacarAudioDelSumidero` después de pegar, espaciado, y sólo si el VIDEO entró");
   if (iQuita === -1) malos.push("no se saca con UNA acción de AUDIO sobre la selección");
   else if (iVacia === -1 || iVacia < iQuita) malos.push("la selección no se vacía después de sacar");
-  if (!/audioSacado\.quedan\+\+/.test(armar) || !/audioSacado\.videoRoto\.push\(/.test(armar)) malos.push("no se relee qué quedó en el sumidero ni que el video siga entero");
+  if (!/audioSacado\.quedan\+\+/.test(sacar) || !/audioSacado\.videoRoto\.push\(/.test(sacar)) malos.push("no se relee qué quedó en el sumidero ni que el video siga entero");
   if (!/c\.apagado\s*===\s*true\s*&&\s*!lugar\.audio\s*&&\s*!bloque\)/.test(armar)) malos.push("una capa `sinAudio` y `apagado` también apaga el audio que ya sale");
   if (malos.length) mal("las capas `sinAudio` de `armarSecuencia` no se portan como deben", malos.join("\n         "));
   else ok("`sinAudio`: rebota con `pistaAudio`, va a un sumidero por bloques, sale en una acción y se relee");
@@ -7636,6 +7746,150 @@ titulo("`aplicarEscalas` agrupa de a `TOPE_LOTE` sin que se lo pidan, y dice cu�
     malos.push("el resumen de `aplicarEscalas` no dice cuántos Cmd+Z hacen falta");
   if (malos.length) mal("el lote por defecto de los verbos de tanda no es el decidido", malos.join("\n         "));
   else ok("`aplicarEscalas` agrupa de a `TOPE_LOTE` y dice sus Cmd+Z; `aplicarZooms` y `aplicarAnim` siguen en 1 hasta medir");
+}
+
+/*
+ * UNA ENTRADA DEL PLAN ES DE UN SOLO CLIP (2026-11-16, un reporte de uso del 10/11). Con un plan de 5 entradas sobre
+ * una pista de 12, el clip que arrancaba 0,9 s después de un plano con entrada tomó la del vecino y quedó con su
+ * encuadre; el resumen decía «6 ESCRITOS». `repartirPlan` se EJECUTA con ese caso y con los que no tiene que romper
+ * —el plan completo, uno con los tiempos corridos unas décimas, una ventana—, y `aplicarEscalas` reparte con ella,
+ * por posición y sin comentarios, con los arranques de TODA la pista.
+ */
+{
+  const sinCom = (x) => (x ? x.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "") : "");
+  const fuente = cuerpoDeFuncion(srcComandos, "function repartirPlan(");
+  let r = null;
+  if (fuente) {
+    try {
+      const ctx = {};
+      require("vm").runInNewContext(fuente + "\nthis.f = repartirPlan;", ctx);
+      const pista = [0, 3.2, 4.1, 6, 8, 10, 12, 14, 16, 18, 20, 22];
+      const plan = (ts) => ts.map((t) => ({ desde: t, escala: 100 + t }));
+      const conEntrada = (x, n) => { const o = []; for (let i = 0; i < n; i++) if (x.porClip[i] && x.porClip[i].entrada) o.push(i); return o.join(","); };
+      const reporte = ctx.f(plan([0, 3.2, 6, 8, 10]), pista, 0, 12);
+      const entero = ctx.f(plan(pista), pista, 0, 12);
+      const corrido = ctx.f(plan(pista.map((t) => t + 0.3)), pista, 0, 12);
+      const v1 = ctx.f(plan([1.8]), [0, 1.0, 1.8], 0, 2), v2 = ctx.f(plan([1.8]), [0, 1.0, 1.8], 2, 3);
+      const sobra = ctx.f(plan([3.2, 3.9, 50]).concat([{ escala: 5 }]), [3.2, 10, null], 0, 3);
+      r = {
+        reporte: conEntrada(reporte, 12), vecino: reporte.porClip[2], suEscala: reporte.porClip[1].entrada && reporte.porClip[1].entrada.escala,
+        sinPlan: reporte.porClip[6], reporteSobra: reporte.sinUsar.length,
+        entero: conEntrada(entero, 12), corrido: conEntrada(corrido, 12), enteroSobra: entero.sinUsar.length + corrido.sinUsar.length,
+        v1: conEntrada(v1, 3), v1Sobra: v1.sinUsar.length, v1Vecino: v1.porClip[1], v2: conEntrada(v2, 3),
+        sobra: sobra.sinUsar, sobraUsa: conEntrada(sobra, 3)
+      };
+    } catch (e) { r = { error: String(e.message || e) }; }
+  }
+  const esc = sinCom(cuerpoDeFuncion(srcComandos, "async function aplicarEscalas("));
+  const iLee = esc.search(/for \(let i = 0; i < items\.length; i\+\+\) \{\s*try \{ tiempos\[i\] = await tiemposDe\(items\[i\]\)/);
+  const iReparte = esc.search(/repartirPlan\(plan, tiempos\.map\(/), iUsa = esc.search(/const mejor = toca\.entrada;/);
+  if (!r) {
+    mal("falta `repartirPlan`", "sin ella cada clip toma la entrada más cercana, aunque sea de otro");
+  } else if (r.error) {
+    mal("no se pudo ejecutar `repartirPlan`", r.error);
+  } else if (r.reporte !== "0,1,3,4,5" || !r.vecino || r.vecino.entrada || !r.vecino.ajena || r.vecino.motivo.indexOf("del [1]") === -1 || r.suEscala !== 103.2) {
+    mal("un clip toma la entrada de su VECINO cuando el plan no trae la suya",
+      JSON.stringify({ conEntrada: r.reporte, vecino: r.vecino }) + " · se esperaba 0,1,3,4,5 y el [2] sin plan, nombrando al [1]: es el «6 ESCRITOS» del reporte");
+  } else if (!r.sinPlan || r.sinPlan.entrada || r.sinPlan.ajena || r.reporteSobra !== 0) {
+    mal("`repartirPlan` no deja «sin plan» a un clip lejos de toda entrada, o cuenta de más lo que sobra", JSON.stringify({ sinPlan: r.sinPlan, sobra: r.reporteSobra }));
+  } else if (r.entero !== "0,1,2,3,4,5,6,7,8,9,10,11" || r.corrido !== r.entero || r.enteroSobra !== 0) {
+    mal("`repartirPlan` rechaza un uso correcto: un plan completo, o uno con los tiempos corridos unas décimas",
+      JSON.stringify({ entero: r.entero, corrido: r.corrido, sobra: r.enteroSobra }));
+  } else if (r.v1 !== "" || r.v1Sobra !== 0 || !r.v1Vecino || !r.v1Vecino.ajena || r.v2 !== "2") {
+    mal("con una VENTANA, la entrada de un clip de la tanda siguiente cae en el último de ésta, o se cuenta como sobrante",
+      JSON.stringify({ primera: r.v1, sobra: r.v1Sobra, segunda: r.v2 }) + " · el dueño se decide con toda la pista");
+  } else if (r.sobraUsa !== "0" || r.sobra.length !== 3 || r.sobra[0].indexOf("el [0] tomó otra") === -1 || r.sobra[1].indexOf("sin clip") === -1) {
+    mal("`repartirPlan` no dice las entradas del plan que no usó nadie", JSON.stringify(r.sobra) +
+      " · se esperaban tres: la segunda del mismo clip, la que no tiene clip cerca y la que vino sin `desde`");
+  } else if (iLee === -1 || iReparte === -1 || iUsa === -1 || !(iLee < iReparte && iReparte < iUsa) || /for \(const u of plan\)/.test(esc)) {
+    mal("`aplicarEscalas` no reparte el plan con `repartirPlan` sobre los arranques de TODA la pista",
+      "posiciones: leer " + iLee + ", repartir " + iReparte + ", usar " + iUsa + " · o conserva la búsqueda propia, clip por clip");
+  } else {
+    ok("`aplicarEscalas` le da cada entrada del plan a UN clip, el más cercano de la pista, y dice las que no usó nadie");
+  }
+}
+
+/*
+ * `resolucion` DICE LO QUE EL CAMBIO DE TAMAÑO DEJA MAL (2026-11-16, un reporte de uso del 4/11): las capas de ajuste
+ * quedan del tamaño viejo y corrigen una franja, y los clips con «Scale to Frame Size» se reajustan al cuadro nuevo.
+ * Las capas se cuentan con `esCapaDeAjuste` —sin leer un valor de param— sólo si el tamaño CAMBIÓ, y lo de la casilla
+ * se avisa siempre: la API no la deja leer. Por posición y sin comentarios.
+ */
+{
+  const sinCom = (x) => (x ? x.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "") : "");
+  const c = sinCom(cuerpoDeFuncion(srcComandos, "async function resolucion("));
+  const iSi = c.search(/if \(r\.viaRect && r\.viaRect !== "ya estaba"\) \{/), iCapa = c.search(/await esCapaDeAjuste\(its\[i\]\)/);
+  if (iSi === -1 || iCapa === -1 || iCapa < iSi) {
+    mal("`resolucion` no busca las capas de ajuste cuando el tamaño cambia", "quedan del tamaño viejo y corrigen sólo una franja del cuadro nuevo, sin aviso");
+  } else if (!/CAPA\(S\) DE AJUSTE quedan de \$\{r\.antes\.ancho\}x\$\{r\.antes\.alto\}/.test(c) || !/r\.capasDeAjuste = ajustes;/.test(c)) {
+    mal("`resolucion` no nombra las capas de ajuste que quedaron del tamaño viejo");
+  } else if (!/Scale to Frame Size/.test(c) || !/r\.resumen \+=/.test(c)) {
+    mal("`resolucion` no avisa de los clips con «Scale to Frame Size»", "Premiere los reajusta al cuadro nuevo y agrandados salen blandos");
+  } else if (/new ppro\.RectF\(ancho, alto\)|\{ width: ancho|\{ left: 0, top: 0, width: ancho/.test(sinCom(cuerpoDeFuncion(srcComandos, "async function ponerAjustes("))) ||
+             !/const mal = await quedo\(\);/.test(sinCom(cuerpoDeFuncion(srcComandos, "async function ponerAjustes(")))) {
+    mal("el cambio de tamaño vuelve a probar OTRAS formas del rectángulo, o no relee con paciencia",
+      "medido el 2026-11-16: las otras tres dejan la secuencia en 0x0, y se llegaba a ellas porque la relectura de la buena llegó antes que la escritura");
+  } else if (/getStartValue|getValueAtTime|getParam\(|getComponentChain/.test(c)) {
+    mal("`resolucion` lee efectos o valores de params para avisar", "barrer valores en volumen tiró Premiere: alcanza con `isAdjustmentLayer`");
+  } else {
+    ok("`resolucion` cuenta las capas de ajuste que quedan del tamaño viejo y avisa de «Scale to Frame Size»");
+  }
+}
+
+/*
+ * `premiere_sin_uso` NO DICE QUE ALGO SOBRA SIN PODER COMPROBARLO (2026-11-16, un reporte de uso del 10/11). Un falso
+ * «sin uso» termina en un medio borrado. `sinUsoDe` se EJECUTA con un Premiere de mentira que contesta por tandas:
+ * une las tandas, no cuenta las secuencias como medios, y REBOTA si los ids de los clips no aparecen en el panel o
+ * si de ningún clip se pudo leer el medio —el control positivo—. Y el verbo del panel sólo lee.
+ */
+titulo("`premiere_sin_uso`: une las tandas, y no concluye nada si no puede comparar");
+{
+  /* `sinUsoDe` es asíncrona y este archivo cuenta sus fallas al final, en orden: se corre en un proceso aparte, que
+     devuelve los casos como JSON, y acá se juzga en sincronía. */
+  const guion = `
+    const { sinUsoDe } = require(${JSON.stringify(path.join(__dirname, "server", "sin_uso.js"))});
+    const hojas = [{ id: "a", nombre: "A.mov", bin: "(raíz)", esSecuencia: false }, { id: "b", nombre: "B.mov", bin: "X", esSecuencia: false },
+      { id: "c", nombre: "C.wav", bin: "(raíz)", esSecuencia: false }, { id: "s1", nombre: "Corte", bin: "(raíz)", esSecuencia: true },
+      { id: "s2", nombre: "Anidada", bin: "(raíz)", esSecuencia: true }, { id: null, nombre: "raro", bin: "(raíz)", esSecuencia: false }];
+    const mundo = (tandas) => async (p) => {
+      if (p.listar) return { hojas: hojas, saltados: 0 };
+      const i = tandas.findIndex((t) => t.desde === p.desdeSecuencia);
+      return i === -1 ? { enUso: {}, secuencias: [], clips: 0, sinLeer: 0, total: 0, siguiente: null } : tandas[i].r;
+    };
+    const T = (desde, enUso, clips, siguiente, sinLeer) => ({ desde: desde, r: { enUso: enUso, secuencias: [{ nombre: "s" + desde, clips: clips }], clips: clips, sinLeer: sinLeer || 0, total: 2, siguiente: siguiente } });
+    const tira = async (f) => { try { await f(); return null; } catch (e) { return String(e.message || e); } };
+    (async () => {
+      const bien = await sinUsoDe(mundo([T(0, { a: 2, s2: 1 }, 3, 4), T(4, { c: 1 }, 1, null)]));
+      const vacio = await sinUsoDe(mundo([T(0, {}, 0, null)]));
+      const dudoso = await sinUsoDe(mundo([T(0, { a: 1, b: 1, c: 1 }, 4, null, 1)]));
+      console.log(JSON.stringify({ bien: bien, vacio: vacio, dudoso: dudoso,
+        idsAjenos: await tira(() => sinUsoDe(mundo([T(0, { zz: 5 }, 5, null)]))),
+        sinMedio: await tira(() => sinUsoDe(mundo([T(0, {}, 7, null, 7)]))),
+        noAvanza: await tira(() => sinUsoDe(mundo([T(0, { a: 1 }, 1, 0)]))) }));
+    })().catch((e) => { console.log(JSON.stringify({ error: String(e && e.stack || e) })); });`;
+  const corrida = require("child_process").spawnSync(process.execPath, ["-e", guion], { encoding: "utf8" });
+  let r = null;
+  try { r = JSON.parse(String(corrida.stdout).trim().split("\n").pop()); } catch (e) { r = { error: "no devolvió JSON: " + String(corrida.stderr || corrida.stdout).slice(0, 300) }; }
+  const nombres = (x) => x.sinUso.map((m) => m.nombre).join(",");
+  const panel = (cuerpoDeFuncion(srcComandos, "async function usoDeMedios(") || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  if (r.error) {
+    mal("no se pudo ejecutar `sinUsoDe`", r.error);
+  } else if (nombres(r.bien) !== "B.mov" || r.bien.total !== 4 || r.bien.tandas !== 2 || r.bien.clips !== 4 || r.bien.anidadas.join() !== "Anidada" || r.bien.sinId.join() !== "raro") {
+    mal("`sinUsoDe` no une las tandas, cuenta una secuencia como medio, o juzga un ítem sin id",
+      JSON.stringify({ sinUso: nombres(r.bien), total: r.bien.total, tandas: r.bien.tandas, clips: r.bien.clips, anidadas: r.bien.anidadas, sinId: r.bien.sinId }) + " · se esperaba B.mov solo, de 4 medios, en 2 tandas");
+  } else if (!r.idsAjenos || !r.sinMedio) {
+    mal("`sinUsoDe` concluye sin su control positivo", "con clips leídos y ningún id reconocido —o ningún medio legible— decía que TODO sobra: " + JSON.stringify({ idsAjenos: r.idsAjenos, sinMedio: r.sinMedio }));
+  } else if (!r.noAvanza || !/no avanza/.test(r.noAvanza)) {
+    mal("`sinUsoDe` no corta una tanda que no avanza", "le pediría lo mismo al panel quinientas veces antes de frenar: " + r.noAvanza);
+  } else if (nombres(r.vacio) !== "A.mov,B.mov,C.wav" || !r.dudoso.dudoso || !/PUEDE estar en uso/.test(r.dudoso.resumen)) {
+    mal("`sinUsoDe` rechaza un proyecto sin clips, o calla que hubo clips sin leer", JSON.stringify({ vacio: nombres(r.vacio), dudoso: r.dudoso.dudoso }));
+  } else if (!/NO ve lo que sólo es FUENTE de un subclip/.test(r.bien.resumen)) {
+    mal("el resumen de `premiere_sin_uso` no avisa lo que la API no ve", "la fuente de un subclip o de un multicámara figura sin uso y no lo está");
+  } else if (!panel || /transaccion\(|create\w+Action\(|executeTransaction|getStartValue|getValueAtTime/.test(panel)) {
+    mal("`usoDeMedios` escribe o lee valores de params", "es un verbo de solo lectura: dos lecturas por clip, el medio y su id");
+  } else {
+    ok("`premiere_sin_uso` une las tandas, deja afuera las secuencias, y rebota si no puede comparar los ids");
+  }
 }
 
 /* ---------- y las TRANSACCIONES de un lote tambien se espacian ---------- */

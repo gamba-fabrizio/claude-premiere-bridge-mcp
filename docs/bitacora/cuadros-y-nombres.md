@@ -10,6 +10,13 @@
 - **`insertar` dice la entrada que Premiere bajó y el largo que cambió**; `in_out_medio` lo anticipa. Un
   subclip no se compara: se lee sin marca. → «`insertar` no decía que Premiere BAJÓ la entrada»
 - **Mover no se pega al cuadro; insertar sí.** → «Sub-frame: mover NO se pega»
+- **Un medio se elige en UN lugar, `coincidenDe`**: el nombre exacto gana, sin exacto vale un parcial si engancha
+  uno solo, y si engancha más rebota nombrándolos; `bins` mueve por el mismo emparejador y acepta la raíz
+  (2026-11-16). → «Un medio por nombre: el exacto gana»
+- **En `aplicarEscalas`, una entrada del plan es de UN clip**, el más cercano de toda la pista. → «`aplicarEscalas`
+  con un plan parcial»
+- **Las capas de `armarSecuencia` se releen con el largo en CUADROS**: una recortada por la de al lado pasaba la
+  tolerancia de 0,15 s. → «Una capa recortada por un cuadro»
 - **Cortar entre cuadros deja un hueco de uno**: se cuantiza con aritmética entera sobre ticks.
   → «Cortar entre frames deja huecos»
 - **La grilla es la de la secuencia, no una constante.** → «La grilla es la de LA SECUENCIA»
@@ -214,3 +221,48 @@ código nuevo         entrada 0,6, 1,6 s                                 entrada
 
 Con el viejo, el armado informaba «in/out devueltos a como estaban»: un OK falso, porque lo devolvía al centinela.
 `colocarLote` pasa por las mismas dos funciones y no se midió aparte.
+
+## Un medio por nombre: el exacto gana, y el parcial ambiguo rebota (2026-11-16)
+
+Lo reportó una sesión de uso: `bins` con el nombre de un corte se llevó también su «v2», porque el nombre parcial
+engancha todo lo que lo CONTIENE; no había forma de pedir el exacto, y sin destino raíz lo movido de más no tenía
+vuelta. Leyendo el código apareció algo peor: `buscarMedio` y la búsqueda propia de `insertar` se quedaban con el
+PRIMERO del panel que contenía el texto. Lo usan `armarSecuencia`, `colocarLote`, `relink` —sin Cmd+Z—,
+`interpretar`, `proxy` y `subclip`.
+
+**Reproducido en el proyecto de prueba con el panel de antes**, con «Zeta v2.mov» importado ANTES que «Zeta.mov» y
+dos secuencias, «ZN v2» y «ZN»: `insertar` {medio: "Zeta"} puso «Zeta v2.mov»; {medio: "ZN"} puso «ZN v2», con
+una «ZN» EXACTA en el proyecto; `bins` {medios: ["ZN"]} movió las dos. El segundo es el que importa: ni el nombre
+completo alcanzaba si otro lo extendía y estaba antes. Con archivos lo tapa la extensión; con secuencias,
+subclips y clips renombrados, no.
+
+**El arreglo.** `hojasDelProyecto` junta en una pasada todo lo que no es un bin; `coincidenDe` devuelve las que se
+llaman exactamente así —sin distinguir mayúsculas ni forma Unicode— y, sólo si no hay, las que contienen el
+texto; `elegirMedio` exige que eso sea un solo nombre y si no rebota nombrándolos. `bins` usa `coincidenDe` y
+mueve todo lo que devuelve, nombrando lo que un parcial agarró de a varios, y `bin: "/"` es la raíz.
+`armarSecuencia` y `colocarLote` piden las hojas una vez por llamada, y `armarSecuencia` resuelve también los
+medios de las capas antes de crear la secuencia. Medido con el plugin reinstalado: «Zeta» rebota en los tres
+verbos sin crear nada, el exacto entra, un parcial que engancha uno solo entra, y `bin: "/"` devolvió 5 de 5.
+
+Lo que no cambió, a propósito: varias copias con el MISMO nombre no se distinguen y va la primera del panel;
+rebotar ahí dejaría sin poder usar un medio importado dos veces.
+
+**Un error propio que `test.js` no vio**: la línea que resuelve las capas usaba una constante declarada doscientas
+líneas más abajo, un ReferenceError en CADA `armarSecuencia`. Pasaban todos los tests, que miran por posición y no
+ejecutan ese verbo. Salió releyendo, antes de instalar.
+
+## `aplicarEscalas` con un plan parcial: el vecino heredaba el encuadre (2026-11-16)
+
+Un plan de 5 entradas sobre una pista de 12 clips contestó «6 ESCRITOS»: el clip que arrancaba 0,9 s después de un
+plano con entrada tomó la del vecino. Cada clip buscaba la entrada más cercana a menos de 1 s, sin mirar de quién
+era. Ahora `repartirPlan`, una función sin API, le da cada entrada al clip que arranca más cerca de ella en TODA
+la pista; el vecino queda sin plan, nombrando al dueño, y las entradas que no usa nadie se dicen. Medido antes y
+después con tres clips en 0, 2 y 2,92 s y una sola entrada: de «2 ESCRITOS» a «1 ESCRITOS · 2 sin plan».
+
+## Una capa recortada por un cuadro, y un aviso que suponía en vez de decir (2026-11-16)
+
+El aviso «SE PISARON entre sí» de `armarSecuencia` era un texto fijo: salió sobre capas enteras y no dejaba con
+qué buscar la causa, que no se reprodujo. Buscándolo apareció uno real: a 25 fps, dos capas seguidas con tiempos
+fuera de la grilla quedaron de 93 y 97 cuadros, la segunda arrancó un cuadro antes del fin de la primera, se lo
+comió, y el verbo dijo «2/2 capas» —la relectura tolera 0,15 s y un cuadro son 0,04—. Ahora la relectura dice qué
+clips hay cerca y compara el largo en cuadros: «RECORTADA: entró con 93 cuadros y quedó con 92», «1/2 capas».

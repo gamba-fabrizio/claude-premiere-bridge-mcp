@@ -3,7 +3,7 @@
 Un bridge que le da a Claude acceso de lectura y escritura a Premiere Pro: leer la
 secuencia, **mirar el frame** bajo el playhead, animar, editar y armar timeline,
 sobre el clip que se le nombra.
-**60 herramientas MCP sobre 76 verbos del panel.**
+**61 herramientas MCP sobre 77 verbos del panel.**
 
 > **Esto salió de un flujo de trabajo real, no de un ejercicio.** Se usó para armar
 > cortes de videoclips, cursos e institucionales, y casi todo lo que hay acá se pagó
@@ -134,7 +134,8 @@ ln -s "/RUTA/A/TU/COPIA/premiere-bridge/skills/premiere" ~/.claude/skills/premie
 | `premiere_curva_keyframe` | Cambia la curva: lineal, bezier, hold o tiempo |
 | `premiere_editar` | Mueve, recorta o apaga un clip. Mover un clip por encima de otro rebota: quedaría fuera de orden y no se dibujaría |
 | `premiere_medios` | Qué hay en el panel de proyecto, bin por bin |
-| `premiere_insertar` | Pone un medio en una pista, en el segundo que se pida |
+| `premiere_sin_uso` | Lista los medios que no aparecen en ninguna secuencia, leyendo Premiere por tandas. Sólo lee; no ve lo que es fuente de un subclip o de un multicámara |
+| `premiere_insertar` | Pone un medio en una pista, en el segundo que se pida; con `sinAudio`, sólo su video |
 | `premiere_borrar` | Saca un clip y sus vinculados —todos los streams, también apuntado a un stream de audio—; con dos copias iguales en el mismo instante no toca nada y lo dice |
 | `premiere_cortar` | Parte un clip en dos, en un segundo dado. La cola es un clon: efectos, nombre y el mismo audio, pero sin vínculo en Premiere |
 | `premiere_sacar_rangos` | Saca tramos de la secuencia cerrando el hueco; ~7 rangos por minuto, y frena limpio en el tope |
@@ -171,7 +172,7 @@ ln -s "/RUTA/A/TU/COPIA/premiere-bridge/skills/premiere" ~/.claude/skills/premie
 | `premiere_crear_proyecto` | Crea un .prproj nuevo y lo deja con el foco |
 | `premiere_guardar` | Guarda el proyecto, y comprueba que el archivo se escribió |
 | `premiere_importar` | Importa archivos al panel de proyecto, opcionalmente a un bin; no necesita secuencia activa |
-| `premiere_bins` | Lista el árbol de bins, crea los que falten, mueve medios adentro y borra bins vacíos, o con contenido si se pide `aunqueTengaCosas` |
+| `premiere_bins` | Lista el árbol de bins, crea los que falten, mueve medios adentro —el nombre exacto gana; sin exacto, todos los que lo contienen— o a la raíz (`bin: "/"`), y borra bins vacíos, o con contenido si se pide `aunqueTengaCosas` |
 | `premiere_revisar` | Recorre la secuencia y devuelve lo que quedó mal: clips fuera de orden en su pista —que no se dibujan—, ceros, solapes, huecos en frames, juntas, y vecinos que repiten material en la fuente |
 
 Las que escriben se apuntan con `pista` + `indice` —los de `premiere_clips`— o con

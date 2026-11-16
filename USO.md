@@ -13,31 +13,28 @@ en `CLAUDE.md`.
 
 ## Antes de la primera llamada
 
-- **El panel tiene que estar abierto en Premiere.** El plugin está instalado y arranca con
-  Premiere. Sin Premiere, las herramientas fallan al instante con "Premiere NO está abierto"; con
-  Premiere y sin panel, a los 25 s, con "el panel no latió" o "nunca latió". Se le dice al editor y
-  no se insiste, salvo que la vuelta del latido suba en la llamada siguiente: eso es Premiere frenado
-  por el sistema, no sin panel (ver «Premiere y la máquina»).
+- **El panel tiene que estar abierto en Premiere.** El plugin está instalado y arranca con Premiere. Sin Premiere, las
+  herramientas fallan al instante con "Premiere NO está abierto"; con Premiere y sin panel, a los 25 s, con "el panel
+  no latió" o "nunca latió". Se le dice al editor y no se insiste, salvo que la vuelta del latido suba en la llamada
+  siguiente: eso es Premiere frenado por el sistema, no sin panel (ver «Premiere y la máquina»).
 - **Todo opera sobre el proyecto CON FOCO y su secuencia ACTIVA**, no sobre la carpeta de la
   sesión. `estado` empieza por el nombre del proyecto: leelo. En toda llamada que escriba pasá
   `proyecto` —y `secuencia` si hay dos parecidas—: rebota si no coinciden, o si el nombre parcial
   engancha más de una. Las herramientas de `herramientas/` lo deducen solas.
-- **Cada verbo devuelve qué encontró, no si salió bien, y el veredicto sale de RELEER el estado**
-  —`clips`, `revisar`, un `frame`—, no del mensaje. Esta API acepta escrituras que no aplica, y a
-  veces "NO CAMBIÓ NADA" es la respuesta correcta. Darlo por bueno sin mirar es el error que más caro
-  salió.
+- **Cada verbo devuelve qué encontró, no si salió bien, y el veredicto sale de RELEER el estado** —`clips`, `revisar`,
+  un `frame`—, no del mensaje. Esta API acepta escrituras que no aplica, y a veces "NO CAMBIÓ NADA" es la respuesta
+  correcta. Darlo por bueno sin mirar es el error que más caro salió.
 - **Si el editor está trabajando en Premiere, no operes sin que te lo pida.**
 - **Guardá (`premiere_guardar`) antes y después de cada tanda.** Es lo que volvió gratis cada crash.
 - **Lo que no usaste nunca, o una tanda grande, se prueba primero en un proyecto de prueba**
   descartable, no en el del editor.
 - **Si encadenás escrituras a mano, espaciadas**: a ~200 ms entre transacciones Premiere se cae, y
   el borde baja con los proyectos pesados. Las herramientas ya espacian.
-- **Premiere se cae por lo ACUMULADO en la sesión, aunque espacies**, y el punto varía mucho: medido en
-  el proyecto de prueba, ~540–630 escrituras con `fijar` espaciado y de ~200 a ~2.900 con una tanda.
-  Ninguno es un umbral. Guardá antes y después de cada tanda —Premiere recupera lo guardado— y reiniciá
-  antes de una grande (`node herramientas/recargar.js --reiniciar`). `premiere_aplicar_motion` hace con
-  una llamada lo que `fijar` con 69, pero no es más segura por escritura. `estado` dice cuánto lleva la
-  sesión.
+- **Premiere se cae por lo ACUMULADO en la sesión, aunque espacies**, y el punto varía mucho: medido en el proyecto de
+  prueba, ~540–630 escrituras con `fijar` espaciado y de ~200 a ~2.900 con una tanda. Ninguno es un umbral. Guardá
+  antes y después de cada tanda —Premiere recupera lo guardado— y reiniciá antes de una grande (`node
+  herramientas/recargar.js --reiniciar`). `premiere_aplicar_motion` hace con una llamada lo que `fijar` con 69, pero
+  no es más segura por escritura. `estado` dice cuánto lleva la sesión.
 
 ## Cómo leer lo que contesta
 
@@ -78,25 +75,28 @@ en `CLAUDE.md`.
   Follows Playhead —prendido en esta máquina— mover el playhead SELECCIONA el clip de abajo, y sin
   nombrarlo operan sobre ése. En `keyframe`, un punto que cae fuera del clip rebota sin escribir nada;
   `motion` avisa si el playhead no está sobre el clip, porque lo animado se lee en el borde.
-- **`editar salida` es un punto de FUENTE, no una duración.** Un PNG o un Transparent Video entran
-  con in-point ~3600: leé la `entrada` real y sumale la duración. Y **`editar entrada` además
-  MUEVE el clip**: la entrada en una llamada y `desde` en otra; si con eso pasa a un vecino, rebota como
-  `desde`, porque quedaría fuera de orden. En un clip con video, a 1x, `desde`,
-  `entrada` y `salida` van al cuadro MÁS CERCANO —de `salida`, el fin en la secuencia— y el resumen
-  dice qué movió. Un audio solo queda exacto, para la sincro fina, y a otra velocidad también. A otra
-  velocidad `entrada` y `salida` siguen siendo de FUENTE —la API las toma en tiempo de clip y el verbo
-  convierte—, `clips` y `radiografia` también informan en fuente, e invertido rebota. Un largo cero rebota.
+- **`editar salida` es un punto de FUENTE, no una duración.** Un PNG o un Transparent Video entran con in-point ~3600:
+  leé la `entrada` real y sumale la duración. Y **`editar entrada` además MUEVE el clip**: la entrada en una llamada y
+  `desde` en otra; si con eso pasa a un vecino, rebota como `desde`, porque quedaría fuera de orden. En un clip con
+  video, a 1x, `desde`, `entrada` y `salida` van al cuadro MÁS CERCANO —de `salida`, el fin en la secuencia— y el
+  resumen dice qué movió. Un audio solo queda exacto, para la sincro fina, y a otra velocidad también. A otra
+  velocidad `entrada` y `salida` siguen siendo de FUENTE —la API las toma en tiempo de clip y el verbo convierte—,
+  `clips` y `radiografia` también informan en fuente, e invertido rebota. Un largo cero rebota.
 - **`borrar`, `editar` y `desactivar` arrastran el audio vinculado**, que se deduce por medio, rango e
   in-point: TODOS los streams de un multicanal, y apuntados a un stream de audio, también el video y
   los otros streams. Si dos planos del mismo medio están en el mismo instante y el in-point no
   desempata, no tocan nada y lo dicen; `vinculados: false` toca sólo el clip nombrado. El `apagado`
   de `editar` es SÓLO el clip, a propósito: el plano entero se apaga con `desactivar`.
-- **`pistaAudio` es 1-based (A1 es 1)**: 0 rebota, y una que no existe se crea, pero UNA y al final:
-  pidiendo A9 con seis, el audio cae en A7 (`pistaAudioReal` dice dónde quedó). Un multicanal pone un
-  stream por pista desde ahí y crea las que falten, y `insertar` dice dónde cayeron los otros
-  (`otrasPistasAudio`). El overwrite PISA también en audio, así que dos cosas en la misma pista y
-  posición se comen.
+- **`pistaAudio` es 1-based (A1 es 1)**: 0 rebota, y una que no existe se crea, pero UNA y al final: pidiendo A9 con
+  seis, el audio cae en A7 (`pistaAudioReal` dice dónde quedó). Un multicanal pone un stream por pista desde ahí y
+  crea las que falten, y `insertar` dice dónde cayeron los otros (`otrasPistasAudio`). El overwrite PISA también en
+  audio, así que dos cosas en la misma pista y posición se comen. Para poner SÓLO el video, `insertar` con
+  `sinAudio: true`: el audio va a una pista propia y se saca (2 Cmd+Z); cuenta en el tope de `borrar`.
 - **Un medio sin video no pone nada en V**: su clip se busca en la pista de audio.
+- **Un medio se pide por su nombre EXACTO, con la extensión**: el exacto gana; sin exacto vale un parcial si
+  engancha UN solo medio, y si engancha más rebota nombrándolos, antes de escribir (hasta el 2026-11-16 iba el
+  primero del panel: pedir «X» ponía «X v2»). Dos con el MISMO nombre: va el primero. `bins` con un parcial mueve
+  TODOS y los nombra (`porParcial`), y `bin: "/"` es la raíz, para devolver lo que se movió de más.
 - **`importar` rebota un archivo que se está escribiendo** —cambió hace menos de 5 s, o un proceso lo
   tiene abierto para escribir— y un .mov, .mp4 o .wav ROTO que ffprobe no abre: los dos sacaban el modal
   «File Import Failure», que traba el panel hasta que alguien aprieta OK. Otros formatos no se miran.
@@ -105,25 +105,24 @@ en `CLAUDE.md`.
   Premiere. Y deja la selección VACÍA (`seleccionVaciada`): hasta el 2026-09-24 dejaba adentro el
   clip borrado, y la edición siguiente en ese lugar tiraba Premiere. **Con el candado en una pista
   del plano**, saca lo de las otras y deja ése: lo dice, nombra la pista y cuántos Cmd+Z lo reponen.
-- **`armarSecuencia` crea aunque el nombre exista**, no reemplaza. `fragmentos` son
-  `{desde, hasta, medio}` en segundos de FUENTE; `capas`, `{en, dura, pista, medio, desde,
-  pistaAudio}`. Pone los fps y el formato del reloj que les toca, y lo relee: si no entra, lo
-  dice. Los bordes van al cuadro más cercano y `dura` en cuadros enteros: Premiere BAJA al cuadro lo
-  que pega, y una `dura` con seis decimales apenas debajo del borde perdía un cuadro entero. Si el
-  largo releído en cuadros no es el pedido, lo dice (`largoDistinto`); `colocarLote`, igual. Y
-  Premiere corta el nombre después del último punto: `secuencia` trae el que quedó. Si se
-  corta a mitad, el error dice qué secuencia dejó y con cuántos fragmentos y capas. Los in/out de
-  los medios los devuelve a como estaban (`inOut` dice cuántos): hasta el 2026-09-24 los limpiaba, y
-  un PNG limpiado entra con DOCE HORAS. Un still que ya quedó así NO se arregla
-  reimportándolo —`importar` saltea lo que ya está—: se cura con `in_out_medio` `entrada: 0,
-  salida: 5`. Y no se lo reconoce leyéndolo: se lee "sin marca", igual que un video sano; lo delata
-  insertarlo en una secuencia descartable. Si dos fragmentos SEGUIDOS del mismo medio se pisan en la
-  fuente, avisa (`pisados`): ese tramo va a salir dos veces. No lo rebota, por si es a propósito.
-  Una capa que sólo aporta imagen —una ISO de un multicámara— va con `sinAudio: true`: su audio se pega en
-  pistas propias, después de todo lo demás, y sale al final en UNA transacción (medido con 17 capas de 6
-  streams, tres veces seguidas). Esas pistas quedan vacías, y con `pistaAudio` rebota. En una tanda son ocho
-  transacciones de menos por reel que apagar ese audio con `desactivar`. `aplicarEscalas` agrupa solo de a 10
-  clips, y un Cmd+Z deshace el lote entero: el resumen dice cuántos hacen falta.
+- **`armarSecuencia` crea aunque el nombre exista**, no reemplaza. `fragmentos` son `{desde, hasta, medio}` en
+  segundos de FUENTE; `capas`, `{en, dura, pista, medio, desde, pistaAudio}`. Pone los fps y el formato del reloj que
+  les toca, y lo relee: si no entra, lo dice. Los bordes van al cuadro más cercano y `dura` en cuadros enteros:
+  Premiere BAJA al cuadro lo que pega, y una `dura` con seis decimales apenas debajo del borde perdía un cuadro
+  entero. Si el largo releído en cuadros no es el pedido, lo dice (`largoDistinto`); `colocarLote`, igual. Y Premiere
+  corta el nombre después del último punto: `secuencia` trae el que quedó. Si se corta a mitad, el error dice qué
+  secuencia dejó y con cuántos fragmentos y capas. Los in/out de los medios los devuelve a como estaban (`inOut` dice
+  cuántos): hasta el 2026-09-24 los limpiaba, y un PNG limpiado entra con DOCE HORAS. Un still que ya quedó así NO se
+  arregla reimportándolo —`importar` saltea lo que ya está—: se cura con `in_out_medio` `entrada: 0, salida: 5`. Y no
+  se lo reconoce leyéndolo: se lee "sin marca", igual que un video sano; lo delata insertarlo en una secuencia
+  descartable. Si dos fragmentos SEGUIDOS del mismo medio se pisan en la fuente, avisa (`pisados`): ese tramo va a
+  salir dos veces. No lo rebota, por si es a propósito. Una capa que sólo aporta imagen —una ISO de un multicámara— va
+  con `sinAudio: true`: su audio se pega en pistas propias, después de todo lo demás, y sale al final en UNA
+  transacción (medido con 17 capas de 6 streams, tres veces seguidas). Esas pistas quedan vacías, y con `pistaAudio`
+  rebota. En una tanda son ocho transacciones de menos por reel que apagar ese audio con `desactivar`.
+  `aplicarEscalas` agrupa solo de a 10 clips, y un Cmd+Z deshace el lote entero: el resumen dice cuántos hacen falta.
+  Cada entrada de su plan es de UN clip, el más cercano a menos de 1 s: el vecino queda sin plan, y dice las que no
+  usó nadie (`planSinUsar`).
 - **La cola de `cortar` es un CLON**: trae efectos, nombre, apagado y el mismo audio en las mismas
   pistas, y no pisa nada. Con audio vinculado queda SIN VÍNCULO en Premiere —la API no crea
   vínculos—: el bridge la sigue emparejando, y a mano es Cmd+L. A otra velocidad que 1x rebota. Cada
@@ -187,6 +186,7 @@ en `CLAUDE.md`.
 - Cerrar un proyecto DESCARTANDO sus cambios, tampoco por el transporte directo: lo decide el
   editor, a mano. La única excepción es `recargar.js --reiniciar`, abajo.
 - Formatos de intercambio (AAF, FCPXML, OTIO): a mano, porque pierden cosas en silencio.
+- Optical Flow y «Scale to Frame Size» por clip, y rehacer las capas de ajuste tras `resolucion`: a mano.
 
 ## Premiere y la máquina
 
