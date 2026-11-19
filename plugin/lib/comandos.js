@@ -2981,7 +2981,7 @@ async function inicioDelSumidero(seq) {
 
 async function sacarAudioDelSumidero(project, nueva, editor, sinAudioV, sumidero) {
   const audioSacado = { capas: sinAudioV.length, pedidos: 0, quedan: 0, pistas: null, fuera: 0, dudosas: [], sinSocio: [],
-                  videoRoto: [], seleccionVaciada: null, error: null };
+                  rescatados: [], sinEncontrar: [], videoRoto: [], seleccionVaciada: null, error: null };
   try {
     const res = await sociosDe(nueva, sinAudioV.map((a) => a.item), true);
     const vistos = new Set(), items = [], claves = [];
@@ -2996,21 +2996,64 @@ async function sacarAudioDelSumidero(project, nueva, editor, sinAudioV, sumidero
         if (vistos.has(k)) continue;
         vistos.add(k); items.push(so.clip); claves.push({ idx: idx, medio: a.medio }); n++;
       }
-      if (!n) audioSacado.sinSocio.push(a.capa);
+      a.sacados = n;
       if (a.puesta) a.puesta.audioSacado = n;
     });
+    for (let z = 0; z < items.length; z++) {
+      claves[z].ini = String((await items[z].getStartTime()).ticks);
+      claves[z].fin = String((await items[z].getEndTime()).ticks);
+    }
+    /*
+     * EL AUDIO DE UNA CAPA RECORTADA, Y «NO TIENE AUDIO» CONTRA «NO LO ENCONTRÉ» (2026-11-19, un reporte de uso del
+     * 17/11). `sociosDe` empareja por el MISMO rango: una capa que su vecina recortó un cuadro —43 de video, 42
+     * después— ya no coincide con su audio, que sigue de 43, y quedaba en `sinSocio` junto con los drones, que de
+     * verdad no tienen audio. El audio crudo salió en dos exports. Para las que quedaron sin socio se miran las
+     * pistas del sumidero: un clip del MISMO medio que arranca y termina donde la capa se PUSO —`en` y `hasta` son de
+     * ese momento, antes del recorte— es el suyo, y sale con los demás, en la misma transacción. Y si en su tramo
+     * hay audio de ese medio que tampoco así se puede atribuir, no es «sin audio»: va a `sinEncontrar`, y se dice.
+     */
+    const huerfanas = sinAudioV.filter((a, j) => !res[j].motivo && !a.sacados);
+    if (huerfanas.length) {
+      const enSumidero = [];
+      const nA = await nueva.getAudioTrackCount();
+      for (let t = sumidero.inicio; t < nA; t++) {
+        const tr = await nueva.getAudioTrack(t);
+        const its = tr ? await tr.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
+        for (const it of its) {
+          if (!it) continue;
+          const ki = (await it.getStartTime()).ticks, kf = (await it.getEndTime()).ticks;
+          enSumidero.push({ idx: t, item: it, iniK: String(ki), finK: String(kf), ini: Number(ki) / TICKS_POR_SEGUNDO, fin: Number(kf) / TICKS_POR_SEGUNDO, medio: undefined });
+        }
+      }
+      const medioDe = async (x) => {
+        if (x.medio === undefined) { try { x.medio = String((await x.item.getProjectItem()).name); } catch (e) { x.medio = null; } }
+        return x.medio;
+      };
+      for (const a of huerfanas) {
+        let n = 0;
+        const sueltos = [];
+        for (const x of enSumidero) {
+          if (x.fin <= a.en + 0.001 || x.ini >= a.hasta - 0.001) continue;          // no toca el tramo de la capa
+          if (claves.some((c) => c.idx === x.idx && c.ini === x.iniK && c.fin === x.finK)) continue;   // ya sale por otra
+          const m = await medioDe(x);
+          if (m === null || !igualN(m, a.medio)) continue;
+          if (Math.abs(x.ini - a.en) < 0.15 && Math.abs(x.fin - a.hasta) < 0.15) {
+            items.push(x.item); claves.push({ idx: x.idx, medio: a.medio, ini: x.iniK, fin: x.finK }); n++;
+          } else sueltos.push(`A${x.idx + 1} ${x.ini.toFixed(2)}–${x.fin.toFixed(2)}s`);
+        }
+        if (n) { audioSacado.rescatados.push(a.capa); a.sacados = n; if (a.puesta) a.puesta.audioSacado = n; }
+        else if (sueltos.length) audioSacado.sinEncontrar.push(`capa ${a.capa} (${a.medio}): ${sueltos.join(", ")}`);
+        else audioSacado.sinSocio.push(a.capa);
+      }
+    }
     audioSacado.pedidos = items.length;
     if (items.length) {
       const sel = await nueva.getSelection();
       const previos = await sel.getTrackItems();
       for (let z = 0; z < previos.length; z++) sel.removeItem(previos[z]);
       for (const it of items) { try { sel.addItem(it, false); } catch (e) { try { sel.addItem(it); } catch (e2) { /* se cuenta abajo */ } } }
-      /* La clave de cada uno ANTES de sacarlo —pista, inicio, fin y medio—: después el objeto ya no sirve, y por
-         medio solo se contaría como "quedó" el audio de una capa normal del mismo medio que cayó en esas pistas. */
-      for (let z = 0; z < items.length; z++) {
-        claves[z].ini = String((await items[z].getStartTime()).ticks);
-        claves[z].fin = String((await items[z].getEndTime()).ticks);
-      }
+      /* La clave de cada uno —pista, inicio, fin y medio— ya se leyó ARRIBA, antes de sacarlo: después el objeto no
+         sirve, y por medio solo se contaría como "quedó" el audio de una capa normal del mismo medio. */
       project.lockedAccess(() => {
         transaccion(project, (a) => {
           a.addAction(editor.createRemoveItemsAction(sel, false, ppro.Constants.MediaType.AUDIO));
@@ -3949,6 +3992,8 @@ async function armarSecuencia(params) {
           (audioSacado.quedan ? ` · OJO: QUEDAN ${audioSacado.quedan} clip(s) de esos medios en esas pistas, sonando: releé con clips` : "") +
           (audioSacado.videoRoto.length ? ` · OJO: el VIDEO no quedó entero en: ${audioSacado.videoRoto.join(", ")}` : "") +
           (audioSacado.dudosas.length ? ` · OJO: audio SIN SACAR porque no se puede atribuir sin adivinar: ${audioSacado.dudosas.join(" | ")}` : "") +
+          (audioSacado.rescatados.length ? ` · capa(s) ${audioSacado.rescatados.join(", ")}: su video quedó RECORTADO y el audio se emparejó por donde se puso` : "") +
+          (audioSacado.sinEncontrar.length ? ` · OJO: AUDIO SIN SACAR, SONANDO, que no se pudo atribuir: ${audioSacado.sinEncontrar.join(" | ")} — sacalo con borrar y vinculados: false` : "") +
           (audioSacado.sinSocio.length ? ` · sin audio que sacar: capa(s) ${audioSacado.sinSocio.join(", ")}` : "") +
           (audioSacado.fuera ? ` · ${audioSacado.fuera} socio(s) afuera de esas pistas, que NO se tocaron` : "") +
           (audioSacado.seleccionVaciada === false ? " · OJO: la selección NO quedó vacía: deseleccioná (Cmd+Shift+A) antes de editar ahí" : "") +
@@ -4868,6 +4913,8 @@ async function insertar(params) {
         (audioSacado.quedan ? ` · OJO: QUEDAN ${audioSacado.quedan} clip(s) del medio ahí, sonando: releé con clips` : "") +
         (audioSacado.videoRoto.length ? " · OJO: el VIDEO no quedó entero" : "") +
         (audioSacado.dudosas.length ? ` · OJO: audio SIN SACAR, no se puede atribuir sin adivinar: ${audioSacado.dudosas.join(" | ").replace(/capa 1: /g, "")}` : "") +
+        (audioSacado.rescatados.length ? " · el audio se emparejó por donde se puso: el video quedó con otro largo" : "") +
+        (audioSacado.sinEncontrar.length ? ` · OJO: AUDIO SIN SACAR, SONANDO: ${audioSacado.sinEncontrar.join(" | ").replace(/capa 1 /g, "")}` : "") +
         (audioSacado.sinSocio.length ? " · no había audio que sacar" : "") +
         (audioSacado.fuera ? ` · ${audioSacado.fuera} socio(s) en otras pistas, que NO se tocaron` : "") +
         (audioSacado.seleccionVaciada === false ? " · OJO: la selección NO quedó vacía: deseleccioná (Cmd+Shift+A) antes de editar ahí" : "") +

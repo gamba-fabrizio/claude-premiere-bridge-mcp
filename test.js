@@ -7278,6 +7278,14 @@ titulo("Capas `sinAudio`: el audio va a pistas propias, sale en una transacción
     malos.push("`insertar` no saca el audio con `sacarAudioDelSumidero` después de pegar, espaciado, y sólo si el VIDEO entró");
   if (iQuita === -1) malos.push("no se saca con UNA acción de AUDIO sobre la selección");
   else if (iVacia === -1 || iVacia < iQuita) malos.push("la selección no se vacía después de sacar");
+  /* El audio de una capa RECORTADA por su vecina (un reporte de uso del 17/11): `sociosDe` empareja por el mismo
+     rango y no lo reconoce, y la capa caía en `sinSocio` con las que de verdad no tienen audio. Las huérfanas se
+     buscan en las pistas del sumidero por donde se PUSIERON, salen en la misma transacción, y lo que hay en su
+     tramo y no se puede atribuir se dice aparte. */
+  const iHuerf = sacar.search(/const huerfanas = sinAudioV\.filter\(/), iBusca = sacar.search(/for \(let t = sumidero\.inicio; t < nA; t\+\+\)/);
+  if (iHuerf === -1 || iBusca === -1 || iQuita === -1 || !(iHuerf < iBusca && iBusca < iQuita) || !/if \(huerfanas\.length\) \{/.test(sacar)) malos.push("el audio de una capa recortada no se busca en el sumidero ANTES de sacar: queda sonando");
+  if (!/Math\.abs\(x\.ini - a\.en\) < 0\.15 && Math\.abs\(x\.fin - a\.hasta\) < 0\.15/.test(sacar) || !/igualN\(m, a\.medio\)/.test(sacar)) malos.push("el rescate no exige el mismo medio y el lugar donde la capa se puso");
+  if (!/else if \(sueltos\.length\) audioSacado\.sinEncontrar\.push\(/.test(sacar) || !/AUDIO SIN SACAR, SONANDO/.test(armar) || !/AUDIO SIN SACAR, SONANDO/.test(ins)) malos.push("no se distingue «no tiene audio» de «no encontré su audio», o no se dice en el resumen");
   if (!/audioSacado\.quedan\+\+/.test(sacar) || !/audioSacado\.videoRoto\.push\(/.test(sacar)) malos.push("no se relee qué quedó en el sumidero ni que el video siga entero");
   if (!/c\.apagado\s*===\s*true\s*&&\s*!lugar\.audio\s*&&\s*!bloque\)/.test(armar)) malos.push("una capa `sinAudio` y `apagado` también apaga el audio que ya sale");
   if (malos.length) mal("las capas `sinAudio` de `armarSecuencia` no se portan como deben", malos.join("\n         "));

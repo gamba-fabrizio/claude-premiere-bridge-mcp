@@ -30,7 +30,8 @@
   secuencia en 0x0»
 - **Time Interpolation y Scale to Frame Size por clip no se leen ni se fijan por API**; el uso de un medio tampoco,
   pero el uso se arma con `getProjectItem` y `getId`. → «`resolucion` dejaba», «Medios sin uso»
-- **`insertar` con `sinAudio` saca el audio con la misma función que las capas.** → «`insertar` con `sinAudio`»
+- **`insertar` con `sinAudio` saca el audio con la misma función que las capas**, que también empareja el de una
+  capa recortada por su vecina (2026-11-19). → «`insertar` con `sinAudio`», «El audio de una capa `sinAudio` recortada»
 
 # Firmas de la API, medidas y no deducidas
 
@@ -451,3 +452,20 @@ coinciden —medido, 36 de 36—. `usoDeMedios` sólo lee y contesta por tandas;
 resta, y rebota si no puede comparar los ids: un falso «sin uso» termina en un medio borrado. No ve lo que sólo
 es fuente de un subclip, de un multicámara o de un clip fusionado, y lo avisa siempre. No se midió en un proyecto
 pesado, y el verbo que SACA medios no se construyó: es destructivo y falta medir qué hace con uno en uso.
+
+## El audio de una capa `sinAudio` recortada quedaba sonando (2026-11-19)
+
+Lo reportó una sesión de uso: capas seguidas con `sinAudio`, una con el arranque fuera de la grilla. Entró con un
+cuadro de más, la siguiente la recortó, y su audio —en OTRA pista de las propias— siguió entero. El emparejador
+compara el mismo rango: 42 cuadros de video contra 43 de audio no coinciden, y la capa se contó como «sin audio
+que sacar», igual que las que de verdad no lo traen. El audio crudo salió en el export.
+
+Reproducirlo pidió el caso justo: con tiempos pedidos que no se solapan, los dos audios comparten pista, el
+overwrite los recorta igual que al video y siguen coincidiendo. Hace falta que los tiempos PEDIDOS se pisen —2,70 +
+1,02 contra 3,70—: ahí cada audio va a su pista y el de la primera queda sin tocar.
+
+El arreglo, para las capas y para `insertar`: lo que queda sin socio se busca en las pistas propias, por el MISMO
+medio y por el arranque y el fin donde la capa se PUSO, antes del recorte; sale con los demás, en la misma
+transacción. Lo que hay en su tramo y no se puede atribuir se dice —«AUDIO SIN SACAR, SONANDO»— en vez de contarlo
+como sin audio. Medido antes y después: de 7 clips sacados con uno sonando, a 8 y las pistas vacías; sin recorte
+no cambia nada. El aviso de lo no atribuido no se pudo provocar en vivo: lo cubre sólo `test.js`.
