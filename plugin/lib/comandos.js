@@ -13286,9 +13286,8 @@ async function proxy(params) {
  * Sirve para partir una toma larga en selects nombrados sin cortar nada en el
  * timeline: el subclip apunta al mismo archivo con otro in/out.
  *
- * `createSubClipAction` declara aridad 0 y miente. El antecedente de ExtendScript
- * es `createSubClip(nombre, inicio, fin, límitesDuros, tomarVideo, tomarAudio)`, así
- * que se enumeran esas formas y sus recortes.
+ * `createSubClipAction` declara aridad 0 y miente: es `(nombre, inicio, fin, límitesDuros, { takeVideo,
+ * takeAudio })`, con el último opcional. No es la de ExtendScript, con seis sueltos.
  *
  * La prueba NO es que la transacción devuelva true: es que aparezca un ProjectItem
  * NUEVO con el nombre pedido. Se cuenta antes y después.
@@ -13362,23 +13361,28 @@ async function subclip(params) {
   }
 
   const dur = params.duros === undefined ? true : !!params.duros;
-  /* La de CUATRO argumentos va primera: es la que entra, medido el 2026-08-19, y la de seis —la firma de
-     ExtendScript— contesta «Illegal Parameter type» y le sumaba 1,2 s de espera a cada subclip. */
-  const formas = [
-    ["(nombre, desde, hasta, duros)",
-      () => clipItem.createSubClipAction(params.nombre, tDesde, tHasta, dur)],
-    ["(nombre, desde, hasta, duros, video, audio)",
-      () => clipItem.createSubClipAction(params.nombre, tDesde, tHasta, dur, true, true)],
-    ["(nombre, desde, hasta)",
-      () => clipItem.createSubClipAction(params.nombre, tDesde, tHasta)],
-    ["(nombre, desde, hasta, duros, video, audio) con segundos",
-      () => clipItem.createSubClipAction(params.nombre, desdeQ, hastaQ, dur, true, true)],
-    ["(nombre, desde, hasta) con segundos",
-      () => clipItem.createSubClipAction(params.nombre, desdeQ, hastaQ)]
-  ];
+  /*
+   * EL QUINTO ARGUMENTO ES UN OBJETO, `{ takeVideo, takeAudio }`, Y POR DEFECTO PIDE LOS DOS (2026-11-19). Con un
+   * medio al que le falta uno de los dos, la forma de cuatro argumentos committea y no crea nada: medido en un 2×2
+   * —el mismo material con y sin audio, de un archivo real y de uno generado—, entra con audio y no entra sin él;
+   * y con un WAV, el 2026-10-18. La firma de seis argumentos de ExtendScript (..., video, audio) no existe acá:
+   * contesta «Illegal Parameter type», y por eso se creyó que no había cómo. Sale de la documentación de Adobe.
+   *
+   * Sin `tomar` se prueba primero con los dos y, si no aparece nada, sólo video y después sólo audio: cada una que
+   * committea sin crear nada es una transacción más, y el resumen cuenta los Cmd+Z. Con `tomar` va ésa sola.
+   */
+  const TOMAS = {
+    ambos: ["video y audio", () => clipItem.createSubClipAction(params.nombre, tDesde, tHasta, dur)],
+    video: ["sólo video", () => clipItem.createSubClipAction(params.nombre, tDesde, tHasta, dur, { takeVideo: true, takeAudio: false })],
+    audio: ["sólo audio", () => clipItem.createSubClipAction(params.nombre, tDesde, tHasta, dur, { takeVideo: false, takeAudio: true })]
+  };
+  if (params.tomar !== undefined && !TOMAS[params.tomar]) {
+    throw new Error(`\`tomar\` es "ambos", "video" o "audio", no "${params.tomar}". NO se creó nada.`);
+  }
+  const formas = params.tomar ? [TOMAS[params.tomar]] : [TOMAS.ambos, TOMAS.video, TOMAS.audio];
 
   const intentos = [];
-  let via = null, despues = null;
+  let via = null, despues = null, corridas = 0;
   const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
   let primera = true;
   for (const [etiqueta, hacer] of formas) {
@@ -13391,6 +13395,7 @@ async function subclip(params) {
       });
     } catch (e) { error = e && e.message ? e.message : String(e); }
     if (error) { intentos.push(etiqueta + ": " + error); continue; }
+    corridas++;   // se entró en la transacción: es un Cmd+Z, cree algo o no
     if (!ok) { intentos.push(etiqueta + ": executeTransaction devolvió false"); continue; }
     const ahora = await nombres();
     if (hayUno(ahora)) { via = etiqueta; despues = ahora; break; }
@@ -13400,7 +13405,8 @@ async function subclip(params) {
   if (!via) {
     throw new Error(
       `No se pudo crear el subclip "${params.nombre}" de "${String(encontrado.name)}". ` +
-      `El proyecto tenía ${antes.length} item(s). Intentos: ${intentos.join(" | ")}.`
+      `El proyecto tenía ${antes.length} item(s). Intentos: ${intentos.join(" | ")}.` +
+      (corridas ? ` Corrieron ${corridas} transacción(es) que no crearon nada: son ${corridas} Cmd+Z.` : "")
     );
   }
 
@@ -13408,11 +13414,12 @@ async function subclip(params) {
     resumen:
       `Subclip "${params.nombre}" de "${String(encontrado.name)}" · ${desdeQ.toFixed(2)}–${hastaQ.toFixed(2)}s ` +
       `(${(hastaQ - desdeQ).toFixed(2)}s)` + (alCuadro ? ` · ${alCuadro}` : "") +
-      ` · vía ${via} · el panel pasó de ${antes.length} a ${despues.length} item(s)` +
+      ` · tomó ${via} · el panel pasó de ${antes.length} a ${despues.length} item(s)` +
       (dur ? " · con límites duros" : " · sin límites duros: se puede extender más allá del rango") +
-      (intentos.length ? ` · descartadas: ${intentos.length} forma(s)` : "") +
+      (intentos.length ? ` · antes se probó sin que apareciera nada: ${intentos.map((t) => t.split(":")[0]).join(", ")}` : "") +
       (saltados ? ` · OJO: ${saltados} item(s) del panel no se pudieron leer y se saltearon` : "") +
-      " · un Cmd+Z lo saca",
+      (corridas === 1 ? " · un Cmd+Z lo saca" : ` · corrieron ${corridas} transacciones: se deshace con ${corridas} Cmd+Z`),
+    tomo: via, transacciones: corridas,
     subclip: params.nombre, medio: String(encontrado.name),
     desde: desdeQ, hasta: hastaQ, dura: Number((hastaQ - desdeQ).toFixed(3)),
     desdePedido: desde, hastaPedido: hasta, fpsMedio: isFinite(fpsMedio) ? fpsMedio : null,
@@ -15188,7 +15195,7 @@ const PARAMS_DE = {
   interpretar: ["fps", "medio"],
   inOutMedio: ["entrada", "medio", "salida"],
   proxy: ["archivo", "medio"],
-  subclip: ["desde", "duros", "hasta", "medio", "nombre"],
+  subclip: ["desde", "duros", "hasta", "medio", "nombre", "tomar"],
   renombrarPista: ["nuevo", "pista"],
   renombrar: ["indice", "nombre", "nuevo", "pista"],
   revisar: ["pista", "topeFrames"],

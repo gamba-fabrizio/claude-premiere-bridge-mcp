@@ -137,8 +137,8 @@ en `CLAUDE.md`.
 - **`marcar` cuantiza al cuadro.** Con `clip`, el marcador va al MEDIO: `segundos` es tiempo de
   fuente y aparece en toda instancia de ese material. Con comentario y color son tres transacciones,
   y el resumen dice cuántos Cmd+Z: como todo verbo que escribe en varias, cuenta las que corrieron.
-- **`subclip` de un medio SIN VIDEO o SIN AUDIO no entra**: con un WAV, y con un .mov sólo de video, committea
-  y no aparece nada (medido el 2026-10-18 y el 2026-11-19), y el verbo lo dice como fallo. Con los dos, entra.
+- **`subclip` de un medio SIN AUDIO o SIN VIDEO va con `tomar`** (`video` o `audio`): sin pasarlo entra igual,
+  pero prueba antes con los dos streams y cada intento es un Cmd+Z más —el resumen los cuenta—. `tomo` dice qué llevó.
 - **`transicion` es solo video** —el crossfade de audio va a mano— y no se relee: el conteo prueba que
   apareció. Con HUECO del otro lado ignora la alineación; si el handle no da, queda lo posible de cada lado.
 - **Con dos efectos del mismo nombre** —dos Lumetri—, pasá `indiceEfecto`: 0 el primero, y `efectos` los

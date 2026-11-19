@@ -459,7 +459,7 @@ releyendo cada cambio con `clips`:
   rebota ese cruce.
 - **Medido de paso**: la POSICIÓN del overwrite va al cuadro más cercano (1,03 s quedó en 1,04 y 7,01
   en 7,00, a 25 fps); un multicanal con `pistaAudio` en una pista nueva crea las de todos sus streams;
-  el subclip de un medio sin video no entra —ni el de uno sin audio, medido el 2026-11-19—; y Premiere no normaliza los nombres que le pone la API.
+  el subclip de un medio sin video no entraba —arreglado el 2026-11-19, ver `firmas-y-limites.md`—; y Premiere no normaliza los nombres que le pone la API.
 
 **A la tarde, los bordes y lo sin medir**, con medios fabricados con ffmpeg —un clip de tres escenas, y dos con
 el audio más largo y más corto que el video— que se borraron al terminar:

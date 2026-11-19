@@ -161,7 +161,7 @@ ln -s "/RUTA/A/TU/COPIA/premiere-bridge/skills/premiere" ~/.claude/skills/premie
 | `premiere_relink` | Repunta un medio a otro archivo; el archivo tiene que existir y NO hay Cmd+Z |
 | `premiere_transicion` | Pone un fundido en un corte. Default Cross Dissolve moderno; el AUDIO no lo toca |
 | `premiere_clonar` | Duplica un clip con sus efectos; el clon es INDEPENDIENTE del original y nace SIN su audio vinculado. A la pista siguiente a la última, la crea |
-| `premiere_subclip` | Un pedazo con nombre de un medio, en el panel; verifica que el item aparezca. De un medio sin video no entra |
+| `premiere_subclip` | Un pedazo con nombre de un medio, en el panel; verifica que el item aparezca. De un medio sin audio o sin video toma sólo lo que tiene (`tomar`) |
 | `premiere_desactivar` | Apaga o prende el ojito DE UN CLIP, o de una pista entera, con TODOS los streams del audio vinculado y en lotes de 10 acciones; existe para dejar los suplentes a la vista sin que tapen el corte |
 | `premiere_renombrar_pista` | Le pone nombre a una pista de video o audio; relee para confirmar |
 | `premiere_exportar` | Renderiza la secuencia con un preset `.epr`. `modo` es obligatorio: `ya` bloquea y comprueba que el archivo aparezca; `ame` lo encola en Media Encoder, sin confirmar, arranca la cola sólo si estaba parada —o si Media Encoder estaba cerrado—, y con un `.mov` no admite rango |

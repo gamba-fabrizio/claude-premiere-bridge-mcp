@@ -7953,6 +7953,31 @@ titulo("`premiere_sin_uso`: une las tandas, y no concluye nada si no puede compa
   }
 }
 
+/*
+ * `subclip` DE UN MEDIO SIN AUDIO O SIN VIDEO (2026-11-19). El quinto argumento de `createSubClipAction` es un objeto
+ * `{ takeVideo, takeAudio }` que por defecto pide los dos, y con un medio al que le falta uno la forma de cuatro
+ * committea y no crea nada. Medido en un 2×2 y con un WAV, y de afuera: puesto en un timeline, «sólo video» ocupa
+ * sólo V y «sólo audio» sólo A. La firma de seis argumentos sueltos no existe: no vuelve.
+ */
+titulo("`subclip` toma sólo el stream que el medio tiene, y cuenta los Cmd+Z de lo que probó");
+{
+  const sub = (cuerpoDeFuncion(srcComandos, "async function subclip(") || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const iAmbos = sub.indexOf("TOMAS.ambos, TOMAS.video, TOMAS.audio");
+  if (!sub) {
+    mal("no se encontró `subclip` para revisarlo");
+  } else if (!/takeVideo:\s*true,\s*takeAudio:\s*false/.test(sub) || !/takeVideo:\s*false,\s*takeAudio:\s*true/.test(sub)) {
+    mal("`subclip` no tiene las formas que toman un solo stream", "un medio sin audio —un dron— o sin video —un WAV— committea y no crea nada");
+  } else if (/dur,\s*true,\s*true\)/.test(sub)) {
+    mal("`subclip` volvió a probar la firma de seis argumentos sueltos", "no existe en esta API: contesta «Illegal Parameter type» y suma 1,2 s de espera");
+  } else if (iAmbos === -1 || !/params\.tomar\s*\?\s*\[TOMAS\[params\.tomar\]\]/.test(sub)) {
+    mal("`subclip` no prueba primero con los dos streams, o con `tomar` prueba más de una forma", "con `tomar` va ésa sola: cada forma de más es una transacción");
+  } else if (!/corridas\+\+/.test(sub) || sub.indexOf("corridas++") > sub.indexOf("const ahora = await nombres()") || !/se deshace con \$\{corridas\} Cmd\+Z/.test(sub)) {
+    mal("`subclip` no cuenta las transacciones que corrieron sin crear nada", "cada una es un Cmd+Z: con un WAV son tres, y decía «un Cmd+Z lo saca»");
+  } else {
+    ok("`subclip` prueba los dos streams y después el que haya, con `tomar` va una sola forma, y cuenta cada transacción");
+  }
+}
+
 /* ---------- y las TRANSACCIONES de un lote tambien se espacian ---------- */
 
 /*

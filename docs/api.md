@@ -499,7 +499,9 @@ el bridge: cada una es una medición contra Premiere, no una deducción del nomb
 - `createSetOverrideFrameRateAction(fps)` reinterpreta: la duración del clip ya puesto NO cambia,
   el contenido sí.
 - `getFrameRate()` del medio devuelve un número; `Sequence.getVideoFrameRate()`, un `{value}`.
-- `createSubClipAction(nombre, inTick, outTick, limitesDuros)`: cuatro argumentos, no seis.
+- `createSubClipAction(nombre, inTick, outTick, limitesDuros, { takeVideo, takeAudio })`: el quinto es un OBJETO
+  opcional que por defecto pide los dos. Con un medio sin audio o sin video, sin él committea y no crea nada.
+  La forma de ExtendScript, con seis sueltos, contesta «Illegal Parameter type» (medido el 2026-11-19).
 - `Constants.ProjectItemColorLabel` no tiene el índice 2: son 15 colores en 16 lugares.
 - `canChangeMediaPath()` + `changeMediaFilePath(ruta)` relinkean, sin pasar por
   `executeTransaction`: no hay Cmd+Z.

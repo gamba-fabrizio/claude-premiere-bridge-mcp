@@ -490,3 +490,22 @@ medio y por el arranque y el fin donde la capa se PUSO, antes del recorte; sale 
 transacción. Lo que hay en su tramo y no se puede atribuir se dice —«AUDIO SIN SACAR, SONANDO»— en vez de contarlo
 como sin audio. Medido antes y después: de 7 clips sacados con uno sonando, a 8 y las pistas vacías; sin recorte
 no cambia nada. El aviso de lo no atribuido no se pudo provocar en vivo: lo cubre sólo `test.js`.
+
+## El subclip de un medio sin audio, o sin video (2026-11-19)
+
+Estaba escrito que `createSubClipAction` toma cuatro argumentos y que el subclip de un WAV no entra. Las dos cosas
+eran la misma: se había probado la firma de ExtendScript, con `takeVideo` y `takeAudio` como argumentos SUELTOS,
+dio «Illegal Parameter type», y se concluyó que no había cómo elegir streams.
+
+Un 2×2 con el mismo material —con y sin audio, de un archivo real y de uno generado— separó la causa: con audio
+entra, sin audio no. Y la documentación de Adobe da la firma: el quinto argumento es un OBJETO,
+`{ takeVideo?, takeAudio? }`, con los dos en `true` por defecto. Pedir los dos a un medio al que le falta uno
+committea y no crea nada, sin error.
+
+`subclip` acepta `tomar` (`ambos`, `video`, `audio`). Sin él prueba con los dos y después con el que haya, y cuenta
+los Cmd+Z de cada intento; con `tomar` va esa forma sola. Medido en cinco casos y de afuera: puestos en una
+secuencia, los de sólo video ocupan la pista de video y nada en audio, y los de sólo audio al revés.
+
+Una firma que da «Illegal Parameter type» no prueba que la capacidad no exista: antes de escribir «no se puede»,
+la documentación.
+

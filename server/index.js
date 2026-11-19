@@ -1768,7 +1768,8 @@ server.registerTool(
       "**La prueba no es que la transaccion devuelva true**: es que aparezca un ProjectItem NUEVO " +
       "con el nombre pedido. Se cuentan los items del panel antes y despues. Y rechaza el nombre " +
       "si ya existe, para no dejar dos items homonimos --los nombres no son unicos en Premiere y " +
-      "eso ya rompio dos verbos.",
+      "eso ya rompio dos verbos.\n\n" +
+      "Un medio SIN AUDIO o SIN VIDEO entra tomando sólo lo que tiene: `tomo` dice qué llevó.",
     inputSchema: soloEstas({
       secuencia: z.string().optional().describe("Guarda: si la secuencia activa no es ésta, no se ejecuta nada."),
       proyecto: z
@@ -1783,7 +1784,8 @@ server.registerTool(
       nombre: z.string().describe("Como se va a llamar el subclip."),
       desde: z.number().min(0).describe("Segundo de FUENTE donde empieza."),
       hasta: z.number().min(0).describe("Segundo de FUENTE donde termina."),
-      duros: z.boolean().optional().describe("Limites duros: true (por defecto) no deja extenderlo mas alla del rango.")
+      duros: z.boolean().optional().describe("Limites duros: true (por defecto) no deja extenderlo mas alla del rango."),
+      tomar: z.enum(["ambos", "video", "audio"]).optional().describe("Qué streams lleva el subclip. Sin pasarlo prueba con los dos y, si el medio no tiene alguno, con el que tenga: cada intento que no crea nada es un Cmd+Z más, y el resumen los cuenta. Para un medio sin audio pasá `video`, y para un WAV `audio`: va derecho.")
     })
   },
   async (args) => {
