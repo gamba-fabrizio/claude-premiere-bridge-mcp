@@ -134,7 +134,7 @@ ln -s "/RUTA/A/TU/COPIA/premiere-bridge/skills/premiere" ~/.claude/skills/premie
 | `premiere_curva_keyframe` | Cambia la curva: lineal, bezier, hold o tiempo |
 | `premiere_editar` | Mueve, recorta o apaga un clip. Mover un clip por encima de otro rebota: quedaría fuera de orden y no se dibujaría |
 | `premiere_medios` | Qué hay en el panel de proyecto, bin por bin |
-| `premiere_sin_uso` | Lista los medios que no aparecen en ninguna secuencia, leyendo Premiere por tandas. Sólo lee; no ve lo que es fuente de un subclip o de un multicámara |
+| `premiere_sin_uso` | Lista los medios que no aparecen en ninguna secuencia, leyendo Premiere por tandas. Sólo lee; aparta lo que comparte archivo con algo en uso (la fuente de un subclip), recorre la fuente de un multicámara y no ve lo que es fuente de un clip fusionado |
 | `premiere_insertar` | Pone un medio en una pista, en el segundo que se pida; con `sinAudio`, sólo su video |
 | `premiere_borrar` | Saca un clip y sus vinculados —todos los streams, también apuntado a un stream de audio—; con dos copias iguales en el mismo instante no toca nada y lo dice |
 | `premiere_cortar` | Parte un clip en dos, en un segundo dado. La cola es un clon: efectos, nombre y el mismo audio, pero sin vínculo en Premiere |

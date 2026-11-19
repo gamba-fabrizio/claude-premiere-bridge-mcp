@@ -4490,7 +4490,9 @@ async function moverABin(project, destino, items) {
     const q = restante.get(n) || 0;
     if (q > 0) { restante.set(n, q - 1); movidos.push(n); } else fallidos.push(n);
   }
-  return { movidos, fallidos, intentos, via: viaMover, transacciones };
+  // `movidos` es lo que QUEDÓ adentro; `yaAdentro`, cuántos de ésos no hubo que mover. Sin el segundo, `bins`
+  // decía «movidos 3 de 3» con dos que ya estaban (2026-11-19).
+  return { movidos, fallidos, intentos, via: viaMover, transacciones, yaAdentro: items.length - pendientes.length };
 }
 
 /**
@@ -5305,6 +5307,15 @@ const BORRAR_TOPE = 5;
  * en la MISMA ventana que `borrar`: `unirAudio` barre todas las pistas, y barrer borrando es lo que
  * tiró Premiere dos veces. Se cuenta lo que salió, no lo intentado.
  */
+/*
+ * Y LO QUE PREMIERE TIENE SELECCIONADO DESPUÉS, leído con un `getSelection()` NUEVO (2026-11-19). `quedo` relee el
+ * MISMO objeto que se acaba de escribir: confirma lo escrito, no lo que tiene Premiere —el modo de fallar n.º 2—, y
+ * el 2026-11-05 `borrar` dijo `seleccionVaciada: true` 0,8 s antes de que Premiere se cayera en Effect Controls. La
+ * lectura nueva va APARTE, en `SELECCION_TRAS_VACIAR`, y no cambia el veredicto: con Selection Follows Playhead
+ * Premiere vuelve a seleccionar el clip de abajo del playhead, así que «no vacía» ahí es lo normal, y hay
+ * colocadores que frenan con `seleccionVaciada === false`. Se lee después de la espera, que es cuando SFP ya actuó.
+ */
+let SELECCION_TRAS_VACIAR = null;
 async function vaciarSeleccion(sequence, seleccion, items) {
   let quedo = false;
   try {
@@ -5315,6 +5326,14 @@ async function vaciarSeleccion(sequence, seleccion, items) {
     quedo = (await seleccion.getTrackItems()).length === 0;
   } catch (e) { quedo = false; }
   await esperarEntreTx();
+  SELECCION_TRAS_VACIAR = null;
+  try {
+    const fresca = await sequence.getSelection();
+    const its = (await fresca.getTrackItems()) || [];
+    const nombres = [];
+    for (let i = 0; i < its.length && i < 4; i++) { try { nombres.push(String(await its[i].getName())); } catch (e) { nombres.push("?"); } }
+    SELECCION_TRAS_VACIAR = { cuantos: its.length, nombres: nombres };
+  } catch (e) { SELECCION_TRAS_VACIAR = { cuantos: null, error: e && e.message ? e.message : String(e) }; }
   return quedo;
 }
 
@@ -5566,15 +5585,9 @@ async function borrar(params, ventana) {
    * Y TAMBIÉN CUANDO REBOTA (2026-10-20): con la pista bloqueada, lo de las pistas libres sale igual y quedaba
    * adentro de la selección, con el error ya en camino.
    */
-  let seleccionVaciada = false;
-  try {
-    for (const it of [encontrado.clip, ...vinculados]) {
-      try { seleccion.removeItem(it); } catch (e) { /* ya no estaba */ }
-    }
-    await sequence.setSelection(seleccion);
-    seleccionVaciada = (await seleccion.getTrackItems()).length === 0;
-  } catch (e) { seleccionVaciada = false; }
-  await esperarEntreTx();
+  // Por `vaciarSeleccion`, la misma de los demás verbos: acá estaba copiada a mano (2026-11-19).
+  const seleccionVaciada = await vaciarSeleccion(sequence, seleccion, [encontrado.clip, ...vinculados]);
+  const seleccionReal = SELECCION_TRAS_VACIAR;
 
   // El conteo de TODA la secuencia, no solo de la pista: si el clip tenía audio
   // vinculado y quedó suelto, acá se ve. Contar una parte del efecto confirma lo
@@ -5655,6 +5668,9 @@ async function borrar(params, ventana) {
         : "") +
       (audioSuelto ? " · OJO: no bajó ningún clip de audio, puede haber quedado suelto" : "") +
       (seleccionVaciada ? "" : " · OJO: la selección NO quedó vacía: antes de otra edición, deseleccioná en Premiere") +
+      (seleccionReal && seleccionReal.cuantos ? ` · Premiere tiene seleccionado ahora: ${seleccionReal.nombres.map((x) => `"${x}"`).join(", ")}` +
+        (seleccionReal.cuantos > seleccionReal.nombres.length ? ` y ${seleccionReal.cuantos - seleccionReal.nombres.length} más` : "") : "") +
+      (seleccionReal && seleccionReal.cuantos === null ? " · no se pudo leer qué quedó seleccionado en Premiere" : "") +
       ` · vía ${via} · se deshace con ${textoCmdZ(cmdZ)}${cmdZ > 1 ? ", uno por transacción —también las que tiraron o no sacaron nada—" : ""}`,
     clip: encontrado.nombre,
     pista: encontrado.pista,
@@ -5671,6 +5687,7 @@ async function borrar(params, ventana) {
     /* Los que salieron de verdad, no los que se buscaron: con un candado no son lo mismo. */
     vinculadosSacados: Math.max(0, salieron - 1),
     seleccionVaciada: seleccionVaciada,
+    seleccionReal: seleccionReal,
     via: via
   };
 }
@@ -12316,7 +12333,8 @@ async function bins(params) {
       (resultado
         ? (resultado.yaEstaban
             ? ` · ya estaban los ${resultado.yaEstaban}, no se movió ninguno`
-            : ` · movidos ${resultado.movidos.length} de ${buscados.length} pedidos, vía ${resultado.via || "ninguna"}`)
+            : ` · movidos ${Math.max(0, resultado.movidos.length - (resultado.yaAdentro || 0))} de ${buscados.length} pedidos` +
+              (resultado.yaAdentro ? ` (${resultado.yaAdentro} ya ${resultado.yaAdentro === 1 ? "estaba" : "estaban"})` : "") + `, vía ${resultado.via || "ninguna"}`)
         : "") +
       (resultado && resultado.fallidos.length ? ` · NO SE MOVIERON: ${resultado.fallidos.join(", ")}` : "") +
       (noEncontrados.length ? ` · sin coincidencia en el proyecto: ${noEncontrados.join(", ")}` : "") +
@@ -12326,6 +12344,7 @@ async function bins(params) {
     porParcial: porParcial,
     antes: antes, despues: despues,
     movidos: resultado ? resultado.movidos : [],
+    yaEstaban: resultado ? (resultado.yaEstaban || resultado.yaAdentro || 0) : 0,
     fallidos: resultado ? resultado.fallidos : [],
     noEncontrados: noEncontrados,
     via: resultado ? resultado.via : null,
@@ -12348,6 +12367,26 @@ async function bins(params) {
  * Son dos lecturas por clip (`getProjectItem` y `getId`), ningún valor de param. La unión y la resta las hace el
  * que llama —`premiere_sin_uso`—, que es además el que pone el control positivo: acá no se concluye nada.
  */
+/* Los ids de los medios que traen los clips de UNA secuencia, sumados en `enUso`: dos lecturas por clip. */
+async function clipsDeSecuencia(sq, enUso, idDe) {
+  let clips = 0, sinLeer = 0;
+  for (const [cuantas, pistaDe] of [[await sq.getVideoTrackCount(), (t) => sq.getVideoTrack(t)], [await sq.getAudioTrackCount(), (t) => sq.getAudioTrack(t)]]) {
+    for (let t = 0; t < cuantas; t++) {
+      const tr = await pistaDe(t);
+      const its = tr ? await tr.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
+      for (let k = 0; k < its.length; k++) {
+        if (!its[k]) { sinLeer++; continue; }
+        clips++;
+        let id = null;
+        try { const pi = await its[k].getProjectItem(); id = pi ? await idDe(pi) : null; } catch (e) { id = null; }
+        if (id === null) { sinLeer++; continue; }
+        enUso[id] = (enUso[id] || 0) + 1;
+      }
+    }
+  }
+  return { clips: clips, sinLeer: sinLeer };
+}
+
 async function usoDeMedios(params) {
   const project = await getProyecto();
   const idDe = async (pi) => { try { const v = await pi.getId(); return v === undefined || v === null ? null : String(v); } catch (e) { return null; } };
@@ -12367,7 +12406,16 @@ async function usoDeMedios(params) {
         if (sub !== null) { await recorrer(hijos[i], ruta ? ruta + "/" + nombre : nombre, prof + 1); continue; }
         let esSecuencia = null;
         try { const ci = ppro.ClipProjectItem.cast(hijos[i]); esSecuencia = ci ? !!(await ci.isSequence()) : null; } catch (e) { esSecuencia = null; }
-        hojas.push({ id: await idDe(hijos[i]), nombre: nombre, bin: ruta || "(raíz)", esSecuencia: esSecuencia });
+        // La RUTA del archivo (2026-11-19): un subclip y su fuente son dos ítems con el mismo archivo, y es lo único
+        // que los une. Medido: con el subclip en el timeline, la fuente figuraba sin uso. Una lectura más por hoja.
+        let archivo = null;
+        if (esSecuencia !== true) {
+          try { const ci = ppro.ClipProjectItem.cast(hijos[i]); const v = ci ? await ci.getMediaFilePath() : null; archivo = v ? String(v) : null; } catch (e) { archivo = null; }
+        }
+        // Multicámara y clip fusionado: lo que la herramienta tiene que poder nombrar cuando no los puede recorrer.
+        let esMulticam = null, esFusionado = null;
+        try { const ci = ppro.ClipProjectItem.cast(hijos[i]); if (ci) { esMulticam = !!(await ci.isMulticamClip()); esFusionado = !!(await ci.isMergedClip()); } } catch (e) { /* quedan en null: no se pudo leer */ }
+        hojas.push({ id: await idDe(hijos[i]), nombre: nombre, bin: ruta || "(raíz)", esSecuencia: esSecuencia, ruta: archivo, esMulticam: esMulticam, esFusionado: esFusionado });
       }
     };
     await recorrer(raiz, "", 0);
@@ -12376,6 +12424,42 @@ async function usoDeMedios(params) {
       resumen: `${hojas.length} hoja(s) en el panel · ${hojas.filter((h) => h.esSecuencia).length} son secuencias` +
         (sinId ? ` · OJO: ${sinId} sin id legible` : "") + (saltados ? ` · OJO: ${saltados} item(s) no se pudieron leer` : ""),
       hojas: hojas, sinId: sinId, saltados: saltados
+    };
+  }
+
+  /*
+   * UNA SECUENCIA DESDE SU ÍTEM DEL PANEL (2026-11-19, medido con el editor). La fuente de un multicámara creado en
+   * el panel —«Create Multi-Camera Source Sequence»— es una secuencia para `isSequence` y NO está en
+   * `getSequences()`: nadie la recorría, y sus dos cámaras figuraban sin uso. Se llega por
+   * `ClipProjectItem.getSequence()`. Si no da una secuencia, se dice: el que llama lo cuenta como no recorrido.
+   */
+  if (params.deItem !== undefined) {
+    const buscado = String(params.deItem);
+    const raiz = await project.getRootItem();
+    let hallado = null;
+    const buscar = async (item, prof) => {
+      if (hallado || prof > 8) return;
+      const hijos = await hijosDe(item);
+      if (!hijos) return;
+      for (let i = 0; i < hijos.length && !hallado; i++) {
+        if (!hijos[i]) continue;
+        const sub = await hijosDe(hijos[i]);
+        if (sub !== null) { await buscar(hijos[i], prof + 1); continue; }
+        if ((await idDe(hijos[i])) === buscado) hallado = hijos[i];
+      }
+    };
+    await buscar(raiz, 0);
+    if (!hallado) throw new Error(`No hay en el panel un ítem con id "${buscado}". No se leyó nada.`);
+    let sq = null, motivo = null;
+    try { const ci = ppro.ClipProjectItem.cast(hallado); sq = ci ? await ci.getSequence() : null; } catch (e) { motivo = String(e && e.message ? e.message : e); }
+    if (!sq) {
+      return { resumen: `"${String(hallado.name)}": no se pudo abrir como secuencia` + (motivo ? ` (${motivo})` : ""), recorrida: false, motivo: motivo, enUso: {}, clips: 0, sinLeer: 0 };
+    }
+    const enUso1 = {};
+    const c = await clipsDeSecuencia(sq, enUso1, idDe);
+    return {
+      resumen: `"${String(hallado.name)}", leída desde su ítem del panel: ${c.clips} clip(s), ${Object.keys(enUso1).length} medio(s) distintos` + (c.sinLeer ? ` · OJO: ${c.sinLeer} clip(s) sin medio legible` : ""),
+      recorrida: true, nombre: String(hallado.name), enUso: enUso1, clips: c.clips, sinLeer: c.sinLeer
     };
   }
 
@@ -12390,20 +12474,8 @@ async function usoDeMedios(params) {
     const sq = seqs[i];
     let n = 0, propio = null;
     try { propio = await idDe(await sq.getProjectItem()); } catch (e) { propio = null; }
-    for (const [cuantas, pistaDe] of [[await sq.getVideoTrackCount(), (t) => sq.getVideoTrack(t)], [await sq.getAudioTrackCount(), (t) => sq.getAudioTrack(t)]]) {
-      for (let t = 0; t < cuantas; t++) {
-        const tr = await pistaDe(t);
-        const its = tr ? await tr.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) : [];
-        for (let k = 0; k < its.length; k++) {
-          if (!its[k]) { sinLeer++; continue; }
-          n++;
-          let id = null;
-          try { const pi = await its[k].getProjectItem(); id = pi ? await idDe(pi) : null; } catch (e) { id = null; }
-          if (id === null) { sinLeer++; continue; }
-          enUso[id] = (enUso[id] || 0) + 1;
-        }
-      }
-    }
+    const c = await clipsDeSecuencia(sq, enUso, idDe);
+    n = c.clips; sinLeer += c.sinLeer;
     clips += n;
     vistas.push({ nombre: String(sq.name), id: propio, clips: n });
   }
@@ -15134,7 +15206,7 @@ const PARAMS_DE = {
   catalogo: ["buscar", "transiciones"],
   agregarEfecto: ["efecto", "indice", "nombre", "pista"],
   medios: ["buscar"],
-  usoDeMedios: ["desdeSecuencia", "limite", "listar"],
+  usoDeMedios: ["desdeSecuencia", "limite", "listar", "deItem"],
   insertar: ["medio", "pista", "pistaAudio", "segundos", "sinAudio"],
   secuencias: ["nombre"],
   borrar: ["dejarHueco", "indice", "nombre", "pista", "vinculados"],

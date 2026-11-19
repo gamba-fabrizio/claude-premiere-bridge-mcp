@@ -27,6 +27,8 @@
 - **Verificar en un verbo de tanda no puede costar lecturas de valor.** → «En un verbo de TANDA»
 - **`borrar` rebota desde el 6º borrado en 60 s**, y barrer una pista con solapes tiró Premiere.
   → «La guarda contra el BARRIDO», «4. `borrar` sobre una pista con SOLAPES»
+- **`borrar` informa aparte lo que Premiere tiene seleccionado DESPUÉS** (`seleccionReal`), leído con una
+  consulta nueva y no del objeto que se acaba de escribir (2026-11-19). → «`borrar` dice qué tiene seleccionado»
 - **Recargar el plugin con su `setInterval` vivo crasheaba**: el panel se desarma en
   `beforeunload`. → «5. Recargar el plugin»
 - **Premiere se cae por lo ACUMULADO en la sesión**, no por el ritmo ni por un verbo, y el punto varía
@@ -513,3 +515,14 @@ y a 11 s por vuelta, y el transporte con un `ps` y un reloj de mentira, con muta
 **Lo que queda.** Con huecos de 20 s, a la espera de 25 s le queda poco margen, y un App Nap más profundo no se
 midió con el panel nuevo: si pasa de 25 s, el error ahora dice qué es. Un protector de pantalla tapa todo, así
 que probablemente frene igual; no se midió.
+
+## `borrar` dice qué tiene seleccionado Premiere DESPUÉS (2026-11-19)
+
+Un crash en la edición siguiente a un `borrar` llegó con `seleccionVaciada: true` de 0,8 s antes. Ese veredicto
+salía de releer el MISMO objeto de selección que se acababa de vaciar: la verificación simétrica, que se confirma
+sola. Ahora, después de la espera entre transacciones, se pide una selección NUEVA a la secuencia y lo que trae se
+informa aparte (`seleccionReal`), sin cambiar el veredicto viejo, del que dependen los colocadores. Medido con
+Selection Follows Playhead prendido en tres situaciones —playhead en vacío, sobre otro clip, y sobre el clip que se
+borra—: las tres vacías de verdad. No explica aquel crash, que sigue sin causa; sirve para que el próximo traiga
+el dato real.
+

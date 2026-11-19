@@ -450,8 +450,29 @@ con audio, uno sin, un multicanal de seis streams, los dos rebotes y un audio so
 La API no expone el uso de un medio, pero sí `getProjectItem()` en cada clip y `getId()` en cada ítem, y los ids
 coinciden —medido, 36 de 36—. `usoDeMedios` sólo lee y contesta por tandas; `premiere_sin_uso` une las tandas y
 resta, y rebota si no puede comparar los ids: un falso «sin uso» termina en un medio borrado. No ve lo que sólo
-es fuente de un subclip, de un multicámara o de un clip fusionado, y lo avisa siempre. No se midió en un proyecto
-pesado, y el verbo que SACA medios no se construyó: es destructivo y falta medir qué hace con uno en uso.
+es fuente de un clip fusionado, y lo avisa siempre. No se midió en un proyecto pesado, y el verbo que SACA medios
+no se construyó: es destructivo y falta medir qué hace con uno en uso.
+
+**Con subclips (2026-11-19).** Un subclip en el timeline se reconoce como en uso, pero su FUENTE seguía figurando
+sin uso: son dos ítems del panel y lo único que los une es la ruta del archivo. Sacar ese ítem del proyecto no
+rompe el subclip; borrar el archivo sí. `usoDeMedios` trae ahora la ruta de cada hoja y `premiere_sin_uso` aparta
+en `comparteArchivo` lo que no está en ninguna secuencia pero comparte archivo con algo que sí, nombrando con
+quién; cubre también un archivo importado dos veces. Las rutas se comparan en NFC. La primera versión emparejó dos
+capas de ajuste distintas: un sintético no trae ruta sino un código, el mismo en todas, así que sólo cuenta lo que
+es una ruta de verdad.
+
+**Con multicámara (2026-11-19), por los dos caminos.** Anidando una secuencia y habilitando Multi-Camera no hay
+nada especial: es una secuencia común. Con «Create Multi-Camera Source Sequence» sobre dos medios del bin, Premiere
+crea un ítem que para `isSequence` es una secuencia y NO está en `getSequences()`: nadie lo recorría y sus cámaras
+figuraban sin uso. Se llega por `ClipProjectItem.getSequence()`: `usoDeMedios` tiene un modo `deItem` que recorre
+una secuencia desde su ítem del panel, y `premiere_sin_uso` lo pide para cada secuencia del panel que las tandas
+no trajeron. La que no se deja recorrer se nombra (`sinRecorrer`) y vuelve dudoso el resultado.
+
+## `bins` contaba como movidos los que ya estaban (2026-11-19)
+
+Pidiendo varios medios con algunos ya en el bin decía «movidos 3 de 3»: `moverABin` devuelve lo que QUEDÓ adentro
+y el resumen lo leía como lo que se movió. Ahora dice cuántos no hubo que mover y los descuenta: «movidos 1 de 2
+pedidos (1 ya estaba)».
 
 ## El audio de una capa `sinAudio` recortada quedaba sonando (2026-11-19)
 

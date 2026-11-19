@@ -1893,6 +1893,26 @@ if (!cuerpoMover) {
 }
 
 /*
+ * `bins` decía «movidos 3 de 3» con dos que ya estaban en el bin (2026-11-19): `movidos` es lo que QUEDÓ
+ * adentro, y el resumen lo contaba como lo que se movió.
+ */
+{
+  const sinCom = (t) => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const mov = cuerpoMover ? sinCom(cuerpoMover[0]) : "";
+  const iBins = srcComandos.indexOf("async function bins(");
+  const cuerpoBins = iBins === -1 ? "" : sinCom(srcComandos.slice(iBins, srcComandos.indexOf("\nasync function ", iBins + 10)));
+  if (!/yaAdentro\s*:\s*items\.length\s*-\s*pendientes\.length/.test(mov)) {
+    mal("`moverABin` no dice cuántos de los pedidos ya estaban en el bin (`yaAdentro`)",
+        "sin eso `bins` cuenta como movidos los que no tocó");
+  } else if (!/resultado\.movidos\.length\s*-\s*\(resultado\.yaAdentro/.test(cuerpoBins)) {
+    mal("el resumen de `bins` no descuenta los que ya estaban adentro",
+        "dice «movidos 3 de 3» habiendo movido uno");
+  } else {
+    ok("`bins` descuenta de los movidos los que ya estaban en el bin, y dice cuántos eran");
+  }
+}
+
+/*
  * Las acciones de bins se CREAN adentro de `lockedAccess`, no afuera.
  *
  * Creándolas afuera, `createBinAction` y `createMoveItemAction` contestan
@@ -5114,9 +5134,8 @@ titulo("Todo borrado de clips por dentro vacía la selección, salvo lo anotado"
  * regla se pagó en un verbo y llegó tarde a los otros. Toda función que borra clips llama a
  * `vaciarSeleccion`, o está anotada con la prueba de que vacía por su cuenta.
  */
-const BORRAN_ANOTADOS = {
-  borrar: [/seleccionVaciada\s*=\s*\(await seleccion\.getTrackItems\(\)\)\.length === 0/, "vacía con su propio código —el medido, que `vaciarSeleccion` copió— y lo informa en `seleccionVaciada`"],
-};
+/* `borrar` salió de acá el 2026-11-19: tenía el cuerpo de `vaciarSeleccion` copiado a mano, y ahora la llama. */
+const BORRAN_ANOTADOS = {};
 function borranSinVaciar(src) {
   const B = blanquear(src), fns = funcionesDe(B);
   const out = {};
@@ -7861,6 +7880,7 @@ titulo("`premiere_sin_uso`: une las tandas, y no concluye nada si no puede compa
       { id: "s2", nombre: "Anidada", bin: "(raíz)", esSecuencia: true }, { id: null, nombre: "raro", bin: "(raíz)", esSecuencia: false }];
     const mundo = (tandas) => async (p) => {
       if (p.listar) return { hojas: hojas, saltados: 0 };
+      if (p.deItem !== undefined) return { recorrida: true, enUso: {}, clips: 0, sinLeer: 0 };
       const i = tandas.findIndex((t) => t.desde === p.desdeSecuencia);
       return i === -1 ? { enUso: {}, secuencias: [], clips: 0, sinLeer: 0, total: 0, siguiente: null } : tandas[i].r;
     };
@@ -7870,7 +7890,30 @@ titulo("`premiere_sin_uso`: une las tandas, y no concluye nada si no puede compa
       const bien = await sinUsoDe(mundo([T(0, { a: 2, s2: 1 }, 3, 4), T(4, { c: 1 }, 1, null)]));
       const vacio = await sinUsoDe(mundo([T(0, {}, 0, null)]));
       const dudoso = await sinUsoDe(mundo([T(0, { a: 1, b: 1, c: 1 }, 4, null, 1)]));
-      console.log(JSON.stringify({ bien: bien, vacio: vacio, dudoso: dudoso,
+      // Un subclip en el timeline y su fuente afuera: mismo archivo, la ruta de uno en NFD y la del otro en NFC.
+      const conRuta = [{ id: "f", nombre: "Fuente.mov", bin: "(raíz)", esSecuencia: false, ruta: "/m/cancio\u0301n.mov" },
+        { id: "u", nombre: "Sub 2-4", bin: "(raíz)", esSecuencia: false, ruta: "/m/canci\u00f3n.mov" },
+        { id: "l", nombre: "Libre.mov", bin: "(raíz)", esSecuencia: false, ruta: "/m/libre.mov" },
+        { id: "n", nombre: "SinRuta.mov", bin: "(raíz)", esSecuencia: false, ruta: null },
+        // Dos capas de ajuste DISTINTAS traen el mismo código en lugar de una ruta: no son un mismo archivo.
+        { id: "j1", nombre: "Ajuste usada", bin: "(raíz)", esSecuencia: false, ruta: "1112293707" },
+        { id: "j2", nombre: "Ajuste libre", bin: "(raíz)", esSecuencia: false, ruta: "1112293707" }];
+      const sub = await sinUsoDe(async (p) => p.listar ? { hojas: conRuta, saltados: 0 }
+        : { enUso: { u: 1, j1: 1 }, secuencias: [{ nombre: "s", clips: 2 }], clips: 2, sinLeer: 0, total: 1, siguiente: null });
+      // La fuente de un multicámara es una secuencia del panel que getSequences no trae: se pide por su ítem. Una
+      // se deja leer y usa a Cam.mov; la otra no, y lo que usa no se puede dar por sobrante en silencio.
+      const conMulti = [{ id: "cam", nombre: "Cam.mov", bin: "(raíz)", esSecuencia: false, ruta: "/m/cam.mov" },
+        { id: "otro", nombre: "Otro.mov", bin: "(raíz)", esSecuencia: false, ruta: "/m/otro.mov" },
+        { id: "sq", nombre: "Corte", bin: "(raíz)", esSecuencia: true }, { id: "mc", nombre: "CamMulticam", bin: "(raíz)", esSecuencia: true },
+        { id: "mx", nombre: "Rota", bin: "(raíz)", esSecuencia: true }];
+      const pedidos = [];
+      const multi = await sinUsoDe(async (p) => {
+        if (p.listar) return { hojas: conMulti, saltados: 0 };
+        if (p.deItem !== undefined) { pedidos.push(p.deItem); return p.deItem === "mc" ? { recorrida: true, enUso: { cam: 2 }, clips: 2, sinLeer: 0 } : { recorrida: false, enUso: {}, clips: 0, sinLeer: 0 }; }
+        return { enUso: { mc: 1 }, secuencias: [{ nombre: "Corte", id: "sq", clips: 1 }], clips: 1, sinLeer: 0, total: 1, siguiente: null };
+      });
+      multi.pedidos = pedidos;
+      console.log(JSON.stringify({ bien: bien, vacio: vacio, dudoso: dudoso, sub: sub, multi: multi,
         idsAjenos: await tira(() => sinUsoDe(mundo([T(0, { zz: 5 }, 5, null)]))),
         sinMedio: await tira(() => sinUsoDe(mundo([T(0, {}, 7, null, 7)]))),
         noAvanza: await tira(() => sinUsoDe(mundo([T(0, { a: 1 }, 1, 0)]))) }));
@@ -7891,12 +7934,22 @@ titulo("`premiere_sin_uso`: une las tandas, y no concluye nada si no puede compa
     mal("`sinUsoDe` no corta una tanda que no avanza", "le pediría lo mismo al panel quinientas veces antes de frenar: " + r.noAvanza);
   } else if (nombres(r.vacio) !== "A.mov,B.mov,C.wav" || !r.dudoso.dudoso || !/PUEDE estar en uso/.test(r.dudoso.resumen)) {
     mal("`sinUsoDe` rechaza un proyecto sin clips, o calla que hubo clips sin leer", JSON.stringify({ vacio: nombres(r.vacio), dudoso: r.dudoso.dudoso }));
-  } else if (!/NO ve lo que sólo es FUENTE de un subclip/.test(r.bien.resumen)) {
-    mal("el resumen de `premiere_sin_uso` no avisa lo que la API no ve", "la fuente de un subclip o de un multicámara figura sin uso y no lo está");
+  } else if (!/NO ve lo que sólo es FUENTE de un clip fusionado/.test(r.bien.resumen)) {
+    mal("el resumen de `premiere_sin_uso` no avisa lo que la API no ve", "la fuente de un clip fusionado figura sin uso y no lo está");
+  } else if (nombres(r.multi) !== "Otro.mov" || r.multi.pedidos.join() !== "mc,mx" || r.multi.leidasPorItem.join() !== "CamMulticam" || r.multi.sinRecorrer.join() !== "Rota" ||
+             r.multi.dudoso !== true || r.multi.clips !== 3 || !/NO SE PUDIERON RECORRER: Rota/.test(r.multi.resumen) || !/params\.deItem/.test(panel) || !/getSequence\(\)/.test(panel)) {
+    mal("`premiere_sin_uso` no recorre la fuente de un multicámara, o calla la secuencia del panel que no pudo leer",
+      "medido el 2026-11-19: «Create Multi-Camera Source Sequence» deja una secuencia que `getSequences` no trae, y sus cámaras figuraban sin uso. " +
+      JSON.stringify({ sinUso: nombres(r.multi), pedidos: r.multi.pedidos, porItem: r.multi.leidasPorItem, sinRecorrer: r.multi.sinRecorrer, dudoso: r.multi.dudoso, clips: r.multi.clips }));
+  } else if (nombres(r.sub) !== "Libre.mov,SinRuta.mov,Ajuste libre" || (r.sub.comparteArchivo || []).map((m) => m.nombre + ">" + m.enUsoComo.join()).join() !== "Fuente.mov>Sub 2-4" ||
+             r.sub.sinRuta !== 1 || !/el archivo NO se borra/.test(r.sub.resumen) || !/sin ruta legible/.test(r.sub.resumen) || !/\bruta\s*:\s*archivo\b/.test(panel)) {
+    mal("`premiere_sin_uso` da por sobrante la FUENTE de un subclip que está en uso, o no separa lo que comparte archivo",
+      "medido el 2026-11-19: con el subclip en el timeline la fuente figuraba sin uso, y borrar ese archivo rompe el subclip. " +
+      JSON.stringify({ sinUso: nombres(r.sub), comparte: r.sub.comparteArchivo, sinRuta: r.sub.sinRuta }));
   } else if (!panel || /transaccion\(|create\w+Action\(|executeTransaction|getStartValue|getValueAtTime/.test(panel)) {
     mal("`usoDeMedios` escribe o lee valores de params", "es un verbo de solo lectura: dos lecturas por clip, el medio y su id");
   } else {
-    ok("`premiere_sin_uso` une las tandas, deja afuera las secuencias, y rebota si no puede comparar los ids");
+    ok("`premiere_sin_uso` une las tandas, deja afuera las secuencias, rebota si no puede comparar los ids, y aparta lo que comparte archivo con algo en uso");
   }
 }
 
@@ -9011,9 +9064,19 @@ if (!cuerpoBorrar) {
   const desnudo = cb ? cb.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "")
     .replace(/"(?:[^"\\]|\\.)*"/g, '""').replace(/`(?:[^`\\]|\\.)*`/g, "``") : "";
   const iBorrado = desnudo.indexOf("const despues = await contarPista();");
-  const iQuita = desnudo.search(/seleccion\.removeItem\(it\)/);
-  const iFija = desnudo.search(/await sequence\.setSelection\(seleccion\)/);
+  /* Desde el 2026-11-19 `borrar` vacía con `vaciarSeleccion` —tenía su cuerpo copiado a mano—, que es donde se
+     mira que saque los items y fije la selección (más arriba). Acá, que la llame en su lugar, y que informe además
+     lo que Premiere tiene seleccionado DESPUÉS, leído con un `getSelection()` nuevo y sin cambiar el veredicto. */
+  const iQuita = desnudo.search(/await vaciarSeleccion\(sequence, seleccion, \[encontrado\.clip, \.\.\.vinculados\]\)/);
+  const iFija = iQuita;
   const iResumen = desnudo.indexOf("return {");
+  const vacD = (cuerpoDeFuncion(srcComandos, "async function vaciarSeleccion(") || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const iEspera = vacD.indexOf("await esperarEntreTx();"), iFresca = vacD.search(/const fresca = await sequence\.getSelection\(\);/);
+  if (iFresca === -1 || iEspera === -1 || iFresca < iEspera || !/return quedo;/.test(vacD) || /quedo = [^;]*fresca/.test(vacD) ||
+      !/seleccionReal: seleccionReal,/.test(desnudo)) {
+    mal("`vaciarSeleccion` no lee la selección REAL de Premiere después de la espera, o la mezcla con el veredicto",
+      "releer el objeto que se escribió no dice qué tiene Premiere; y con Selection Follows Playhead «no vacía» es lo normal: no puede cambiar `seleccionVaciada`");
+  }
   if (!cb || iBorrado === -1 || iResumen === -1) {
     mal("no se encontró `borrar` o su borrado para revisar la selección");
   } else if (iQuita === -1 || iFija === -1) {
@@ -9041,7 +9104,7 @@ if (!cuerpoBorrar) {
  * versión de mentira donde las primeras formas tiran, son siete pasos y una sola transacción que sacó algo.
  */
 {
-  const fuentes = ["async function borrar(", "async function ubicarClip(", "async function buscarVinculados(", "async function sociosDe(",
+  const fuentes = ["async function borrar(", "async function vaciarSeleccion(", "async function ubicarClip(", "async function buscarVinculados(", "async function sociosDe(",
     "async function contarItems(", "async function enLotes("].map((f) => cuerpoDeFuncion(srcComandos, f));
   const desnudoB = fuentes[0] ? fuentes[0].replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "")
     .replace(/"(?:[^"\\]|\\.)*"/g, '""').replace(/`(?:[^`\\]|\\.)*`/g, "``") : "";
@@ -9112,7 +9175,7 @@ if (!cuerpoBorrar) {
     catch (e) { return { error: String(e.message || e).slice(0, 300) }; }
   })();
   const { normal: n, videoBloqueado: vb, audioConVideoBloqueado: ab, nadaSale: ns, otraVersion: ov } = casos;
-  const iFija = desnudoB.search(/await sequence\.setSelection\(seleccion\)/), iRebota = desnudoB.indexOf("if (despues >= antes)");
+  const iFija = desnudoB.search(/await vaciarSeleccion\(sequence, seleccion,/), iRebota = desnudoB.indexOf("if (despues >= antes)");
   if (casos.error || [n, ab].some((x) => x && x.error)) {
     mal("el `borrar` de mentira no se pudo ejecutar", casos.error || (n.error || ab.error));
   } else if (n.tx !== 1 || n.cmdZ !== 1 || !/UN Cmd\+Z/.test(n.resumen) || /OJO/.test(n.resumen) || n.quedan !== "1,1,1") {

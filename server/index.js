@@ -792,8 +792,11 @@ server.registerTool(
       "Lista los medios del panel que no aparecen en NINGUNA secuencia. Sólo LEE: no saca ni mueve nada. " +
       "Recorre las secuencias por tandas, así que en un proyecto grande tarda. Es lo que hay en Premiere AHORA, " +
       "guardado o no.\n\n" +
-      "NO ve lo que sólo es FUENTE de un subclip, de un multicámara o de un clip fusionado: figura sin uso y no lo " +
-      "está. Antes de sacar algo de la lista, miralo. Para sacarlos: moverlos a un bin con premiere_bins —por " +
+      "Lo que no está en ninguna secuencia pero comparte ARCHIVO con algo que sí —la fuente de un subclip, una " +
+      "copia del mismo archivo— va aparte, en `comparteArchivo`: se puede sacar del proyecto, pero el archivo NO se " +
+      "borra del disco. La fuente de un multicámara creado en el panel se lee desde su ítem; si alguna secuencia del " +
+      "panel no se deja recorrer, la NOMBRA y lo que sólo usa ella figura sin uso sin estarlo. NO ve lo que sólo es " +
+      "FUENTE de un clip fusionado. Antes de sacar algo de la lista, miralo. Para sacarlos: moverlos a un bin con premiere_bins —por " +
       "nombre EXACTO—, releer, y borrar el bin.\n\n" +
       "No necesita secuencia activa.",
     inputSchema: soloEstas({
